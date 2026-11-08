@@ -49,7 +49,7 @@ MESSAGES = {
     "ERR_SUBAGENT_CONTEXT_INVALID": "The subagent work record is incomplete and cannot be resumed",
     "ERR_SUBAGENT_CALL_CONFLICT": "A tool call cannot submit different subagent operations more than once",
     "ERR_SUBAGENT_CANCELLED": "Subagent work was cancelled. Operations already started may have taken effect",
-    "MSG_SUBAGENT_SUBMITTED": "Subagent work was submitted. This conversation will continue automatically when it finishes",
+    "MSG_SUBAGENT_SUBMITTED": "Subagent work has been submitted. You can continue with other work; use wait when you need to wait for the result",
     "TOOL_EXECUTE_SHELL_LABEL": "Execute Shell",
     "TOOL_FILE_TOOL_LABEL": "File Operations",
     "TOOL_WEB_LABEL": "Web Search and Scrape",

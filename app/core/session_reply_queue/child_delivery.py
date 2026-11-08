@@ -322,7 +322,7 @@ async def acknowledge_queried_child_results(
                 _invalid_context()
             continue
 
-        if call.parent_work_id != parent.id or call.delivered is not False or not isinstance(call.tool_call_id, str) or not call.tool_call_id.strip() or not isinstance(call.arguments, dict) or call.arguments.get("operation") not in {"create", "send_message"} or not _is_positive_int(call.tool_result_message_id):
+        if call.parent_work_id != parent.id or call.delivered is not False or not isinstance(call.tool_call_id, str) or not call.tool_call_id.strip() or not isinstance(call.arguments, dict) or call.arguments.get("operation") not in {"create", "send_message", "wait"} or not _is_positive_int(call.tool_result_message_id):
             _invalid_context()
 
         subagent = await subagent_crud.get_scoped(
@@ -424,6 +424,7 @@ async def resume_child_work_for_parent(
         parent = work
 
         state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
+        parent_was_waiting = work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
         child_slots = state.get("child_work_waits")
         if not isinstance(child_slots, list) or not child_slots:
             await db.rollback()
@@ -478,6 +479,7 @@ async def resume_child_work_for_parent(
                 _invalid_context()
             validated_slots.append((slot, call, subagent, round_row))
 
+        pending_wait_call_ids = {call.tool_call_id for _slot, call, _subagent, _round_row in validated_slots if call.delivered is False and isinstance(call.arguments, dict) and call.arguments.get("operation") == "wait"}
         has_new_result = False
         for _slot, call, _subagent, round_row in validated_slots:
             if isinstance(round_row.result, dict) and call.delivered is False:
@@ -513,6 +515,7 @@ async def resume_child_work_for_parent(
 
         remaining_slots: list[dict[str, Any]] = []
         delivered_child_work_ids: list[int] = []
+        delivered_wait_result = False
         is_live_parent = not isinstance(state.get("frozen_context_message_ids"), list)
         checkpoint_message_ids = {message.id for message in messages if _is_positive_int(message.id)}
         message_work_id_loaded = False
@@ -536,6 +539,8 @@ async def resume_child_work_for_parent(
                 messages=messages,
                 turn_messages=turn_messages,
             )
+            if call.tool_call_id in pending_wait_call_ids:
+                delivered_wait_result = True
             if is_live_parent or needs_resume_message:
                 resume_message = _build_resume_message(
                     call_id=call_id,
@@ -582,6 +587,19 @@ async def resume_child_work_for_parent(
         state.pop("child_work_waits", None)
         if remaining_slots:
             state["child_work_waits"] = remaining_slots
+
+        if parent_was_waiting and not delivered_wait_result:
+            if not await external_work_crud.update_waiting_state(
+                db,
+                work_id=parent_work_id,
+                execution_state=state,
+                commit=False,
+            ):
+                await db.rollback()
+                return False
+            await reply_work_crud.save_checkpoint(db, parent_work_id, checkpoint)
+            await db.commit()
+            return False
 
         if work.status == SessionReplyWorkStatus.READY_FOR_LLM:
             if not await external_work_crud.update_active_reply(

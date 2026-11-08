@@ -107,6 +107,7 @@ async def load_current_terminal_watch_snapshot(
     uid: str,
     session_id: str,
     profile_id: int,
+    message_work_id: int | None = None,
 ) -> str | None:
     if not isinstance(db, AsyncSession):
         return None
@@ -119,6 +120,7 @@ async def load_current_terminal_watch_snapshot(
             uid=uid,
             session_id=session_id,
             profile_id=profile_id,
+            message_work_id=message_work_id,
         )
     except OperationalError as exc:
         error_message = str(exc).lower()

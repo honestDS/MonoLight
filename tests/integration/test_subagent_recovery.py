@@ -62,15 +62,16 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
                 tool_calls=[InternalToolCall(id="recovery-create-call", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "create", "name": "文件写入恢复", "message": child_instruction})],
             )
         )
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="主代理已提交子任务并继续"))
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={"session_id": runtime.session_id, "request_id": "subagent-recovery-create", "message": "Create the independent child task."},
         )
         assert accepted.status_code == 200
         parent_work_id = accepted.json()["data"]["work_id"]
-        parent_waiting = await runtime.run_next()
-        assert parent_waiting is not None and parent_waiting.id == parent_work_id
-        assert parent_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        parent_submitted = await runtime.run_next()
+        assert parent_submitted is not None and parent_submitted.id == parent_work_id
+        assert parent_submitted.status == SessionReplyWorkStatus.SUCCEEDED
 
         async with runtime.factory() as db:
             child = await _child_for_parent(db, parent_work_id)
@@ -156,15 +157,16 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
         query_old = InternalToolCall(id="recovery-query-old", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "query", "subagent_id": subagent_id, "work_id": child_work_id})
         send_call = InternalToolCall(id="recovery-send-message", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "send_message", "subagent_id": subagent_id, "message": "继续上次任务并报告恢复结果。"})
         runtime.outputs.extend([InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[query_latest, query_old]), InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[send_call])])
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="主代理已提交恢复消息并继续"))
         new_accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={"session_id": runtime.session_id, "request_id": "subagent-recovery-new-parent", "message": "查询旧子轮后继续同一个子代理。"},
         )
         assert new_accepted.status_code == 200
         new_parent_work_id = new_accepted.json()["data"]["work_id"]
-        new_parent_waiting = await runtime.run_next()
-        assert new_parent_waiting is not None and new_parent_waiting.id == new_parent_work_id
-        assert new_parent_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        new_parent_replied = await runtime.run_next()
+        assert new_parent_replied is not None and new_parent_replied.id == new_parent_work_id
+        assert new_parent_replied.status == SessionReplyWorkStatus.SUCCEEDED
 
         async with runtime.factory() as db:
             result_rows = (await db.execute(select(Message).where(Message.role == MessageRole.TOOL, Message.type == MessageType.TOOL_RESULT))).scalars().all()
@@ -530,7 +532,7 @@ async def test_interrupted_mixed_child_and_image_wait_recovers_without_losing_im
 
 
 @pytest.mark.parametrize("operation", ["create", "send_message"], ids=["second-create", "second-send-message"])
-@pytest.mark.parametrize("interruption_point", ["save_tool_response", "suspend_claimed"], ids=["before-result-save", "before-suspend"])
+@pytest.mark.parametrize("interruption_point", ["before-result-save", "after-result-save"])
 @pytest.mark.asyncio
 async def test_interrupted_second_subagent_round_after_external_resume_recovers_without_replaying(
     image_chat_runtime,
@@ -539,7 +541,6 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
     interruption_point: str,
 ) -> None:
     import app.core.dispatchers.interactive_tools as interactive_tools_module
-    from app.core.crud.session.external_work import external_work_crud
 
     first_instruction = "Complete the first independent child round and return its unique first summary."
     first_summary = "second-round-recovery-first-summary"
@@ -561,6 +562,7 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
             arguments={"operation": "create", "name": "独立初始任务", "message": first_instruction},
         )
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[first_create_call]))
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="second-round-initial-parent-confirmation"))
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -572,9 +574,9 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
         assert accepted.status_code == 200
         parent_work_id = accepted.json()["data"]["work_id"]
 
-        first_waiting = await runtime.run_next(independent_only=False)
-        assert first_waiting is not None and first_waiting.id == parent_work_id
-        assert first_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        first_submitted = await runtime.run_next(independent_only=False)
+        assert first_submitted is not None and first_submitted.id == parent_work_id
+        assert first_submitted.status == SessionReplyWorkStatus.SUCCEEDED
 
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=first_summary))
         first_child_done = await runtime.run_next(independent_only=True)
@@ -610,41 +612,37 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[second_model_call]))
 
         interrupted = False
-        if interruption_point == "save_tool_response":
-            original_save_tool_response = interactive_tools_module.save_tool_response
+        saved_second_result_id: int | None = None
+        second_provider_start = len(runtime.provider_payloads)
+        original_save_tool_response = interactive_tools_module.save_tool_response
 
-            async def interrupt_queued_child_result(*args, **kwargs):
-                nonlocal interrupted
-                tool_result = kwargs.get("tool_res")
-                if tool_result is None and len(args) > 4:
-                    tool_result = args[4]
-                try:
-                    payload = json.loads(tool_result.content or "{}")
-                except (AttributeError, TypeError, ValueError):
-                    payload = None
-                if isinstance(payload, dict) and payload.get("status") == "queued" and payload.get("child_work_id") is not None:
-                    interrupted = True
-                    raise asyncio.CancelledError("interrupted before second queued child result save")
-                return await original_save_tool_response(*args, **kwargs)
-
-            patch_target = interrupt_queued_child_result
-        else:
-
-            async def interrupt_suspend_claimed(*args, **kwargs):
-                nonlocal interrupted
+        async def interrupt_queued_child_result(*args, **kwargs):
+            nonlocal interrupted, saved_second_result_id
+            db = args[0] if args else kwargs["db"]
+            tool_result = kwargs.get("tool_res")
+            if tool_result is None and len(args) > 4:
+                tool_result = args[4]
+            try:
+                payload = json.loads(tool_result.content or "{}")
+            except (AttributeError, TypeError, ValueError):
+                payload = None
+            claim = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+            claimed_work_id = claim[0] if isinstance(claim, (tuple, list)) and len(claim) == 2 else None
+            target_result = not interrupted and claimed_work_id == parent_work_id and isinstance(payload, dict) and payload.get("status") == "queued" and payload.get("operation") == operation and payload.get("child_work_id") is not None
+            if target_result:
+                if interruption_point == "after-result-save":
+                    saved_result = await original_save_tool_response(*args, **kwargs)
+                    saved_second_result_id = saved_result.id
                 interrupted = True
-                raise asyncio.CancelledError("interrupted before second external wait registration")
-
-            patch_target = None
+                raise asyncio.CancelledError("interrupted around second queued child result save")
+            return await original_save_tool_response(*args, **kwargs)
 
         with monkeypatch.context() as patch:
-            if interruption_point == "save_tool_response":
-                patch.setattr(interactive_tools_module, "save_tool_response", patch_target)
-            else:
-                patch.setattr(external_work_crud, "suspend_claimed", interrupt_suspend_claimed)
+            patch.setattr(interactive_tools_module, "save_tool_response", interrupt_queued_child_result)
             with pytest.raises(asyncio.CancelledError):
                 await runtime.run_next(independent_only=False)
         assert interrupted
+        assert len(runtime.provider_payloads) == second_provider_start + 1
         provider_payload_count = len(runtime.provider_payloads)
 
         async with runtime.factory() as db:
@@ -685,15 +683,32 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
 
         await SessionReplyConsumer()._recover_expired()
         assert not runtime.outputs
-        recovered_waiting = await runtime.run_next(independent_only=False)
-        assert recovered_waiting is not None and recovered_waiting.id == parent_work_id
-        assert recovered_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
-        assert not runtime.outputs
         assert len(runtime.provider_payloads) == provider_payload_count
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="second-round-recovery-parent-confirmation"))
+        recovery_provider_start = len(runtime.provider_payloads)
+        recovered_parent = await runtime.run_next(independent_only=False)
+        assert recovered_parent is not None and recovered_parent.id == parent_work_id
+        assert recovered_parent.status == SessionReplyWorkStatus.SUCCEEDED
+        assert not runtime.outputs
+        assert len(runtime.provider_payloads) == recovery_provider_start + 1
+        recovery_input = runtime.provider_payloads[recovery_provider_start]["input"]
+        recovered_outputs = []
+        for item in recovery_input:
+            if item.get("type") != "function_call_output":
+                continue
+            try:
+                output_payload = json.loads(item.get("output") or "{}")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(output_payload, dict) and output_payload.get("status") == "queued":
+                recovered_outputs.append(output_payload)
+        assert len(recovered_outputs) == 1
+        assert recovered_outputs[0]["operation"] == operation
+        assert recovered_outputs[0]["child_work_id"] == second_child_work_id
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
-            assert parent is not None and parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+            assert parent is not None and parent.status == SessionReplyWorkStatus.SUCCEEDED
             assert len((await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK, SessionReplyWorkItem.source_type == SessionReplySourceType.PARENT_WORK, SessionReplyWorkItem.source_id == str(parent_work_id)))).scalars().all()) == 2
             assert len((await db.execute(select(SubagentWork).where(SubagentWork.child_work_id.in_([first_child_work_id, second_child_work_id])))).scalars().all()) == 2
             calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id).order_by(SubagentToolCall.id))).scalars().all()
@@ -726,6 +741,9 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
             assert second_result_row.id == calls[1].tool_result_message_id
             assert second_result_payload["status"] == "queued"
             assert second_result_payload["child_work_id"] == second_child_work_id
+            assert (saved_second_result_id is not None) is (interruption_point == "after-result-save")
+            if saved_second_result_id is not None:
+                assert second_result_row.id == saved_second_result_id
 
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=second_summary))
         second_child_done = await runtime.run_next(independent_only=True)
@@ -744,6 +762,7 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
         parent_done = await runtime.run_next(independent_only=False)
         assert parent_done is not None and parent_done.id == parent_work_id
         assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+        assert len(runtime.provider_payloads[parent_provider_start:]) == 1
         parent_request_dump = json.dumps(runtime.provider_payloads[parent_provider_start:], ensure_ascii=False)
         assert first_summary in parent_request_dump
         assert second_summary in parent_request_dump
@@ -794,15 +813,14 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
                 assert result_payload["work"]["result"]["content"] == expected_summary
 
 
-@pytest.mark.parametrize("interruption_point", ["save_tool_response", "suspend_claimed"], ids=["before-c-result-save", "before-c-suspend"])
+@pytest.mark.parametrize("interruption_point", ["before-result-save", "after-result-save"], ids=["before-c-result-save", "after-c-result-save"])
 @pytest.mark.asyncio
-async def test_interrupted_parent_create_preserves_registered_child_wait_without_replaying_children(
+async def test_interrupted_parent_create_preserves_registered_child_delivery_without_replaying_children(
     image_chat_runtime,
     monkeypatch: pytest.MonkeyPatch,
     interruption_point: str,
 ) -> None:
     import app.core.dispatchers.interactive_tools as interactive_tools_module
-    from app.core.crud.session.external_work import external_work_crud
 
     first_instruction = "Complete child A independently and return its unique summary."
     second_instruction = "Complete child B independently and return its unique summary."
@@ -831,24 +849,25 @@ async def test_interrupted_parent_create_preserves_registered_child_wait_without
             arguments={"operation": "create", "name": "并行方案分析", "message": second_instruction},
         )
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[first_create_call, second_create_call]))
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="multi-child-recovery-parent-initial"))
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
                 "session_id": runtime.session_id,
                 "request_id": "multi-child-recovery-initial-request",
-                "message": "Create child A and child B, then wait for both.",
+                "message": "Create child A and child B, then continue with the parent reply.",
             },
         )
         assert accepted.status_code == 200
         parent_work_id = accepted.json()["data"]["work_id"]
 
-        initial_waiting = await runtime.run_next(independent_only=False)
-        assert initial_waiting is not None and initial_waiting.id == parent_work_id
-        assert initial_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        initial_done = await runtime.run_next(independent_only=False)
+        assert initial_done is not None and initial_done.id == parent_work_id
+        assert initial_done.status == SessionReplyWorkStatus.SUCCEEDED
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
-            assert parent is not None
+            assert parent is not None and parent.status == SessionReplyWorkStatus.SUCCEEDED
             children = (
                 (
                     await db.execute(
@@ -876,6 +895,7 @@ async def test_interrupted_parent_create_preserves_registered_child_wait_without
             }
             call_by_child_id = {call.child_work_id: call for call in calls}
             assert set(call_by_child_id) == {child_a_work_id, child_b_work_id}
+            assert all(call.delivered is False and call.tool_result_message_id is not None for call in calls)
             rounds = (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id.in_([child_a_work_id, child_b_work_id])))).scalars().all()
             assert len(rounds) == 2
             waits = parent.execution_state.get("child_work_waits")
@@ -900,6 +920,7 @@ async def test_interrupted_parent_create_preserves_registered_child_wait_without
             assert {call.child_work_id for call in calls if call.delivered} == {child_a_work_id}
             assert {call.child_work_id for call in calls if not call.delivered} == {child_b_work_id}
             b_call = next(call for call in calls if call.child_work_id == child_b_work_id)
+            b_call_id = b_call.tool_call_id
             assert b_call.tool_result_message_id is not None
             b_result_message_id = b_call.tool_result_message_id
 
@@ -911,38 +932,31 @@ async def test_interrupted_parent_create_preserves_registered_child_wait_without
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[third_create_call]))
         provider_count_before_c = len(runtime.provider_payloads)
         interrupted = False
-        if interruption_point == "save_tool_response":
-            original_save_tool_response = interactive_tools_module.save_tool_response
+        saved_c_result_id: int | None = None
+        original_save_tool_response = interactive_tools_module.save_tool_response
 
-            async def interrupt_c_queued_result(*args, **kwargs):
-                nonlocal interrupted
-                tool_result = kwargs.get("tool_res")
-                if tool_result is None and len(args) > 4:
-                    tool_result = args[4]
-                try:
-                    payload = json.loads(tool_result.content or "{}")
-                except (AttributeError, TypeError, ValueError):
-                    payload = None
-                if isinstance(payload, dict) and payload.get("status") == "queued" and payload.get("operation") == "create":
-                    interrupted = True
-                    raise asyncio.CancelledError("interrupted before child C queued result save")
-                return await original_save_tool_response(*args, **kwargs)
-
-            with monkeypatch.context() as patch:
-                patch.setattr(interactive_tools_module, "save_tool_response", interrupt_c_queued_result)
-                with pytest.raises(asyncio.CancelledError):
-                    await runtime.run_next(independent_only=False)
-        else:
-
-            async def interrupt_parent_suspend(*args, **kwargs):
-                nonlocal interrupted
+        async def interrupt_c_queued_result(*args, **kwargs):
+            nonlocal interrupted, saved_c_result_id
+            tool_result = kwargs.get("tool_res")
+            if tool_result is None and len(args) > 4:
+                tool_result = args[4]
+            try:
+                payload = json.loads(tool_result.content or "{}")
+            except (AttributeError, TypeError, ValueError):
+                payload = None
+            target_result = isinstance(payload, dict) and payload.get("status") == "queued" and payload.get("operation") == "create" and payload.get("child_work_id") is not None
+            if target_result:
+                if interruption_point == "after-result-save":
+                    saved_result = await original_save_tool_response(*args, **kwargs)
+                    saved_c_result_id = saved_result.id
                 interrupted = True
-                raise asyncio.CancelledError("interrupted before child C wait registration")
+                raise asyncio.CancelledError("interrupted around child C queued result save")
+            return await original_save_tool_response(*args, **kwargs)
 
-            with monkeypatch.context() as patch:
-                patch.setattr(external_work_crud, "suspend_claimed", interrupt_parent_suspend)
-                with pytest.raises(asyncio.CancelledError):
-                    await runtime.run_next(independent_only=False)
+        with monkeypatch.context() as patch:
+            patch.setattr(interactive_tools_module, "save_tool_response", interrupt_c_queued_result)
+            with pytest.raises(asyncio.CancelledError):
+                await runtime.run_next(independent_only=False)
         assert interrupted
         assert len(runtime.provider_payloads) == provider_count_before_c + 1
 
@@ -970,6 +984,7 @@ async def test_interrupted_parent_create_preserves_registered_child_wait_without
             c_call = next(call for call in calls if call.arguments == third_create_call.arguments)
             assert c_call.child_work_id is not None and c_call.child_work_id not in {child_a_work_id, child_b_work_id}
             child_c_work_id = c_call.child_work_id
+            c_call_id = c_call.tool_call_id
             assert {child.id for child in children} == {child_a_work_id, child_b_work_id, child_c_work_id}
             rounds = (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id.in_([child_a_work_id, child_b_work_id, child_c_work_id])))).scalars().all()
             assert len(rounds) == 3
@@ -993,15 +1008,29 @@ async def test_interrupted_parent_create_preserves_registered_child_wait_without
         await SessionReplyConsumer()._recover_expired()
         assert not runtime.outputs
         provider_count_after_recovery = len(runtime.provider_payloads)
-        recovered_waiting = await runtime.run_next(independent_only=False)
-        assert recovered_waiting is not None and recovered_waiting.id == parent_work_id
-        assert recovered_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="multi-child-recovery-parent-after-recover"))
+        recovered_done = await runtime.run_next(independent_only=False)
+        assert recovered_done is not None and recovered_done.id == parent_work_id
+        assert recovered_done.status == SessionReplyWorkStatus.SUCCEEDED
         assert not runtime.outputs
-        assert len(runtime.provider_payloads) == provider_count_after_recovery
+        assert len(runtime.provider_payloads) == provider_count_after_recovery + 1
+        recovery_input = runtime.provider_payloads[provider_count_after_recovery]["input"]
+        queued_outputs = []
+        for item in recovery_input:
+            if item.get("type") != "function_call_output":
+                continue
+            try:
+                output_payload = json.loads(item.get("output") or "{}")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(output_payload, dict) and output_payload.get("status") == "queued":
+                queued_outputs.append((item.get("call_id"), output_payload))
+        assert sum(call_id == c_call_id and payload.get("child_work_id") == child_c_work_id for call_id, payload in queued_outputs) == 1
+        assert sum(call_id == b_call_id and payload.get("child_work_id") == child_b_work_id for call_id, payload in queued_outputs) == 1
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
-            assert parent is not None and parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+            assert parent is not None and parent.status == SessionReplyWorkStatus.SUCCEEDED
             children = (
                 (
                     await db.execute(
@@ -1024,6 +1053,11 @@ async def test_interrupted_parent_create_preserves_registered_child_wait_without
             assert isinstance(waits, list) and {slot.get("child_work_id") for slot in waits if isinstance(slot, dict)} == {child_b_work_id, child_c_work_id}
             b_wait = next(slot for slot in waits if isinstance(slot, dict) and slot.get("child_work_id") == child_b_work_id)
             assert b_wait["tool_result_message_id"] == b_result_message_id
+            c_wait = next(slot for slot in waits if isinstance(slot, dict) and slot.get("child_work_id") == child_c_work_id)
+            assert c_wait["tool_result_message_id"] is not None
+            if interruption_point == "after-result-save":
+                assert saved_c_result_id is not None
+                assert c_wait["tool_result_message_id"] == saved_c_result_id
             assert {call.child_work_id for call in calls if call.delivered} == {child_a_work_id}
             assert {call.child_work_id for call in calls if not call.delivered} == {child_b_work_id, child_c_work_id}
             assert all(call.tool_result_message_id is not None for call in calls)

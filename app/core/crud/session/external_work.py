@@ -306,50 +306,23 @@ class CRUDExternalWork:
             .execution_options(synchronize_session=False)
         )
 
-    async def suspend_claimed(
+    async def register_child_tools(
         self,
         db: AsyncSession,
         *,
         work: SessionReplyWorkItem,
-        worker_id: str,
-        pending_tools: list[dict],
-        commit: bool = True,
-    ) -> bool:
-        state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
-        state.pop("external_results", None)
-        state.pop("completed_task_ids", None)
-        state.pop("external_resume_context", None)
-        existing_message_ids = state.get("external_tool_result_message_ids")
-        message_ids = list(existing_message_ids) if isinstance(existing_message_ids, list) else []
-        message_ids.extend(pending_tool.get("tool_result_message_id") for pending_tool in pending_tools if isinstance(pending_tool, dict))
-        external_tool_result_message_ids: list[int] = []
-        seen_message_ids: set[int] = set()
-        for message_id in message_ids:
-            if isinstance(message_id, int) and not isinstance(message_id, bool) and message_id > 0 and message_id not in seen_message_ids:
-                seen_message_ids.add(message_id)
-                external_tool_result_message_ids.append(message_id)
-        state["external_tool_result_message_ids"] = external_tool_result_message_ids
-
-        terminal_watch_slots: list[dict] = []
-        subagent_slots: list[dict] = []
-        current_pending_tools: list[dict] = []
-        for slot in pending_tools:
-            if slot.get("child_work_id") is not None and slot.get("tool_name") == AGENT_WORK_TOOL_NAME:
-                subagent_slots.append(slot)
-            elif slot.get("terminal_watch") is True or slot.get("tool_name") == TERMINAL_WATCH_TOOL_NAME:
-                terminal_watch_slots.append(slot)
-            else:
-                current_pending_tools.append(slot)
-
+        execution_state: dict,
+        slots: list[dict],
+    ) -> None:
         child_work_waits_by_key: dict[tuple[Any, Any], dict] = {}
-        previous_child_work_waits = state.get("child_work_waits")
+        previous_child_work_waits = execution_state.get("child_work_waits")
         if isinstance(previous_child_work_waits, list):
             for slot in previous_child_work_waits:
                 if isinstance(slot, dict):
                     key = (slot.get("child_work_id"), slot.get("tool_call_id"))
                     child_work_waits_by_key[key] = slot
 
-        for slot in subagent_slots:
+        for slot in slots:
             child_work_id = slot.get("child_work_id")
             tool_call_id = slot.get("tool_call_id")
             tool_result_message_id = slot.get("tool_result_message_id")
@@ -390,6 +363,48 @@ class CRUDExternalWork:
             key = (slot["child_work_id"], slot["tool_call_id"])
             child_work_waits_by_key[key] = slot
 
+        if child_work_waits_by_key:
+            execution_state["child_work_waits"] = list(child_work_waits_by_key.values())
+        else:
+            execution_state.pop("child_work_waits", None)
+
+    async def suspend_claimed(
+        self,
+        db: AsyncSession,
+        *,
+        work: SessionReplyWorkItem,
+        worker_id: str,
+        pending_tools: list[dict],
+        commit: bool = True,
+    ) -> bool:
+        state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
+        state.pop("external_results", None)
+        state.pop("completed_task_ids", None)
+        state.pop("external_resume_context", None)
+        existing_message_ids = state.get("external_tool_result_message_ids")
+        message_ids = list(existing_message_ids) if isinstance(existing_message_ids, list) else []
+        message_ids.extend(pending_tool.get("tool_result_message_id") for pending_tool in pending_tools if isinstance(pending_tool, dict))
+        external_tool_result_message_ids: list[int] = []
+        seen_message_ids: set[int] = set()
+        for message_id in message_ids:
+            if isinstance(message_id, int) and not isinstance(message_id, bool) and message_id > 0 and message_id not in seen_message_ids:
+                seen_message_ids.add(message_id)
+                external_tool_result_message_ids.append(message_id)
+        state["external_tool_result_message_ids"] = external_tool_result_message_ids
+
+        terminal_watch_slots: list[dict] = []
+        subagent_slots: list[dict] = []
+        current_pending_tools: list[dict] = []
+        for slot in pending_tools:
+            if slot.get("child_work_id") is not None and slot.get("tool_name") == AGENT_WORK_TOOL_NAME:
+                subagent_slots.append(slot)
+            elif slot.get("terminal_watch") is True or slot.get("tool_name") == TERMINAL_WATCH_TOOL_NAME:
+                terminal_watch_slots.append(slot)
+            else:
+                current_pending_tools.append(slot)
+
+        await self.register_child_tools(db, work=work, execution_state=state, slots=subagent_slots)
+
         pending_tools_by_task_id: dict[Any, dict] = {}
         previous_pending_tools = state.get("pending_tools")
         if isinstance(previous_pending_tools, list):
@@ -421,10 +436,6 @@ class CRUDExternalWork:
 
         state["terminal_watch_waits"] = terminal_watch_waits
         state["pending_tools"] = pending_tool_waits
-        if child_work_waits_by_key:
-            state["child_work_waits"] = list(child_work_waits_by_key.values())
-        else:
-            state.pop("child_work_waits", None)
         state["external_resume_pending"] = False
         state.pop("resume_trigger_message_id", None)
 

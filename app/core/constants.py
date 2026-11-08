@@ -738,7 +738,7 @@ TOOL_WORKFLOW_POLICIES = {
         SEND_FILE_TO_USER_TOOL_NAME: {},
         MANAGE_BACKGROUND_TASKS_TOOL_NAME: {"operation": ("list", "cancel")},
         MANAGE_SCHEDULED_TASKS_TOOL_NAME: {"operation": ("create", "list", "delete")},
-        AGENT_WORK_TOOL_NAME: {"operation": ("create", "list", "query", "send_message", "cancel")},
+        AGENT_WORK_TOOL_NAME: {"operation": ("create", "list", "query", "wait", "send_message", "cancel")},
         READ_MULTIMODAL_FILE_TOOL_NAME: {},
         IMAGE_GENERATION_TOOL_NAME: {},
         KNOWLEDGE_BASE_QUERY_TOOL_NAME: {},
@@ -784,10 +784,13 @@ TOOL_WORKFLOW_POLICIES = {
     TOOL_WORKFLOW_SUBAGENT: {
         END_SESSION_TOOL_NAME: {},
         SKILL_TOOL_NAME: {"operation": ("list", "browse")},
+        SHELL_TOOL_NAME: {"execution_mode": ("non_interactive", "interactive")},
         FILE_TOOL_NAME: {"operation": ("read", "write", "edit", "patch", "grep")},
         WEB_TOOL_NAME: {"operation": ("search", "scrape")},
         READ_MULTIMODAL_FILE_TOOL_NAME: {},
         KNOWLEDGE_BASE_QUERY_TOOL_NAME: {},
+        TERMINAL_TOOL_NAME: {"operation": TERMINAL_TOOL_OPERATIONS},
+        TERMINAL_WATCH_TOOL_NAME: {},
     },
     TOOL_WORKFLOW_BACKGROUND_PROACTIVE: {
         SEND_FILE_TO_USER_TOOL_NAME: {},

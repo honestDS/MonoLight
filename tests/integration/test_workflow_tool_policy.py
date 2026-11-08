@@ -30,8 +30,8 @@ WORKFLOW_CASES = [
     pytest.param(C.TOOL_WORKFLOW_SCHEDULED_TASK, (BUILTINS - {C.MANAGE_TODO_TOOL_NAME}) | (CONFIGURED - {C.MANAGE_SCHEDULED_TASKS_TOOL_NAME}), {C.MANAGE_TODO_TOOL_NAME, C.MANAGE_SCHEDULED_TASKS_TOOL_NAME}, id="scheduled"),
     pytest.param(
         C.TOOL_WORKFLOW_SUBAGENT,
-        {C.END_SESSION_TOOL_NAME, C.SKILL_TOOL_NAME, C.FILE_TOOL_NAME, C.WEB_TOOL_NAME, C.READ_MULTIMODAL_FILE_TOOL_NAME},
-        SHELL_TOOLS | {C.MANAGE_TODO_TOOL_NAME, C.MANAGE_SCHEDULED_TASKS_TOOL_NAME, C.MANAGE_BACKGROUND_TASKS_TOOL_NAME, C.SEND_FILE_TO_USER_TOOL_NAME, C.MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME},
+        {C.END_SESSION_TOOL_NAME, C.SKILL_TOOL_NAME, C.FILE_TOOL_NAME, C.WEB_TOOL_NAME, C.READ_MULTIMODAL_FILE_TOOL_NAME} | SHELL_TOOLS,
+        {C.MANAGE_TODO_TOOL_NAME, C.MANAGE_SCHEDULED_TASKS_TOOL_NAME, C.MANAGE_BACKGROUND_TASKS_TOOL_NAME, C.SEND_FILE_TO_USER_TOOL_NAME, C.MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME},
         id="subagent",
     ),
     pytest.param(C.TOOL_WORKFLOW_BACKGROUND_PROACTIVE, {C.SEND_FILE_TO_USER_TOOL_NAME}, BUILTINS | (CONFIGURED - {C.SEND_FILE_TO_USER_TOOL_NAME}) | {C.MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME}, id="background-without-kb"),
@@ -165,18 +165,38 @@ async def test_file_tool_rejects_run_in_background_from_complete_schema(workflow
 
 
 @pytest.mark.asyncio
+async def test_subagent_shell_companions_follow_profile_policy_and_prevalidate(workflow_db, tmp_path: Path) -> None:
+    profile, cfg = _profile(tmp_path, enabled_tools=[*ENABLED_TOOLS, C.AGENT_WORK_TOOL_NAME])
+    tools, _ = await get_tools_for_profile(workflow_db, profile, tool_workflow=C.TOOL_WORKFLOW_SUBAGENT)
+    names = _names(tools)
+
+    assert SHELL_TOOLS <= names
+    assert C.AGENT_WORK_TOOL_NAME not in names
+    assert set(_schema(tools, C.SHELL_TOOL_NAME)["function"]["parameters"]["properties"]["execution_mode"]["enum"]) == {"non_interactive", "interactive"}
+    assert set(_schema(tools, C.TERMINAL_TOOL_NAME)["function"]["parameters"]["properties"]["operation"]["enum"]) == set(C.TERMINAL_TOOL_OPERATIONS)
+
+    for execution_mode in ("non_interactive", "interactive"):
+        call = _call(f"subagent-shell-{execution_mode}", C.SHELL_TOOL_NAME, {"command": "echo prevalidation-only", "execution_mode": execution_mode})
+        assert prevalidate_tool_round([call], cfg, tool_schemas=tools, tool_workflow=C.TOOL_WORKFLOW_SUBAGENT) == {}
+
+    disabled_profile, _ = _profile(tmp_path, enabled_tools=[name for name in ENABLED_TOOLS if name != C.SHELL_TOOL_NAME])
+    disabled_tools, _ = await get_tools_for_profile(workflow_db, disabled_profile, tool_workflow=C.TOOL_WORKFLOW_SUBAGENT)
+    assert _names(disabled_tools).isdisjoint(SHELL_TOOLS)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("workflow", "tool_name", "profile_file_enabled", "empty_schemas"),
+    ("workflow", "tool_name", "profile_tool_enabled", "empty_schemas"),
     [
-        pytest.param(C.TOOL_WORKFLOW_SUBAGENT, C.SHELL_TOOL_NAME, True, False, id="subagent-shell"),
+        pytest.param(C.TOOL_WORKFLOW_SUBAGENT, C.SHELL_TOOL_NAME, False, False, id="profile-shell-disabled"),
         pytest.param(C.TOOL_WORKFLOW_BACKGROUND_PROACTIVE, C.SHELL_TOOL_NAME, True, False, id="background-shell"),
         pytest.param(C.TOOL_WORKFLOW_BACKGROUND_PROACTIVE, C.FILE_TOOL_NAME, True, False, id="background-file"),
         pytest.param(C.TOOL_WORKFLOW_SUBAGENT, C.FILE_TOOL_NAME, False, False, id="profile-file-disabled"),
         pytest.param(C.TOOL_WORKFLOW_FOREGROUND, C.FILE_TOOL_NAME, True, True, id="empty-tool-schemas"),
     ],
 )
-async def test_forbidden_workflow_or_profile_blocks_before_execution(workflow_db, tmp_path: Path, workflow: str, tool_name: str, profile_file_enabled: bool, empty_schemas: bool) -> None:
-    enabled = [name for name in ENABLED_TOOLS if profile_file_enabled or name != C.FILE_TOOL_NAME]
+async def test_forbidden_workflow_or_profile_blocks_before_execution(workflow_db, tmp_path: Path, workflow: str, tool_name: str, profile_tool_enabled: bool, empty_schemas: bool) -> None:
+    enabled = [name for name in ENABLED_TOOLS if profile_tool_enabled or name != tool_name]
     profile, cfg = _profile(tmp_path, enabled_tools=enabled)
     target = tmp_path / "protected.txt"
     target.write_text("stable\n", encoding="utf-8")

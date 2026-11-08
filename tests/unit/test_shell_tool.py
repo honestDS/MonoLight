@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sys
 import sysconfig
@@ -6,7 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 import app.core.tools.shell as shell_module
-from app.core.constants import ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED
+from app.core.constants import (
+    ERR_TOOL_COMMAND_TIMEOUT,
+    ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED,
+)
 from app.core.dispatchers.context import DispatchContext
 from app.core.i18n import t
 from app.core.terminal import (
@@ -17,6 +21,7 @@ from app.core.terminal import (
     TerminalSessionSnapshot,
     TerminalSessionStatus,
 )
+from app.core.terminal.recovery import TerminalProcessCleanupResult
 from app.core.tools.shell import SHELL_TOOL_SCHEMA, ShellExecutor
 from app.models.profile import Profile, ProfileConfig
 
@@ -91,6 +96,87 @@ async def test_execute_command_receives_closed_stdin(monkeypatch, tmp_path):
     assert result["exit_code"] == 0
     assert result["stdout"].strip() == "0"
     assert result["stderr"] == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity_state", ["missing", "unmatched"])
+@pytest.mark.parametrize("interruption", ["cancel", "timeout"])
+async def test_execute_non_interactive_does_not_kill_pid_without_confirmed_identity(
+    monkeypatch,
+    tmp_path,
+    identity_state,
+    interruption,
+):
+    communicate_started = asyncio.Event()
+    communicate_never_finishes = asyncio.Event()
+    unrelated_process = SimpleNamespace(alive=True)
+
+    class FakeProcess(asyncio.subprocess.Process):
+        pid = 4242
+        returncode = None
+
+        def __init__(self):
+            pass
+
+        async def communicate(self):
+            communicate_started.set()
+            await communicate_never_finishes.wait()
+            return b"", b""
+
+        def kill(self):
+            unrelated_process.alive = False
+
+        async def wait(self):
+            self.returncode = 0
+            return self.returncode
+
+    process = FakeProcess()
+
+    async def fake_create_subprocess(*args, **kwargs):
+        return process
+
+    async def fake_capture_process_identity(pid):
+        if identity_state == "missing":
+            return None
+        return {"root_pid": pid, "root_create_time": 1.0}
+
+    async def fake_cleanup_process_identity(identity):
+        return TerminalProcessCleanupResult((), (), ())
+
+    profile_timeout = 5.0 if interruption == "cancel" else 0.1
+    executor = ShellExecutor(project_root=str(tmp_path), uid="u1")
+
+    async def fake_get_profile_timeout():
+        return profile_timeout
+
+    monkeypatch.setattr(shell_module, "sys", SimpleNamespace(platform="linux", executable=sys.executable))
+    monkeypatch.setattr(shell_module, "PROCESS_WAIT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(shell_module, "get_full_system_context", lambda: "test-system")
+    monkeypatch.setattr(shell_module.asyncio, "create_subprocess_shell", fake_create_subprocess)
+    monkeypatch.setattr(shell_module, "capture_terminal_process_identity", fake_capture_process_identity)
+    monkeypatch.setattr(shell_module, "cleanup_terminal_process_identity", fake_cleanup_process_identity)
+    monkeypatch.setattr(executor, "_get_profile_timeout", fake_get_profile_timeout)
+
+    execution_task = asyncio.create_task(executor.execute("echo waiting", execution_mode="non_interactive"))
+    try:
+        await asyncio.wait_for(communicate_started.wait(), timeout=2)
+
+        if interruption == "cancel":
+            execution_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(execution_task, timeout=2)
+        else:
+            result = json.loads(await asyncio.wait_for(execution_task, timeout=2))
+            assert result == {
+                "error": t(ERR_TOOL_COMMAND_TIMEOUT, timeout=profile_timeout),
+                "system_info": "test-system",
+            }
+    finally:
+        if not execution_task.done():
+            execution_task.cancel()
+        await asyncio.wait_for(asyncio.gather(execution_task, return_exceptions=True), timeout=2)
+
+    assert unrelated_process.alive
 
 
 def test_python_inline_command_detection_skips_shell_composition(tmp_path):

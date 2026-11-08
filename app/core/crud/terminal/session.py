@@ -94,6 +94,30 @@ class CRUDTerminalSession:
         )
         return list(result.scalars().all())
 
+    async def list_by_tool_calls(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        tool_call_ids: list[str],
+    ) -> list[TerminalSession]:
+        if not tool_call_ids:
+            return []
+        result = await db.execute(
+            select(TerminalSession)
+            .where(
+                TerminalSession.uid == uid,
+                TerminalSession.session_id == session_id,
+                TerminalSession.profile_id == profile_id,
+                TerminalSession.original_tool_call_id.in_(tool_call_ids),
+            )
+            .order_by(TerminalSession.terminal_session_id.asc())
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
     async def delete_by_chat_session(
         self,
         db: AsyncSession,

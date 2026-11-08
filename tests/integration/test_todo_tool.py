@@ -40,6 +40,7 @@ from app.models.background_task import BackgroundTask, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
+from app.models.session_reply_work_item import SessionReplyWorkItem
 from app.models.session_todo import SessionTodoPlan
 from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
@@ -58,6 +59,12 @@ async def db_session(database_factory) -> AsyncGenerator[AsyncSession]:
             await connection.execute(
                 CreateTable(
                     Message.__table__,
+                    include_foreign_key_constraints=[],
+                )
+            )
+            await connection.execute(
+                CreateTable(
+                    SessionReplyWorkItem.__table__,
                     include_foreign_key_constraints=[],
                 )
             )

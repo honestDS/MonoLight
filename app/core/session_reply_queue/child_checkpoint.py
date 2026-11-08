@@ -5,12 +5,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit.confirmation_results import replace_pending_tool_result
 from app.core.constants import AGENT_WORK_TOOL_NAME, ERR_SUBAGENT_CONTEXT_INVALID
+from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
 from app.core.crud.session.subagent import subagent_crud
 from app.core.exceptions import ParameterException
 from app.core.session_reply_queue.child_work import build_subagent_queued_result
 from app.core.utils.dispatcher.save_message import save_message
+from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
+from app.core.utils.dispatcher.terminal_watch_snapshot import strip_terminal_watch_snapshot
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem
 from app.models.subagent import SubagentToolCall
@@ -74,6 +77,16 @@ def _put_group_result(messages: list[InternalMessage], assistant_id: int, call_i
         messages.insert(end, result.model_copy(deep=True))
 
 
+def _tail_tool_group(messages: list[InternalMessage]) -> tuple[InternalMessage, list[InternalMessage]] | None:
+    assistant_index = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].role == MessageRole.ASSISTANT), None)
+    if assistant_index is None:
+        return None
+    tool_messages = messages[assistant_index + 1 :]
+    if any(message.role != MessageRole.TOOL for message in tool_messages):
+        return None
+    return messages[assistant_index], tool_messages
+
+
 def _row_result(row: Message) -> InternalMessage:
     try:
         result = InternalMessage.model_validate_json(row.content or "{}")
@@ -133,11 +146,11 @@ async def _recover_result(db: AsyncSession, work: SessionReplyWorkItem, call: Su
     if result.tool_call_id != call.tool_call_id:
         _bad()
     try:
-        payload = json.loads(result.content or "{}")
+        payload = json.loads(strip_session_todo_snapshot(strip_terminal_watch_snapshot(result.content)) or "{}")
     except (TypeError, ValueError):
         _bad()
     if payload.get("status") == "queued":
-        if payload.get("child_work_id") != call.child_work_id or payload.get("subagent_id") != call.subagent_id:
+        if payload.get("operation") != call.arguments.get("operation") or payload.get("child_work_id") != call.child_work_id or payload.get("subagent_id") != call.subagent_id:
             _bad()
         return result
     if result.tool_execution_status != "execution_unknown" and payload.get("status") != "execution_unknown":
@@ -154,14 +167,12 @@ async def recover_child_work_wait(db: AsyncSession, *, work: SessionReplyWorkIte
         return None
     execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
     child_work_waits = execution_state.get("child_work_waits")
+    registered_call_keys: set[tuple[object, object, object]] = set()
     if isinstance(child_work_waits, list):
-        registered_call_keys: set[tuple[object, object, object]] = set()
         for slot in child_work_waits:
             if isinstance(slot, dict):
-                registered_call_keys.add((slot.get("child_work_id"), slot.get("tool_call_id"), slot.get("tool_result_message_id")))
-        calls = [call for call in calls if (call.child_work_id, call.tool_call_id, call.tool_result_message_id) not in registered_call_keys]
-    if not calls:
-        return None
+                key = (slot.get("child_work_id"), slot.get("tool_call_id"), slot.get("tool_result_message_id"))
+                registered_call_keys.add(key)
 
     await ensure_session_reply_work_claim(db)
     checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
@@ -169,13 +180,14 @@ async def recover_child_work_wait(db: AsyncSession, *, work: SessionReplyWorkIte
         _bad()
     messages = _messages(checkpoint["messages"])
     turn_messages = _messages(checkpoint["turn_messages"]) if "turn_messages" in checkpoint else None
+    recover_calls = [call for call in calls if (call.child_work_id, call.tool_call_id, call.tool_result_message_id) not in registered_call_keys]
+
     message_work_id = await session_reply_work_item_crud.get_message_work_id(db, work)
-    pending_tools: list[dict] = []
-    assistant_ids: set[int] = set()
+    recovered_slots: list[dict] = []
     turn_changed = False
 
-    for call in calls:
-        if call.parent_work_id != work.id or call.delivered is not False or not isinstance(call.tool_call_id, str) or not isinstance(call.arguments, dict) or not _valid_id(call.id):
+    for call in recover_calls:
+        if call.parent_work_id != work.id or call.delivered is not False or not isinstance(call.tool_call_id, str) or not call.tool_call_id.strip() or not isinstance(call.arguments, dict) or call.arguments.get("operation") not in {"create", "send_message", "wait"} or not _valid_id(call.id):
             _bad()
         matches = [(assistant, tool_call) for assistant in messages if assistant.role == MessageRole.ASSISTANT for tool_call in assistant.tool_calls or [] if tool_call.id == call.tool_call_id and tool_call.name == AGENT_WORK_TOOL_NAME and tool_call.arguments == call.arguments]
         if len(matches) != 1:
@@ -183,7 +195,6 @@ async def recover_child_work_wait(db: AsyncSession, *, work: SessionReplyWorkIte
         assistant_internal, _ = matches[0]
         if not _valid_id(assistant_internal.id):
             _bad()
-        assistant_ids.add(assistant_internal.id)
         assistant = await message_crud.get(db, assistant_internal.id)
         if assistant is None or assistant.uid != work.uid or assistant.session_id != work.session_id or assistant.profile_id != work.profile_id or assistant.role != MessageRole.ASSISTANT or assistant.type != MessageType.TOOL_CALL:
             _bad()
@@ -202,45 +213,60 @@ async def recover_child_work_wait(db: AsyncSession, *, work: SessionReplyWorkIte
         call.tool_result_message_id = result.id
         call.response_id = call.response_id or None
         db.add(call)
-        pending_tools.append({"child_work_id": call.child_work_id, "subagent_id": call.subagent_id, "tool_call_id": call.tool_call_id, "tool_name": AGENT_WORK_TOOL_NAME, "tool_result_message_id": result.id, "response_id": call.response_id})
+        recovered_slots.append({"child_work_id": call.child_work_id, "subagent_id": call.subagent_id, "tool_call_id": call.tool_call_id, "tool_name": AGENT_WORK_TOOL_NAME, "tool_result_message_id": result.id, "response_id": call.response_id})
 
     new_checkpoint = deepcopy(checkpoint)
-    new_checkpoint["messages"] = [item.model_dump(mode="json", exclude_none=True) for item in messages]
-    if turn_messages is not None and turn_changed:
-        new_checkpoint["turn_messages"] = [item.model_dump(mode="json", exclude_none=True) for item in turn_messages]
-    claimed = await session_reply_work_item_crud.update_claimed(db, work_id=work.id, worker_id=worker_id, values={}, checkpoint=new_checkpoint, commit=False)
-    if not claimed:
-        await db.rollback()
+    new_execution_state = dict(execution_state)
+    if recover_calls:
+        new_checkpoint["messages"] = [item.model_dump(mode="json", exclude_none=True) for item in messages]
+        if turn_messages is not None and turn_changed:
+            new_checkpoint["turn_messages"] = [item.model_dump(mode="json", exclude_none=True) for item in turn_messages]
+        await external_work_crud.register_child_tools(
+            db,
+            work=work,
+            execution_state=new_execution_state,
+            slots=recovered_slots,
+        )
+        claimed = await session_reply_work_item_crud.update_claimed(
+            db,
+            work_id=work.id,
+            worker_id=worker_id,
+            values={"execution_state": new_execution_state},
+            checkpoint=new_checkpoint,
+            commit=False,
+        )
+        if not claimed:
+            await db.rollback()
+            return None
+        await db.commit()
+        work.execution_state = new_execution_state
+
+    if checkpoint.get("reload_history") is True:
         return None
-    await db.commit()
+
+    tail_group = _tail_tool_group(_messages(new_checkpoint["messages"]))
+    if tail_group is None:
+        return None
+    tail_assistant, _ = tail_group
+    tail_child_call_ids = {call.tool_call_id for call in calls if any(tool_call.id == call.tool_call_id and tool_call.name == AGENT_WORK_TOOL_NAME and tool_call.arguments == call.arguments for tool_call in tail_assistant.tool_calls or [])}
+    if not tail_child_call_ids:
+        return None
+
     from app.core.session_reply_queue.executor_resume import restore_interactive_tool_replies
     from app.core.utils.dispatcher.external_work import build_terminal_wait_response
 
     restored_checkpoint = await restore_interactive_tool_replies(db, work=work, worker_id=worker_id, checkpoint=new_checkpoint)
     restored_messages = _messages(restored_checkpoint["messages"])
-    tool_calls = []
-    tool_results = []
-    collecting = False
-    for message in restored_messages:
-        if message.role == MessageRole.ASSISTANT:
-            collecting = message.id in assistant_ids
-            if collecting:
-                tool_calls.extend(message.tool_calls or [])
-        elif collecting:
-            if message.role == MessageRole.TOOL:
-                tool_results.append(message)
-            else:
-                collecting = False
+    restored_tail_group = _tail_tool_group(restored_messages)
+    if restored_tail_group is None:
+        return None
+    restored_assistant, tool_results = restored_tail_group
     external_wait = await build_terminal_wait_response(
         db,
         uid=work.uid,
         session_id=work.session_id,
         profile_id=work.profile_id,
-        tool_calls=tool_calls,
+        tool_calls=restored_assistant.tool_calls or [],
         tool_results=tool_results,
     )
-    if external_wait is not None:
-        for pending_tool in external_wait["pending_tools"]:
-            if "child_work_id" not in pending_tool:
-                pending_tools.append(pending_tool)
-    return {"status": "waiting_external_work", "pending_tools": pending_tools}
+    return external_wait

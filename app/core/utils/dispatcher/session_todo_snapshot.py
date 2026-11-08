@@ -181,16 +181,19 @@ async def persist_session_todo_snapshot_on_tool_results(
         return None
 
     if stored.model_context_suffix is None:
-        todo_snapshot = await load_current_session_todo_snapshot(
-            db,
-            uid=uid,
-            session_id=session_id,
-        )
+        todo_snapshot = None
+        if stored.work_id is None:
+            todo_snapshot = await load_current_session_todo_snapshot(
+                db,
+                uid=uid,
+                session_id=session_id,
+            )
         watch_snapshot = await terminal_watch_snapshot.load_current_terminal_watch_snapshot(
             db,
             uid=uid,
             session_id=session_id,
             profile_id=stored.profile_id,
+            message_work_id=stored.work_id,
         )
         suffix = "\n\n".join(snapshot for snapshot in (todo_snapshot, watch_snapshot) if snapshot)
         await message_crud.update_model_context_suffix(

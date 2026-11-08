@@ -1,4 +1,5 @@
 from app.core.constants import (
+    AGENT_WORK_TOOL_NAME,
     END_SESSION_TOOL_NAME,
     FILE_TOOL_NAME,
     KNOWLEDGE_BASE_QUERY_TOOL_NAME,
@@ -424,6 +425,19 @@ When a tool is needed, invoke it through the structured tool-call mechanism only
 If the needed tool is not available, answer in natural language using only the information already available, and clearly state any limitation.
 The final response body must be user-facing prose or results only; it must not contain raw tool-call payloads, function-call JSON, internal arguments, or hidden execution plans.
 """
+
+SUBAGENT_DELEGATION_SYSTEM_PROMPT = f"""[Subagent delegation guidance]
+When {AGENT_WORK_TOOL_NAME} is available and permitted, prioritize delegating independent deliverables for broad investigation, large amounts of material, verification across multiple sources, comparing options, independent checks, or isolated context. Delegate early rather than completing the whole task first, and do not skip delegation merely because you could do the work yourself. Handle a simple lookup or single read directly. Do not blindly parallelize work that depends on a prerequisite result.
+
+  After create or send_message is accepted, it returns immediately and the primary agent continues its own work; neither call implicitly suspends or waits. Independent tasks may be submitted in the same round when useful, but same-round submission is optional and must not be required to avoid an automatic pause. Reuse the same subagent with send_message for dependent follow-up work. Give each subagent a self-contained goal, relevant background, constraints, authorization, expected deliverable, and evidence requirements: it has isolated context and does not inherit parent history. A subagent may use {SHELL_TOOL_NAME} or the interactive {TERMINAL_TOOL_NAME} only when the current Profile enables it and the tool is actually provided in that execution; when available, it remains subject to the current directory policy, audit/confirmation requirements, and other execution restrictions. Do not expand authorization, have agents write the same file concurrently, or ask a subagent to create nested agents.
+
+  Use query or list only to check progress; they return immediately and do not wait. Use explicit wait when you need final task results; it pauses only when the requested result is not complete, and the system resumes the primary agent when the task completes, fails, or is canceled. If the result is already complete, wait returns without pausing. Multiple waits can be issued in the same round. This includes tasks created by other replies and waiting for remaining tasks after partial results. Do not poll with query or list, or use Shell sleep, while waiting for completion. The main agent must verify and synthesize subagent results; never claim unverified work was performed.
+
+Examples:
+- Parallel: create separate agents in one round to compare options and independently verify key claims.
+- Direct or sequential: read one named file yourself; if a follow-up depends on an agent's finding, send_message after that result instead of launching it prematurely.
+- Progress or result: query/list once to report status now; wait for completion, including multiple tasks together, when final results are needed.
+[End subagent delegation guidance]"""
 
 SUBAGENT_EXECUTION_GUIDANCE_PROMPT = f"""You are an independent subagent executing work to deliver a result to a parent task. Only self-contained instructions, your own history, and later messages addressed to you are available; do not treat content invisible from the parent session as evidence.
 Perform only work covered by the original authorization and use only tools actually provided in this execution. Follow the current Profile directory policy and audit-confirmation requirements. Do not create subagents.

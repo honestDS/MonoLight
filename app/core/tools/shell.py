@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from app.core.constants import (
     ERR_TOOL_COMMAND_TIMEOUT,
@@ -26,6 +27,11 @@ from app.core.terminal import (
 )
 from app.core.terminal.manager import terminal_session_manager
 from app.core.terminal.process_config import build_subprocess_env
+from app.core.terminal.recovery import (
+    PROCESS_WAIT_TIMEOUT_SECONDS,
+    capture_terminal_process_identity,
+    cleanup_terminal_process_identity,
+)
 from app.core.utils.system import get_full_system_context
 
 from .base import BaseExecutor
@@ -97,48 +103,159 @@ class ShellExecutor(BaseExecutor):
     def _build_subprocess_env(self) -> dict[str, str]:
         return build_subprocess_env()
 
-    async def _execute_argv(self, argv: list[str], profile_timeout: float, system_info: str) -> str:
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(self.user_temp_dir),
-            env=self._build_subprocess_env(),
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=profile_timeout)
-            return self._build_result(stdout, stderr, process.returncode, system_info)
-        except TimeoutError:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            return self._build_timeout_result(profile_timeout, system_info)
-        except asyncio.CancelledError:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            raise
+    async def _capture_process_identity_at_start(
+        self,
+        process: asyncio.subprocess.Process | subprocess.Popen,
+    ) -> dict[str, Any] | None:
+        pid = getattr(process, "pid", None)
+        if not isinstance(pid, int) or pid <= 0:
+            return None
 
-    def _execute_argv_sync(self, argv: list[str], profile_timeout: float, system_info: str) -> str:
-        process = None
+        if isinstance(process, asyncio.subprocess.Process) and process.returncode is not None:
+            return None
+
         try:
-            process = subprocess.Popen(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+            process_identity = await capture_terminal_process_identity(pid)
+        except Exception as error:
+            self.logger.bind(pid=pid, error=str(error)).error("Failed to capture shell process identity")
+            return None
+
+        if isinstance(process, asyncio.subprocess.Process):
+            if process.returncode is not None:
+                return None
+        elif isinstance(process, subprocess.Popen):
+            if process.poll() is not None:
+                return None
+
+        if process_identity is None:
+            self.logger.bind(pid=pid).error("Shell process identity was not captured")
+        return process_identity
+
+    def _spawn_selector_process(self, command: str, managed_argv: list[str] | None) -> subprocess.Popen:
+        process_kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "cwd": str(self.user_temp_dir),
+            "env": self._build_subprocess_env(),
+        }
+        if managed_argv is not None:
+            return subprocess.Popen(managed_argv, shell=False, **process_kwargs)
+        return subprocess.Popen(command, shell=True, **process_kwargs)
+
+    async def _start_non_interactive_process(
+        self,
+        command: str,
+        managed_argv: list[str] | None,
+        use_selector: bool,
+    ) -> tuple[asyncio.subprocess.Process | subprocess.Popen, dict[str, Any] | None]:
+        if use_selector:
+            process = await asyncio.to_thread(self._spawn_selector_process, command, managed_argv)
+        elif managed_argv is not None:
+            process = await asyncio.create_subprocess_exec(
+                *managed_argv,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.user_temp_dir),
                 env=self._build_subprocess_env(),
+                **({"start_new_session": True} if sys.platform != "win32" else {}),
             )
-            stdout, stderr = process.communicate(timeout=profile_timeout)
-            return self._build_result(stdout, stderr, process.returncode, system_info)
-        except subprocess.TimeoutExpired:
-            if process:
-                process.kill()
-            return self._build_timeout_result(profile_timeout, system_info)
+        else:
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.user_temp_dir),
+                env=self._build_subprocess_env(),
+                **({"start_new_session": True} if sys.platform != "win32" else {}),
+            )
+
+        process_identity = await self._capture_process_identity_at_start(process)
+        return process, process_identity
+
+    async def _cleanup_process_tree(
+        self,
+        startup_task: asyncio.Task[tuple[asyncio.subprocess.Process | subprocess.Popen, dict[str, Any] | None]],
+        read_task: asyncio.Task[tuple[bytes, bytes]] | None,
+        profile_timeout: float,
+        use_selector: bool,
+    ) -> None:
+        try:
+            process, process_identity = await asyncio.shield(startup_task)
+        except Exception:
+            return
+
+        pid = process.pid
+        if process_identity is not None:
+            try:
+                cleanup_result = await cleanup_terminal_process_identity(process_identity)
+            except Exception as error:
+                self.logger.bind(pid=pid, error=str(error)).error("Shell process tree cleanup failed")
+            else:
+                if cleanup_result.errors:
+                    self.logger.bind(pid=pid, errors=cleanup_result.errors).error("Shell process tree cleanup reported errors")
+
+        if sys.platform == "win32":
+            try:
+                if process.returncode is None:
+                    # Windows uses the held process handle; POSIX must not fall back to a PID.
+                    process.kill()
+            except ProcessLookupError:
+                pass
+            except Exception as error:
+                self.logger.bind(pid=pid, error=str(error)).error("Failed to kill shell process")
+
+        if read_task is None:
+            if use_selector:
+                read_task = asyncio.create_task(asyncio.to_thread(process.communicate, timeout=profile_timeout))
+            else:
+                read_task = asyncio.create_task(process.communicate())
+
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(read_task),
+                timeout=PROCESS_WAIT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            self.logger.bind(pid=pid, timeout=PROCESS_WAIT_TIMEOUT_SECONDS).warning("Shell output collection timed out")
+            read_task.cancel()
+            await asyncio.gather(read_task, return_exceptions=True)
+        except asyncio.CancelledError:
+            if read_task.cancelled():
+                await asyncio.gather(read_task, return_exceptions=True)
+            else:
+                raise
+        except Exception:
+            pass
+
+        try:
+            if process.returncode is None:
+                if use_selector:
+                    await asyncio.to_thread(process.wait, timeout=PROCESS_WAIT_TIMEOUT_SECONDS)
+                else:
+                    await asyncio.wait_for(process.wait(), timeout=PROCESS_WAIT_TIMEOUT_SECONDS)
+        except (TimeoutError, subprocess.TimeoutExpired):
+            self.logger.bind(pid=pid, timeout=PROCESS_WAIT_TIMEOUT_SECONDS).warning("Shell process reap timed out")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.logger.bind(pid=pid, error=str(error)).error("Failed to reap shell process")
+
+    async def _await_cleanup_task(self, cleanup_task: asyncio.Task[None]) -> bool:
+        cancellation_seen = False
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                cancellation_seen = True
+
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            cancellation_seen = True
+        return cancellation_seen
 
     def _normalize_python_inline_code(self, code: str) -> str:
         compound_keywords = r"async\s+def|class|def|if|elif|else|for|while|try|except|finally|with|match"
@@ -260,6 +377,50 @@ class ShellExecutor(BaseExecutor):
         )
         return json.dumps(handoff.model_dump(mode="json"), ensure_ascii=False)
 
+    async def _execute_non_interactive(
+        self,
+        command: str,
+        managed_argv: list[str] | None,
+        profile_timeout: float,
+        system_info: str,
+        use_selector: bool,
+    ) -> str:
+        process: asyncio.subprocess.Process | subprocess.Popen | None = None
+        read_task: asyncio.Task[tuple[bytes, bytes]] | None = None
+        successful = False
+        startup_task: asyncio.Task[tuple[asyncio.subprocess.Process | subprocess.Popen, dict[str, Any] | None]] = asyncio.create_task(self._start_non_interactive_process(command, managed_argv, use_selector))
+
+        try:
+            process, _ = await asyncio.shield(startup_task)
+            if use_selector:
+                read_task = asyncio.create_task(asyncio.to_thread(process.communicate, timeout=profile_timeout))
+            else:
+                read_task = asyncio.create_task(process.communicate())
+
+            stdout, stderr = await asyncio.wait_for(
+                asyncio.shield(read_task),
+                timeout=profile_timeout,
+            )
+            result = self._build_result(stdout, stderr, process.returncode, system_info)
+            successful = True
+            return result
+        except (TimeoutError, subprocess.TimeoutExpired):
+            return self._build_timeout_result(profile_timeout, system_info)
+        except Exception as error:
+            return json.dumps({"error": str(error)}, ensure_ascii=False)
+        finally:
+            if not successful:
+                cleanup_task = asyncio.create_task(
+                    self._cleanup_process_tree(
+                        startup_task,
+                        read_task,
+                        profile_timeout,
+                        use_selector,
+                    )
+                )
+                if await self._await_cleanup_task(cleanup_task):
+                    raise asyncio.CancelledError
+
     async def execute(self, command: str, execution_mode: ShellExecutionMode | str) -> str:
         execution_mode = validate_shell_execution_mode(execution_mode)
 
@@ -291,74 +452,17 @@ class ShellExecutor(BaseExecutor):
         profile_timeout = await self._get_profile_timeout()
         managed_argv = self._extract_python_inline_command(command)
 
-        if sys.platform == "win32" and "Proactor" not in loop_type:
+        use_selector = sys.platform == "win32" and "Proactor" not in loop_type
+        if use_selector:
             t_logger.warning(t("LOG_SHELL_WINDOWS_SYNC_FALLBACK", uid=self.uid, loop_type=loop_type))
 
-            process = None
-            try:
-
-                def run_sync():
-                    nonlocal process
-                    if managed_argv is not None:
-                        return self._execute_argv_sync(managed_argv, profile_timeout, system_info)
-                    process = subprocess.Popen(command, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(self.user_temp_dir), env=self._build_subprocess_env())
-                    return process.communicate(timeout=profile_timeout)
-
-                result = await asyncio.wait_for(loop.run_in_executor(None, run_sync), timeout=profile_timeout + 1.0)
-
-                if isinstance(result, str):
-                    return result
-
-                stdout, stderr = result
-                return self._build_result(stdout, stderr, process.returncode if process else -1, system_info)
-            except TimeoutError:
-                if process:
-                    process.kill()
-                return self._build_timeout_result(profile_timeout, system_info)
-            except subprocess.TimeoutExpired:
-                if process:
-                    process.kill()
-                return self._build_timeout_result(profile_timeout, system_info)
-            except asyncio.CancelledError:
-                if process:
-                    process.kill()
-                raise
-            except Exception as e:
-                if process:
-                    process.kill()
-                return json.dumps({"error": str(e)}, ensure_ascii=False)
-
-        try:
-            if managed_argv is not None:
-                return await self._execute_argv(managed_argv, profile_timeout, system_info)
-
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.user_temp_dir),
-                env=self._build_subprocess_env(),
-            )
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=profile_timeout)
-                return self._build_result(stdout, stderr, process.returncode, system_info)
-            except TimeoutError:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                return self._build_timeout_result(profile_timeout, system_info)
-            except asyncio.CancelledError:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                raise
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            return json.dumps({"error": str(e)}, ensure_ascii=False)
+        return await self._execute_non_interactive(
+            command,
+            managed_argv,
+            profile_timeout,
+            system_info,
+            use_selector,
+        )
 
 
 SHELL_TOOL_SCHEMA = {

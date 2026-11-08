@@ -85,6 +85,7 @@ async def _query_transaction_case(image_chat_runtime):
             ),
         ]
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=create_calls))
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="主代理已创建两个子任务"))
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -99,7 +100,7 @@ async def _query_transaction_case(image_chat_runtime):
         waiting = await runtime.run_next(independent_only=False)
         assert waiting is not None
         assert waiting.id == parent_work_id
-        assert waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert waiting.status == SessionReplyWorkStatus.SUCCEEDED
 
         async with runtime.factory() as db:
             children = (
@@ -715,12 +716,33 @@ async def test_query_delivery_save_and_automatic_delivery_race_without_duplicate
             assert parent.status == SessionReplyWorkStatus.SUCCEEDED
             assert b_call.delivered is True
             assert "child_work_waits" not in parent.execution_state
-            assert _message_payload(b_result)["work"]["result"]["content"] == case["summary_b"]
+            b_result_payload = _message_payload(b_result)
+            assert b_result_payload["work"]["result"]["content"] == case["summary_b"]
             assert _message_payload(query_result) == case["query_result_payload"]
             assert _checkpoint_query_result(persisted, case["query_call_id"]).id == case["query_result_message_id"]
-            checkpoint_b_results = [message for key in ("messages", "turn_messages") for message in _checkpoint_messages(persisted, key) if message.role == MessageRole.TOOL and message.tool_call_id == case["b_tool_call_id"]]
-            assert len(checkpoint_b_results) == 2
-            assert json.loads(checkpoint_b_results[0].content or "{}")["work"]["result"]["content"] == case["summary_b"]
+            b_result_rows = []
+            result_rows = (
+                (
+                    await db.execute(
+                        select(Message).where(
+                            Message.session_id == runtime.session_id,
+                            Message.role == MessageRole.TOOL,
+                            Message.type == MessageType.TOOL_RESULT,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for result_row in result_rows:
+                result = InternalMessage.model_validate_json(result_row.content or "{}")
+                if result.tool_call_id == case["b_tool_call_id"]:
+                    b_result_rows.append((result_row, result))
+            assert len(b_result_rows) == 1
+            persisted_b_result_row, persisted_b_result = b_result_rows[0]
+            assert persisted_b_result_row.id == case["b_result_message_id"]
+            assert json.loads(persisted_b_result.content or "{}") == b_result_payload
+            assert persisted_b_result.tool_execution_status == "succeeded"
             assert await _notification_snapshot(db, runtime.session_id) == case["notification_snapshot"]
             assert await reconcile_child_work(db) == 0
             assert await _notification_snapshot(db, runtime.session_id) == case["notification_snapshot"]

@@ -6,9 +6,11 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
+from app.core.constants import AGENT_WORK_TOOL_NAME
 from app.core.context import (
     ContextManager,
 )
+from app.core.prompts import SUBAGENT_DELEGATION_SYSTEM_PROMPT
 from app.core.utils.context_summary.service import get_context_summary_state
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
 from app.core.utils.dispatcher.markdown_instruction import (
@@ -56,6 +58,8 @@ async def prepare_messages(
             profile,
             include_longterm_memory=False,
         )
+    if tools and any(tool.get("function", {}).get("name") == AGENT_WORK_TOOL_NAME for tool in tools):
+        system_prompt = f"{system_prompt}\n\n{SUBAGENT_DELEGATION_SYSTEM_PROMPT}"
     cleaned_platform_constraints = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
     current_msg = initial_msg.model_copy(deep=True) if is_first_iter and initial_msg is not None else None
     if current_msg is not None:

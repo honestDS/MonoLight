@@ -1,7 +1,7 @@
 import asyncio
 from typing import Any
 
-from sqlalchemy import String, and_, cast, func, inspect, literal, or_, update
+from sqlalchemy import String, and_, case, cast, func, inspect, literal, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -11,7 +11,13 @@ from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import Message, MessageRole, MessageType
-from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
+from app.models.session_reply_work_item import (
+    SessionReplySourceType,
+    SessionReplyWorkCategory,
+    SessionReplyWorkItem,
+    SessionReplyWorkStatus,
+    SessionReplyWorkType,
+)
 from app.models.terminal_session import TerminalSession
 from app.providers.database.time import get_database_timestamp
 
@@ -274,7 +280,73 @@ class CRUDTerminalWatchReply:
                 replaced += 1
         return replaced
 
-    async def list_watch_states(self, db: AsyncSession, *, uid: str, session_id: str, profile_id: int) -> list[dict]:
+    async def list_watch_states(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        message_work_id: int | None = None,
+    ) -> list[dict]:
+        scoped_work = (
+            select(
+                SessionReplyWorkItem.id,
+                SessionReplyWorkItem.subagent_id,
+                case(
+                    (
+                        SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK,
+                        case(
+                            (
+                                SessionReplyWorkItem.source_type == SessionReplySourceType.PARENT_WORK,
+                                SessionReplyWorkCategory.SUBAGENT.value,
+                            ),
+                            else_=SessionReplyWorkCategory.SCHEDULED_TASK.value,
+                        ),
+                    ),
+                    else_=func.coalesce(
+                        SessionReplyWorkItem.execution_state["work_category"].as_string(),
+                        SessionReplyWorkCategory.FOREGROUND.value,
+                    ),
+                ).label("work_category"),
+            )
+            .where(
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.session_id == session_id,
+                SessionReplyWorkItem.profile_id == profile_id,
+            )
+            .subquery()
+        )
+        if message_work_id is not None:
+            if not _is_positive_int(message_work_id):
+                return []
+            work_result = await db.execute(select(scoped_work.c.id, scoped_work.c.subagent_id).where(scoped_work.c.id == message_work_id))
+            message_work = work_result.mappings().first()
+            if message_work is None:
+                return []
+            if message_work["subagent_id"] is not None:
+                watch_scope = BackgroundTask.extra["origin_work_id"].as_integer().in_(select(scoped_work.c.id).where(scoped_work.c.subagent_id == message_work["subagent_id"]))
+            else:
+                watch_scope = BackgroundTask.extra["origin_work_id"].as_integer() == message_work_id
+        else:
+            watch_scope = or_(
+                BackgroundTask.extra["origin_work_id"].as_integer().is_(None),
+                BackgroundTask.extra["origin_work_id"]
+                .as_integer()
+                .in_(
+                    select(scoped_work.c.id).where(
+                        scoped_work.c.subagent_id.is_(None),
+                        scoped_work.c.work_category == SessionReplyWorkCategory.FOREGROUND.value,
+                    )
+                ),
+            )
+        conditions = (
+            BackgroundTask.uid == uid,
+            BackgroundTask.session_id == session_id,
+            BackgroundTask.profile_id == profile_id,
+            BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+            watch_scope,
+        )
         terminal_session_table_exists = await db.run_sync(lambda sync_session: inspect(sync_session.connection()).has_table(TerminalSession.__tablename__))
         if not terminal_session_table_exists:
             statement = (
@@ -296,10 +368,7 @@ class CRUDTerminalWatchReply:
                     literal(None).label("purpose"),
                 )
                 .where(
-                    BackgroundTask.uid == uid,
-                    BackgroundTask.session_id == session_id,
-                    BackgroundTask.profile_id == profile_id,
-                    BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+                    *conditions,
                 )
                 .order_by(BackgroundTask.id.asc())
             )
@@ -342,10 +411,7 @@ class CRUDTerminalWatchReply:
                 ),
             )
             .where(
-                BackgroundTask.uid == uid,
-                BackgroundTask.session_id == session_id,
-                BackgroundTask.profile_id == profile_id,
-                BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
+                *conditions,
             )
             .order_by(BackgroundTask.id.asc())
         )

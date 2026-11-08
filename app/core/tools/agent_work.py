@@ -22,29 +22,37 @@ AGENT_WORK_TOOL_SCHEMA = {
         "name": AGENT_WORK_TOOL_NAME,
         "description": (
             "When to use a subagent\n"
-            "Delegate a clearly scoped, multi-step task with an independent deliverable, such as multi-source research and fact-checking, comparing alternatives, "
-            "focused analysis or review, changes confined to a file or module, or an investigation that needs follow-up. Use ordinary tools directly for simple "
-            "lookups, reads, or small edits. Keep dependent steps with the same subagent. Independent tasks can be delegated separately, with non-overlapping file edits.\n\n"
+            "Prefer delegating independently deliverable parts when work involves broad investigation, large volumes of material, multi-source verification, comparing plans or alternatives, independent checking, or context isolation. Delegate before completing that work, not after. "
+            "Use ordinary tools directly for simple lookups and reads. Independent create operations may be submitted in the same turn or in separate turns; they do not need to be submitted together to run independently. For dependent work, reuse the subagent with send_message.\n\n"
             "Creating a task\n"
-            "Use create with a short, human-readable name and the goal, necessary background, inputs or file paths, constraints, and expected deliverable. The subagent does not automatically read this conversation, so make the task self-contained. "
+            "Use create with a short, human-readable name and the goal, necessary background, inputs or file paths, constraints, and expected deliverable. The subagent has no access to this conversation's history, so make the task self-contained. "
+            "It may use Shell (non_interactive or interactive), terminal_tool, and watch when enabled by the current Profile; actual availability and use remain governed by Profile enablement, audit decisions, and directory rules. "
             "Specify whether it should only investigate or may make changes, and what conclusions, evidence, or files it should return.\n\n"
             "Continuing and following up\n"
             'Reuse the returned subagent_id with send_message to add instructions, continue interrupted work, or request follow-up work. For a simple continuation, send "continue previous task".\n\n'
             "Waiting and checking status\n"
-            "After create or send_message is accepted, this conversation waits and resumes automatically with the result. There is no need to poll query while waiting. "
+            "create and send_message return immediately with a queued confirmation, so the main agent can continue other work. The task's eventual result is automatically delivered to the reply that submitted it when the task completes; completion, failure, and cancellation all resume that reply automatically. "
+            "query and list return progress immediately and never implicitly wait or suspend this reply. "
             "Use list to immediately inspect all unfinished subagents in the current user, session, and Profile scope, including queued, running, and waiting work; completed subagents are omitted. "
-            "List does not wait for work or replace automatic result delivery. Use query to inspect status, saved results, or an interruption reason, and cancel to stop work that is no longer needed. Summarize the returned results for the user.\n\n"
+            "Use query to inspect status, saved results, or an interruption reason. Use wait only when this turn needs another task's result. "
+            "If the selected work is already complete, failed, or cancelled, wait returns its terminal result immediately; otherwise it queues and suspends this reply until the work completes, fails, or is cancelled, then resumes automatically. "
+            "wait does not transfer task ownership or replace the original create/send_message submission, whose reply remains responsible for automatic delivery. "
+            "Multiple wait operations can be issued in the same turn. Do not poll query or list, or use Shell or terminal_tool sleep, to wait. Use cancel to stop work that is no longer needed. Summarize the returned results for the user.\n\n"
             "Important boundaries\n"
-            "Cancelling does not undo earlier changes. If execution is reported as unknown, verify what actually happened before repeating an action. "
-            "Do not poll while waiting, access subagents across users, sessions, or Profiles, or create nested subagents. Use only subagent_id values returned in this conversation under the current Profile."
+            "wait is limited to the current user, session, and Profile. Cancelling does not undo earlier changes. If execution is reported as unknown, verify what actually happened before repeating an action. "
+            "Do not access subagents across users, sessions, or Profiles, or create nested subagents. Use only subagent_id values actually returned in this conversation under the current Profile."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["create", "list", "query", "send_message", "cancel"],
-                    "description": "create: delegate a new task; list: immediately list unfinished subagents in the current scope; send_message: add instructions or continue work with an existing subagent; query: inspect work; cancel: stop unneeded work.",
+                    "enum": ["create", "list", "query", "send_message", "wait", "cancel"],
+                    "description": (
+                        "create: delegate a new task; list: immediately list unfinished subagents in the current scope; "
+                        "send_message: add instructions or continue work with an existing subagent; query: inspect work immediately; "
+                        "wait: get a result now or suspend this reply until work finishes; cancel: stop unneeded work."
+                    ),
                 },
                 "name": {
                     "type": "string",
@@ -66,12 +74,12 @@ AGENT_WORK_TOOL_SCHEMA = {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 32,
-                    "description": "Required for query, send_message, and cancel. Copy the subagent_id returned by create or list and reuse it for follow-up work with that subagent.",
+                    "description": "Required for query, send_message, wait, and cancel. Copy the subagent_id actually returned by create or list and reuse it for follow-up work with that subagent.",
                 },
                 "work_id": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "For query and cancel only. Copy a returned work_id to inspect or cancel that particular task run; omit it to query the latest work or cancel the current or latest work.",
+                    "description": ("For query, wait, and cancel. Copy a returned work_id to inspect, wait for, or cancel that particular task run; omit it for query to use the latest work, or for wait/cancel to use the current or latest work."),
                 },
             },
             "required": ["operation"],
@@ -80,6 +88,7 @@ AGENT_WORK_TOOL_SCHEMA = {
                 {"properties": {"operation": {"const": "list"}}, "additionalProperties": False},
                 {"properties": {"operation": {"const": "query"}}, "required": ["subagent_id"]},
                 {"properties": {"operation": {"const": "send_message"}}, "required": ["subagent_id", "message"]},
+                {"properties": {"operation": {"const": "wait"}}, "required": ["subagent_id"]},
                 {"properties": {"operation": {"const": "cancel"}}, "required": ["subagent_id"]},
             ],
             "additionalProperties": False,
@@ -168,7 +177,7 @@ class AgentWorkExecutor(BaseExecutor):
             argument_model = ListArguments
         if operation == "send_message":
             argument_model = SendArguments
-        if operation in {"query", "cancel"}:
+        if operation in {"query", "cancel", "wait"}:
             argument_model = LookupArguments
         if argument_model is None:
             return _failure(
@@ -203,6 +212,7 @@ class AgentWorkExecutor(BaseExecutor):
             list_subagents,
             query_subagent,
             send_subagent_message,
+            wait_subagent,
         )
 
         try:
@@ -241,6 +251,16 @@ class AgentWorkExecutor(BaseExecutor):
                     tool_call_id=tool_call_id,
                     subagent_id=parsed.subagent_id,
                     message=parsed.message,
+                )
+            if operation == "wait":
+                result = await wait_subagent(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    profile_id=profile_id,
+                    tool_call_id=tool_call_id,
+                    subagent_id=parsed.subagent_id,
+                    work_id=parsed.work_id,
                 )
             if operation == "cancel":
                 result = await cancel_subagent(

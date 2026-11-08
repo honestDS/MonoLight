@@ -4,6 +4,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.audit.confirmation_events import broadcast_pending_confirmation_cancellation
 from app.core.audit.confirmation_results import cancel_persisted_pending_confirmation_bundle
 from app.core.constants import (
@@ -17,6 +18,7 @@ from app.core.constants import (
     LOG_DISPATCHER_MAIN_AGENT_MESSAGE,
     MSG_SUBAGENT_SUBMITTED,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+    SHELL_TOOL_NAME,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
@@ -26,18 +28,26 @@ from app.core.crud.session.reply_work_item import (
     session_reply_work_item_crud,
 )
 from app.core.crud.session.subagent import subagent_crud
+from app.core.crud.task.background import background_task_crud
+from app.core.crud.terminal.session import terminal_session_crud
 from app.core.exceptions import ParameterException
 from app.core.i18n import t
 from app.core.log import agent_log_context, get_logger
 from app.core.session_reply_queue.child_delivery import deliver_child_work_results
 from app.core.session_reply_queue.child_lifecycle import finish_child_work
-from app.core.session_reply_queue.child_result import _parse_audit_record_id, get_child_snapshot, load_child_work
+from app.core.session_reply_queue.child_result import (
+    _parse_audit_record_id,
+    build_child_call_result,
+    get_child_snapshot,
+    load_child_work,
+)
 from app.core.session_reply_queue.executor_audit import (
     _mark_audit_execution_unknown_reliably,
     get_bound_audit_execution,
 )
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
 from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.terminal.audit_lifecycle import cleanup_terminal_session
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
 from app.models.audit import AuditRecordStatus
@@ -59,6 +69,7 @@ __all__ = [
     "list_subagents",
     "query_subagent",
     "send_subagent_message",
+    "wait_subagent",
 ]
 
 
@@ -109,14 +120,16 @@ async def _get_scoped_subagent(
 
 
 def build_subagent_queued_result(call: SubagentToolCall) -> dict[str, Any]:
-    return {
+    result = {
         "status": "queued",
         "operation": call.arguments["operation"],
         "subagent_id": call.subagent_id,
         "work_id": call.child_work_id,
         "child_work_id": call.child_work_id,
-        "message": t(MSG_SUBAGENT_SUBMITTED),
     }
+    if call.arguments["operation"] != "wait":
+        result["message"] = t(MSG_SUBAGENT_SUBMITTED)
+    return result
 
 
 def _log_subagent_message(subagent: Subagent, call: SubagentToolCall, message: str) -> None:
@@ -520,6 +533,144 @@ async def send_subagent_message(
         raise
 
 
+async def wait_subagent(
+    db: AsyncSession,
+    *,
+    uid: str,
+    session_id: str,
+    profile_id: int,
+    tool_call_id: str,
+    subagent_id: str,
+    work_id: int | None = None,
+) -> dict[str, Any]:
+    try:
+        parent = await _load_parent(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+        )
+        arguments = {
+            "operation": "wait",
+            "subagent_id": subagent_id,
+        }
+        if work_id is not None:
+            arguments["work_id"] = work_id
+
+        existing_call = await subagent_crud.get_call(
+            db,
+            parent_work_id=parent.id,
+            tool_call_id=tool_call_id,
+        )
+        if existing_call is not None:
+            if existing_call.arguments != arguments:
+                raise ParameterException(ERR_SUBAGENT_CALL_CONFLICT)
+            result = await _existing_submission(
+                db,
+                call=existing_call,
+                uid=uid,
+                session_id=session_id,
+                profile_id=profile_id,
+            )
+            await db.commit()
+            return result
+
+        subagent = await _get_scoped_subagent(
+            db,
+            subagent_id=subagent_id,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            touch=True,
+        )
+        child_work_id = work_id
+        if child_work_id is None:
+            child_work_id = subagent.active_child_work_id or subagent.latest_child_work_id
+        if child_work_id is None:
+            raise ParameterException(ERR_SUBAGENT_WORK_NOT_FOUND)
+
+        round_row = await subagent_crud.get_round(
+            db,
+            child_work_id=child_work_id,
+            subagent_id=subagent.id,
+        )
+        if round_row is None:
+            raise ParameterException(ERR_SUBAGENT_WORK_NOT_FOUND)
+
+        work = await load_child_work(db, subagent=subagent, round_row=round_row)
+        snapshot = await get_child_snapshot(db, subagent=subagent, round_row=round_row)
+        if snapshot.get("completed") is True:
+            if round_row.result is None:
+                await finish_child_work(db, work=work)
+                snapshot = await get_child_snapshot(db, subagent=subagent, round_row=round_row)
+
+        call = await subagent_crud.create_call(
+            db,
+            subagent_id=subagent.id,
+            child_work_id=round_row.child_work_id,
+            parent_work_id=parent.id,
+            tool_call_id=tool_call_id,
+            arguments=arguments,
+        )
+        parent_state = dict(parent.execution_state) if isinstance(parent.execution_state, dict) else {}
+        parent_state["has_child_work"] = True
+        parent.execution_state = parent_state
+        db.add(parent)
+        await db.commit()
+
+        if snapshot.get("completed") is True:
+            return build_child_call_result(call, snapshot)
+
+        return build_subagent_queued_result(call)
+    except BaseException:
+        await db.rollback()
+        raise
+
+
+async def _list_interactive_tool_call_ids(
+    db: AsyncSession,
+    *,
+    works: list[SessionReplyWorkItem],
+) -> list[str]:
+    tool_call_ids: list[str] = []
+    seen_tool_call_ids: set[str] = set()
+    for work in works:
+        page_after_id: int | None = None
+        while True:
+            page = await message_crud.get_history_forward_by_id(
+                db,
+                session_id=work.session_id,
+                uid=work.uid,
+                work_id=work.id,
+                page_after_id=page_after_id,
+                limit=200,
+            )
+            if not page:
+                break
+
+            scoped_messages = []
+            for message in page:
+                if message.uid != work.uid or message.session_id != work.session_id or message.profile_id != work.profile_id or message.work_id != work.id:
+                    continue
+                scoped_messages.append(message)
+
+            for message in parse_db_messages_to_internal(scoped_messages):
+                for tool_call in message.tool_calls or []:
+                    if tool_call.name != SHELL_TOOL_NAME or tool_call.arguments.get("execution_mode") != "interactive":
+                        continue
+                    if tool_call.id in seen_tool_call_ids:
+                        continue
+                    seen_tool_call_ids.add(tool_call.id)
+                    tool_call_ids.append(tool_call.id)
+
+            last_id = page[-1].id
+            if len(page) < 200 or last_id is None:
+                break
+            page_after_id = last_id
+
+    return tool_call_ids
+
+
 async def cancel_subagent(
     db: AsyncSession,
     *,
@@ -592,6 +743,46 @@ async def cancel_subagent(
                     commit=False,
                 )
 
+        await subagent_crud.cancel_work(db, work=work, error=error)
+        await db.refresh(work)
+
+        round_works = await subagent_crud.list_round_work_items(
+            db,
+            subagent_id=subagent.id,
+            child_work_id=round_row.child_work_id,
+            uid=work.uid,
+            session_id=work.session_id,
+            profile_id=work.profile_id,
+        )
+        work_ids = [round_work.id for round_work in round_works if round_work.id is not None]
+        interactive_tool_call_ids = await _list_interactive_tool_call_ids(db, works=round_works)
+        terminal_sessions = await terminal_session_crud.list_by_tool_calls(
+            db,
+            uid=work.uid,
+            session_id=work.session_id,
+            profile_id=work.profile_id,
+            tool_call_ids=interactive_tool_call_ids,
+        )
+
+        terminal_audit_ids: list[int] = []
+        for terminal_session in terminal_sessions:
+            audit_record_id = await cleanup_terminal_session(
+                db,
+                terminal_session=terminal_session,
+                failure_reason=error,
+            )
+            if audit_record_id is not None:
+                terminal_audit_ids.append(audit_record_id)
+
+        background_audit_ids = await background_task_crud.cancel_by_origin_work(
+            db,
+            uid=work.uid,
+            session_id=work.session_id,
+            profile_id=work.profile_id,
+            work_ids=work_ids,
+            commit=False,
+        )
+
         binding = get_bound_audit_execution(work)
         if binding is not None:
             audit_record_id, claim_token = binding
@@ -603,11 +794,13 @@ async def cancel_subagent(
                 commit=False,
             )
 
-        await subagent_crud.cancel_work(db, work=work, error=error)
         await db.refresh(work)
         await finish_child_work(db, work=work)
         snapshot = await get_child_snapshot(db, subagent=subagent, round_row=round_row)
         await db.commit()
+
+        for audit_record_id in dict.fromkeys([*background_audit_ids, *terminal_audit_ids]):
+            await update_confirmation_message_status(db, audit_record_id=audit_record_id)
 
         if confirmation_cancellation is not None:
             await broadcast_pending_confirmation_cancellation(db, cancellation=confirmation_cancellation)

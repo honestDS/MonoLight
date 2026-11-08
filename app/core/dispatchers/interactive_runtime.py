@@ -47,7 +47,6 @@ from app.core.utils.assistant_files import build_assistant_files_content as buil
 from app.core.utils.assistant_files import materialize_generated_images, merge_assistant_files
 from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
-from app.core.utils.dispatcher.external_work import build_subagent_query_wait_response
 from app.core.utils.dispatcher.helpers import (
     dump_output_history,
     extract_files_to_user,
@@ -491,18 +490,6 @@ async def dispatch_interactive(
                     external_results_received = await append_external_results()
                     if new_user_batch is not None or external_results_received:
                         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
-                    if SESSION_REPLY_WORK_CLAIM_INFO_KEY in db.info:
-                        query_wait_response = await build_subagent_query_wait_response(
-                            db,
-                            uid=uid,
-                            session_id=session_id,
-                            profile_id=profile.id,
-                            messages=state.messages,
-                        )
-                        if query_wait_response is not None:
-                            await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
-                            return query_wait_response
-
                     if state.memory_precheck_enabled and memory_recall_needs_precheck(state.checkpoint_state):
                         state.checkpoint_state.memory_recall_status = "pending"
                         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)

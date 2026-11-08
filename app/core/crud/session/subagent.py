@@ -272,6 +272,33 @@ class CRUDSubagent:
         )
         return result.scalars().first()
 
+    async def list_round_work_items(
+        self,
+        db: AsyncSession,
+        *,
+        subagent_id: str,
+        child_work_id: int,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+    ) -> list[SessionReplyWorkItem]:
+        result = await db.execute(
+            select(SessionReplyWorkItem)
+            .where(
+                SessionReplyWorkItem.subagent_id == subagent_id,
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.session_id == session_id,
+                SessionReplyWorkItem.profile_id == profile_id,
+                or_(
+                    SessionReplyWorkItem.id == child_work_id,
+                    SessionReplyWorkItem.execution_state["child_work_id"].as_integer() == child_work_id,
+                ),
+            )
+            .order_by(SessionReplyWorkItem.id.asc())
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
     async def list_pending_messages(self, db: AsyncSession, *, work: SessionReplyWorkItem) -> list[Message]:
         result = await db.execute(
             select(Message)

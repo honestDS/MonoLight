@@ -27,7 +27,7 @@ async def get_database_timestamp(db: AsyncSession) -> int:
 
 def build_database_timestamp_expression(dialect_name: str):
     if dialect_name == "sqlite":
-        return cast(func.unixepoch(), Integer)
+        return cast(func.strftime("%s", "now"), Integer)
     if dialect_name == "mysql":
         return cast(func.unix_timestamp(func.current_timestamp()), Integer)
     raise ValueError(t(ERR_DATABASE_TYPE_UNSUPPORTED, database_type=dialect_name))

@@ -630,7 +630,12 @@ async def test_list_during_parent_child_conversation_reports_only_unfinished_sub
             profile.configs = configs
             await db.commit()
 
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=create_calls))
+        runtime.outputs.extend(
+            [
+                InternalMessage(role=MessageRole.ASSISTANT, tool_calls=create_calls),
+                InternalMessage(role=MessageRole.ASSISTANT, content="Both independent tasks are ready."),
+            ]
+        )
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -642,10 +647,11 @@ async def test_list_during_parent_child_conversation_reports_only_unfinished_sub
         assert accepted.status_code == 200
         parent_work_id = accepted.json()["data"]["work_id"]
 
-        parent_waiting = await runtime.run_next(independent_only=False)
-        assert parent_waiting is not None
-        assert parent_waiting.id == parent_work_id
-        assert parent_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        parent_created = await runtime.run_next(independent_only=False)
+        assert parent_created is not None
+        assert parent_created.id == parent_work_id
+        assert parent_created.status == SessionReplyWorkStatus.SUCCEEDED
+        assert len(runtime.provider_payloads) == 2
 
         async with runtime.factory() as db:
             calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id))).scalars().all()

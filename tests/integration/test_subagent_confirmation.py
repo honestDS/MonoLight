@@ -118,6 +118,7 @@ async def test_subagent_file_write_confirmation_round_returns_to_parent(
                 ],
             )
         )
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="主代理已确认创建子任务并继续。"))
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -131,10 +132,10 @@ async def test_subagent_file_write_confirmation_round_returns_to_parent(
         assert accepted_data["submission_status"] == "accepted"
         parent_work_id = accepted_data["work_id"]
 
-        parent_waiting = await runtime.run_next()
-        assert parent_waiting is not None
-        assert parent_waiting.id == parent_work_id
-        assert parent_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        parent_done = await runtime.run_next()
+        assert parent_done is not None
+        assert parent_done.id == parent_work_id
+        assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
@@ -198,7 +199,7 @@ async def test_subagent_file_write_confirmation_round_returns_to_parent(
             child = await db.get(SessionReplyWorkItem, child_work_id)
             round_row = await db.get(SubagentWork, child_work_id)
             audit_record = (await db.execute(select(AuditRecord).where(AuditRecord.source_work_id == child_work_id))).scalars().one()
-            assert parent is not None and parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+            assert parent is not None and parent.status == SessionReplyWorkStatus.SUCCEEDED
             assert child is not None and child.status == SessionReplyWorkStatus.SUCCEEDED
             assert round_row is not None
             assert round_row.result is None
@@ -397,6 +398,7 @@ async def test_subagent_cancel_round_returns_cancelled_result_to_parent(
                 ],
             )
         )
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="主代理已确认创建子任务并继续。"))
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -408,10 +410,10 @@ async def test_subagent_cancel_round_returns_cancelled_result_to_parent(
         assert accepted.status_code == 200
         parent_work_id = accepted.json()["data"]["work_id"]
 
-        parent_waiting = await runtime.run_next()
-        assert parent_waiting is not None
-        assert parent_waiting.id == parent_work_id
-        assert parent_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        parent_done = await runtime.run_next()
+        assert parent_done is not None
+        assert parent_done.id == parent_work_id
+        assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
@@ -663,6 +665,7 @@ async def test_running_subagent_file_tool_cancel_keeps_late_result_private(
                 ],
             )
         )
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="主代理已确认创建子任务并继续。"))
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -673,10 +676,10 @@ async def test_running_subagent_file_tool_cancel_keeps_late_result_private(
         )
         assert accepted.status_code == 200
         parent_work_id = accepted.json()["data"]["work_id"]
-        parent_waiting = await runtime.run_next()
-        assert parent_waiting is not None
-        assert parent_waiting.id == parent_work_id
-        assert parent_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        parent_done = await runtime.run_next()
+        assert parent_done is not None
+        assert parent_done.id == parent_work_id
+        assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)

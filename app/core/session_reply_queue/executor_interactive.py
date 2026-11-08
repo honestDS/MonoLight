@@ -1,16 +1,19 @@
 import asyncio
+import json
 from dataclasses import dataclass, field
 from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
 from app.core.constants import (
+    AGENT_WORK_TOOL_NAME,
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_SESSION_REPLY_LEASE_LOST,
     ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT,
     SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
 )
 from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import (
     ensure_session_reply_work_claim,
@@ -30,6 +33,8 @@ from app.core.session_reply_queue.executor_common import (
 from app.core.session_reply_queue.executor_metadata import _persist_interactive_work_request_metadata
 from app.core.session_reply_queue.manager import get_work_request_ids, session_reply_queue_manager
 from app.core.session_reply_queue.manager_common import is_scheduled_task_work, resolve_work_tool_workflow
+from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
+from app.core.utils.dispatcher.terminal_watch_snapshot import strip_terminal_watch_snapshot
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.request_token_baseline import build_session_cache_metrics
@@ -306,6 +311,89 @@ async def _save_interactive_work_execution_checkpoint(
                     message_ids=checkpoint_message_ids,
                 )
         else:
+            tool_calls_by_id: dict[str, dict[str, Any]] = {}
+            for message in checkpoint.get("messages", []):
+                if not isinstance(message, dict) or message.get("role") != MessageRole.ASSISTANT:
+                    continue
+                tool_calls = message.get("tool_calls")
+                if not isinstance(tool_calls, list):
+                    continue
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, dict) or tool_call.get("name") != AGENT_WORK_TOOL_NAME:
+                        continue
+                    tool_call_id = tool_call.get("id")
+                    if isinstance(tool_call_id, str) and tool_call_id.strip():
+                        tool_calls_by_id[tool_call_id] = tool_call
+
+            child_tool_slots: list[dict[str, Any]] = []
+            registered_child_tool_keys: set[tuple[Any, Any, Any, Any]] = set()
+            registered_response_ids: dict[tuple[Any, Any, Any], Any] = {}
+            previous_child_work_waits = state.get("child_work_waits")
+            if isinstance(previous_child_work_waits, list):
+                for slot in previous_child_work_waits:
+                    if not isinstance(slot, dict):
+                        continue
+                    child_tool_key = (slot.get("child_work_id"), slot.get("subagent_id"), slot.get("tool_call_id"))
+                    registered_child_tool_keys.add((*child_tool_key, slot.get("tool_result_message_id")))
+                    if slot.get("response_id") is not None:
+                        registered_response_ids[child_tool_key] = slot.get("response_id")
+            for message in checkpoint.get("messages", []):
+                if not isinstance(message, dict) or message.get("role") != MessageRole.TOOL:
+                    continue
+                tool_call_id = message.get("tool_call_id")
+                if not isinstance(tool_call_id, str) or not tool_call_id.strip():
+                    continue
+                tool_call = tool_calls_by_id.get(tool_call_id)
+                if tool_call is None:
+                    continue
+                arguments = tool_call.get("arguments")
+                operation = arguments.get("operation") if isinstance(arguments, dict) else None
+                if not isinstance(operation, str) or operation not in {"create", "send_message", "wait"}:
+                    continue
+                tool_result_message_id = message.get("id")
+                if not isinstance(tool_result_message_id, int) or isinstance(tool_result_message_id, bool) or tool_result_message_id <= 0:
+                    continue
+                content = strip_session_todo_snapshot(strip_terminal_watch_snapshot(message.get("content")))
+                try:
+                    payload = json.loads(content or "")
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(payload, dict) or payload.get("status") != "queued" or payload.get("operation") != operation:
+                    continue
+                child_work_id = payload.get("child_work_id")
+                subagent_id = payload.get("subagent_id")
+                if not isinstance(child_work_id, int) or isinstance(child_work_id, bool) or child_work_id <= 0 or not isinstance(subagent_id, str) or not subagent_id.strip():
+                    continue
+
+                call = await subagent_crud.get_call(
+                    db,
+                    parent_work_id=work.id,
+                    tool_call_id=tool_call_id,
+                )
+                if call is None or call.delivered is True:
+                    continue
+                child_tool_key = (child_work_id, subagent_id, tool_call_id)
+                child_tool_slot_key = (*child_tool_key, tool_result_message_id)
+                if child_tool_slot_key in registered_child_tool_keys:
+                    continue
+                child_tool_slots.append(
+                    {
+                        "child_work_id": child_work_id,
+                        "subagent_id": subagent_id,
+                        "tool_call_id": tool_call_id,
+                        "tool_name": AGENT_WORK_TOOL_NAME,
+                        "tool_result_message_id": tool_result_message_id,
+                        "response_id": registered_response_ids.get(child_tool_key),
+                    }
+                )
+                registered_child_tool_keys.add(child_tool_slot_key)
+            if child_tool_slots:
+                await external_work_crud.register_child_tools(
+                    db,
+                    work=work,
+                    execution_state=state,
+                    slots=child_tool_slots,
+                )
             await acknowledge_queried_child_results(
                 db,
                 parent=work,
