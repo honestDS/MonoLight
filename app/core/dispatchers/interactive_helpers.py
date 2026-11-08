@@ -148,6 +148,7 @@ class _ExecutionCheckpointState:
     session_total_cached_tokens: int = 0
     session_total_output_tokens: int | None = None
     execution_phase: str = GOAL_EXECUTION_PHASE_RUNNING
+    subagent_context_exhausted: bool = False
     pending_resume_message_ids: list[int] = field(default_factory=list)
     reply_skipped: bool = False
     checkpoint_message_serializer: CheckpointMessageSerializer = field(
@@ -209,6 +210,8 @@ async def _save_execution_checkpoint(
         checkpoint[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
     if state.reply_skipped:
         checkpoint["reply_skipped"] = True
+    if state.subagent_context_exhausted:
+        checkpoint["subagent_context_exhausted"] = True
     await state.callback(checkpoint)
     if checkpoint["messages"] is not serialized_messages:
         messages[:] = [InternalMessage.model_validate(message) for message in checkpoint["messages"]]

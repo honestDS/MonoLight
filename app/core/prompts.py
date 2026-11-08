@@ -1,3 +1,5 @@
+import json
+
 from app.core.constants import (
     AGENT_WORK_TOOL_NAME,
     END_SESSION_TOOL_NAME,
@@ -443,6 +445,25 @@ SUBAGENT_EXECUTION_GUIDANCE_PROMPT = f"""You are an independent subagent executi
 Perform only work covered by the original authorization and use only tools actually provided in this execution. Follow the current Profile directory policy and audit-confirmation requirements. Do not create subagents.
 Report verified results, failures, cancellations, and unknown or unverified conditions. After an interruption, do not replay a tool whose side effects are unknown. When this task ends, use {END_SESSION_TOOL_NAME} or provide a direct final reply. The platform delivers your result to the parent task; do not send a user-facing message yourself.
 """
+
+SUBAGENT_CONTEXT_EXHAUSTED_PROMPT = json.dumps(
+    {
+        "type": "system_notification",
+        "reason": "context_exhausted",
+        "instruction": (
+            "Your context budget is exhausted. Do not compress or summarize the context. "
+            "Immediately stop using tools and deliver a final report to the parent agent. "
+            "The report must separately list the verified results for completed tasks and the "
+            "incomplete tasks, including their blockers or remaining work. Explicitly state "
+            "when either section is empty; neither section may be omitted. Do not omit the "
+            "report or use end_session to skip the report."
+        ),
+        "required_sections": ["completed_tasks", "incomplete_tasks"],
+    },
+    ensure_ascii=False,
+    separators=(",", ":"),
+    sort_keys=True,
+)
 
 # Runtime context policy
 SYSTEM_RUNTIME_CONTEXT_POLICY = """<user_role_json_contract>

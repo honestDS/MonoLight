@@ -7,7 +7,12 @@ import pytest
 from PIL import Image
 
 from app.core.audit.service import AuditRoundResult
-from app.core.constants import ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH, GOAL_EXECUTION_PHASE_RUNNING, SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
+from app.core.constants import (
+    ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH,
+    GOAL_EXECUTION_PHASE_RUNNING,
+    SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
+    TOOL_WORKFLOW_FOREGROUND,
+)
 from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.dispatchers import interactive_helpers as interactive_helpers_module
 from app.core.dispatchers import interactive_runtime as interactive_runtime_module
@@ -151,6 +156,7 @@ def _context_length_generation_state(*, stream_event_callback=None):
         uid="user-1",
         session_id="session-1",
         goal_mode=False,
+        tool_workflow=TOOL_WORKFLOW_FOREGROUND,
         profile=SimpleNamespace(id=1),
         cfg=SimpleNamespace(tool=ToolConfig(), other=SimpleNamespace(context_summary_threshold_percent=90)),
         messages=[InternalMessage(id=1, role=MessageRole.USER, content="request")],

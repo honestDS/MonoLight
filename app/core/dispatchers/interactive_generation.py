@@ -16,6 +16,7 @@ from app.core.constants import (
     GOAL_EXECUTION_PHASE_FINALIZING,
     GOAL_EXECUTION_PHASE_RUNNING,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+    TOOL_WORKFLOW_SUBAGENT,
 )
 from app.core.context import ContextManager
 from app.core.crud.session.session import session_crud
@@ -29,7 +30,12 @@ from app.core.exceptions import (
 )
 from app.core.i18n import t
 from app.core.log import channel_log_extra
-from app.core.prompts import GOAL_MODE_FINAL_RESPONSE_PROMPT, GOAL_MODE_SYSTEM_PROMPT, TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
+from app.core.prompts import (
+    GOAL_MODE_FINAL_RESPONSE_PROMPT,
+    GOAL_MODE_SYSTEM_PROMPT,
+    SUBAGENT_CONTEXT_EXHAUSTED_PROMPT,
+    TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT,
+)
 from app.core.provider_usage import build_reply_usage_snapshot
 from app.core.tools.end_session import END_SESSION_TOOL_NAME, is_end_session_signal, is_skip_reply_signal
 from app.core.utils.context_budget import calculate_context_summary_trigger_tokens
@@ -113,9 +119,17 @@ async def generate_interactive_turn(
         defer_output_until_response=(state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_FINALIZING or tool_choice == "none" or has_end_session_tool),
     )
     goal_mode = state.goal_mode is True
+    is_subagent_work = state.tool_workflow == TOOL_WORKFLOW_SUBAGENT
     execution_phase = state.checkpoint_state.execution_phase
+    exhausted_phase_repaired = False
+    if is_subagent_work and state.checkpoint_state.subagent_context_exhausted:
+        if execution_phase != GOAL_EXECUTION_PHASE_FINALIZING:
+            execution_phase = GOAL_EXECUTION_PHASE_FINALIZING
+            state.checkpoint_state.execution_phase = execution_phase
+            exhausted_phase_repaired = True
+        stream_state.defer_output_until_response = True
 
-    def build_request_messages(messages: list[InternalMessage]) -> list[InternalMessage]:
+    def _build_request_messages(messages: list[InternalMessage]) -> list[InternalMessage]:
         pending_file_inputs = collect_pending_multimodal_file_inputs(messages)
         pending_modalities = {item["modality"] for item in pending_file_inputs}
         if ("image" in pending_modalities and not state.img_understanding) or ("audio" in pending_modalities and not state.audio_understanding) or ("video" in pending_modalities and not state.video_understanding):
@@ -132,7 +146,16 @@ async def generate_interactive_turn(
             request_messages.append(materialize_user_environment_prompts([pending_multimodal_message])[0])
         return request_messages
 
-    async def compact_current_context(*, force: bool, channel_id: int | None, model_id: str, protocol: str) -> bool:
+    def _refresh_goal_mode_messages() -> None:
+        state.messages = [message for message in state.messages if not (message.role == MessageRole.SYSTEM and message.content in {GOAL_MODE_SYSTEM_PROMPT, GOAL_MODE_FINAL_RESPONSE_PROMPT})]
+        if execution_phase == GOAL_EXECUTION_PHASE_FINALIZING:
+            system_prompt_index = 1 if state.messages and state.messages[0].role == MessageRole.SYSTEM else 0
+            state.messages.insert(system_prompt_index, InternalMessage(role=MessageRole.SYSTEM, content=GOAL_MODE_FINAL_RESPONSE_PROMPT))
+        elif goal_mode:
+            system_prompt_index = 1 if state.messages and state.messages[0].role == MessageRole.SYSTEM else 0
+            state.messages.insert(system_prompt_index, InternalMessage(role=MessageRole.SYSTEM, content=GOAL_MODE_SYSTEM_PROMPT))
+
+    async def _compact_current_context(*, force: bool, channel_id: int | None, model_id: str, protocol: str) -> bool:
         claim_info = getattr(state.db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
         work_id = claim_info[0] if isinstance(claim_info, (tuple, list)) and len(claim_info) == 2 and isinstance(claim_info[0], int) and not isinstance(claim_info[0], bool) and claim_info[0] > 0 else None
         previous_messages = state.messages
@@ -154,7 +177,7 @@ async def generate_interactive_turn(
                 channel_id=channel_id,
                 work_id=work_id,
                 measure_request_tokens=lambda candidate: estimate_request_context_tokens(
-                    build_request_messages(candidate),
+                    _build_request_messages(candidate),
                     current_tools,
                     model_id=model_id,
                     protocol=protocol,
@@ -184,13 +207,7 @@ async def generate_interactive_turn(
         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
         return True
 
-    state.messages = [message for message in state.messages if not (message.role == MessageRole.SYSTEM and message.content in {GOAL_MODE_SYSTEM_PROMPT, GOAL_MODE_FINAL_RESPONSE_PROMPT})]
-    if execution_phase == GOAL_EXECUTION_PHASE_FINALIZING:
-        system_prompt_index = 1 if state.messages and state.messages[0].role == MessageRole.SYSTEM else 0
-        state.messages.insert(system_prompt_index, InternalMessage(role=MessageRole.SYSTEM, content=GOAL_MODE_FINAL_RESPONSE_PROMPT))
-    elif goal_mode:
-        system_prompt_index = 1 if state.messages and state.messages[0].role == MessageRole.SYSTEM else 0
-        state.messages.insert(system_prompt_index, InternalMessage(role=MessageRole.SYSTEM, content=GOAL_MODE_SYSTEM_PROMPT))
+    _refresh_goal_mode_messages()
 
     pending_resume_ids = set(getattr(state.checkpoint_state, "pending_resume_message_ids", []))
     if pending_resume_ids:
@@ -215,6 +232,8 @@ async def generate_interactive_turn(
             other_messages.append(message)
         if resume_messages:
             state.messages = [*other_messages, *resume_messages]
+    if exhausted_phase_repaired:
+        await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
 
     while True:
         stream_state.emitted_stream_content = False
@@ -227,8 +246,31 @@ async def generate_interactive_turn(
             current_channel_id = current_channel_id if isinstance(current_channel_id, int) and not isinstance(current_channel_id, bool) and current_channel_id > 0 else None
             model_id = state.model_entry["model_id"]
             protocol = resolve_model_protocol(state.model_entry)
-            if state.context_frozen:
-                await compact_current_context(
+            if is_subagent_work:
+                if not state.checkpoint_state.subagent_context_exhausted:
+                    candidate_request_messages = _build_request_messages(state.messages)
+                    request_context_tokens = estimate_request_context_tokens(
+                        candidate_request_messages,
+                        current_tools,
+                        model_id=model_id,
+                        protocol=protocol,
+                        channel_id=current_channel_id,
+                    )
+                    summary_trigger_tokens = calculate_context_summary_trigger_tokens(
+                        context_window_k=state.chat_params["context_window_k"],
+                        max_tokens=state.chat_params["max_tokens"],
+                        threshold_percent=state.cfg.other.context_summary_threshold_percent,
+                    )
+                    if request_context_tokens >= summary_trigger_tokens:
+                        state.messages.append(InternalMessage(role=MessageRole.USER, content=SUBAGENT_CONTEXT_EXHAUSTED_PROMPT))
+                        state.checkpoint_state.subagent_context_exhausted = True
+                        execution_phase = GOAL_EXECUTION_PHASE_FINALIZING
+                        state.checkpoint_state.execution_phase = execution_phase
+                        stream_state.defer_output_until_response = True
+                        _refresh_goal_mode_messages()
+                        await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+            elif state.context_frozen:
+                await _compact_current_context(
                     force=False,
                     channel_id=current_channel_id,
                     model_id=model_id,
@@ -254,7 +296,7 @@ async def generate_interactive_turn(
                     protocol=protocol,
                     previous_llm_request_metadata=(state.latest_llm_request_metadata if isinstance(state.latest_llm_request_metadata, dict) and state.latest_llm_request_metadata.get("input_tokens_source") == "provider" else None),
                 )
-            request_messages = build_request_messages(state.messages)
+            request_messages = _build_request_messages(state.messages)
             previous_in_memory_llm_request_metadata = state.latest_llm_request_metadata
             session = None
             if hasattr(state.db, "execute"):
@@ -384,7 +426,7 @@ async def generate_interactive_turn(
             response_provider_metadata = getattr(response, "provider_metadata", None)
             ai_refusal = getattr(ai_msg, "refusal", None)
             ai_provider_metadata = getattr(ai_msg, "provider_metadata", None)
-            end_session_signal = (execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg)) or (execution_phase == GOAL_EXECUTION_PHASE_FINALIZING and not state.files_to_user and is_skip_reply_signal(ai_msg))
+            end_session_signal = (execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg)) or (execution_phase == GOAL_EXECUTION_PHASE_FINALIZING and not (is_subagent_work and state.checkpoint_state.subagent_context_exhausted) and not state.files_to_user and is_skip_reply_signal(ai_msg))
             tool_calls_forbidden = execution_phase == GOAL_EXECUTION_PHASE_FINALIZING and bool(ai_msg.tool_calls) and not end_session_signal
             if tool_calls_forbidden or end_session_signal:
                 stream_state.buffered_content_chunks.clear()
@@ -492,14 +534,16 @@ async def generate_interactive_turn(
         except LLMException as exc:
             if isinstance(exc, LLMRequestRejectedException) and not exc.allow_channel_fallback:
                 raise
+            if is_subagent_work and execution_phase == GOAL_EXECUTION_PHASE_FINALIZING:
+                raise
             if stream_state.emitted_stream_content:
                 raise
 
             current_priority = state.channel_rule.priority
-            context_recovery_required = isinstance(exc, LLMContextLengthException)
+            context_recovery_required = isinstance(exc, LLMContextLengthException) and not is_subagent_work
             if context_recovery_required and state.context_frozen and current_priority not in context_length_recovery_priorities:
                 context_length_recovery_priorities.add(current_priority)
-                if await compact_current_context(
+                if await _compact_current_context(
                     force=True,
                     channel_id=current_channel_id,
                     model_id=model_id,

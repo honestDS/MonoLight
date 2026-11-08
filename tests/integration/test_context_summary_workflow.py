@@ -17,6 +17,7 @@ from app.core.constants import (
     ERR_CONTEXT_SUMMARY_OUTPUT_BUDGET_EXHAUSTED,
     FROZEN_CONTEXT_SUMMARY_WORK_KEY_PREFIX,
     GOAL_EXECUTION_PHASE_RUNNING,
+    TOOL_WORKFLOW_FOREGROUND,
 )
 from app.core.crud.context_summary.fragment import (
     build_context_summary_fragment_dedupe_key,
@@ -660,6 +661,7 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
                 session_total_output_tokens=0,
                 execution_phase=GOAL_EXECUTION_PHASE_RUNNING,
             ),
+            tool_workflow=TOOL_WORKFLOW_FOREGROUND,
             context_summary_work_validity_checker=None,
             context_summary_lifecycle_callback=None,
             context_frozen=False,

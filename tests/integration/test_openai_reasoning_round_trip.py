@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.constants import GOAL_EXECUTION_PHASE_RUNNING
+from app.core.constants import GOAL_EXECUTION_PHASE_RUNNING, TOOL_WORKFLOW_FOREGROUND
 from app.core.context import ContextManager
 from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.exceptions import LLMException
@@ -745,6 +745,7 @@ async def test_real_channel_fallback_preserves_persisted_provider_state(
                 "context_window_k": 64,
             },
             model_entry=model_entry,
+            tool_workflow=TOOL_WORKFLOW_FOREGROUND,
             chat_channel=chat_channel,
             chat_cursor_key="round-trip:CHAT",
             chat_channel_obj=channel_one,
@@ -886,6 +887,7 @@ def _build_reasoning_effort_state(
             "context_window_k": model_entry["context_window_k"],
         },
         model_entry=model_entry,
+        tool_workflow=TOOL_WORKFLOW_FOREGROUND,
         chat_channel=chat_channel,
         chat_cursor_key=f"{session_id}:CHAT",
         chat_channel_obj=channel,
