@@ -1,15 +1,16 @@
 import asyncio
 import sys
+from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import event, update
 from sqlalchemy.exc import OperationalError
 
 from app.core.crud.worker.lease import worker_lease_crud
 from app.models.worker_lease import WorkerLease
 from app.providers.database import AsyncSessionLocal
 from app.providers.database.client import CancellationSafeAsyncSession
-from app.providers.database.time import get_database_timestamp
+from app.providers.database.time import get_database_time, get_database_timestamp
 from app.workers import lease as lease_runner
 
 
@@ -119,6 +120,65 @@ async def test_expired_worker_lease_can_be_taken_over():
     assert lease.owner_id == "worker-b"
     assert isinstance(lease.lease_until, int)
     assert isinstance(lease.updated_at, int)
+
+
+@pytest.mark.asyncio
+async def test_worker_lease_works_without_sqlite_unixepoch():
+    engine = AsyncSessionLocal.kw["bind"].sync_engine
+
+    @event.listens_for(engine, "connect")
+    def disable_unixepoch(dbapi_connection, _connection_record):
+        dbapi_connection.create_function("unixepoch", -1, None)
+
+    async with AsyncSessionLocal() as db:
+        acquire_started_at = await get_database_time(db)
+        acquired = await worker_lease_crud.acquire(
+            db,
+            worker_name="background_task",
+            owner_id="worker-a",
+            lease_seconds=30,
+        )
+        acquire_finished_at = await get_database_time(db)
+        lease = await worker_lease_crud.get_by_name(db, "background_task")
+
+    assert acquired is True
+    assert lease is not None
+    assert lease.owner_id == "worker-a"
+    assert isinstance(lease.lease_until, int)
+    assert isinstance(lease.updated_at, int)
+    updated_at = datetime.fromtimestamp(lease.updated_at, UTC).replace(tzinfo=None)
+    assert acquire_started_at <= updated_at <= acquire_finished_at
+
+    async with AsyncSessionLocal() as db:
+        renew_started_at = await get_database_time(db)
+        renewed = await worker_lease_crud.renew(
+            db,
+            worker_name="background_task",
+            owner_id="worker-a",
+            lease_seconds=60,
+        )
+        renew_finished_at = await get_database_time(db)
+        lease = await worker_lease_crud.get_by_name(db, "background_task")
+
+    assert renewed is True
+    assert lease is not None
+    assert lease.owner_id == "worker-a"
+    assert isinstance(lease.lease_until, int)
+    assert isinstance(lease.updated_at, int)
+    updated_at = datetime.fromtimestamp(lease.updated_at, UTC).replace(tzinfo=None)
+    assert renew_started_at <= updated_at <= renew_finished_at
+    assert lease.lease_until == lease.updated_at + 60
+
+    async with AsyncSessionLocal() as db:
+        released = await worker_lease_crud.release(
+            db,
+            worker_name="background_task",
+            owner_id="worker-a",
+        )
+        lease = await worker_lease_crud.get_by_name(db, "background_task")
+
+    assert released is True
+    assert lease is None
 
 
 @pytest.mark.asyncio

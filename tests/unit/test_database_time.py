@@ -8,7 +8,7 @@ from app.providers.database.time import build_database_timestamp_expression
 @pytest.mark.parametrize(
     ("database_type", "dialect", "required_fragments", "forbidden_fragments"),
     [
-        ("sqlite", sqlite.dialect(), ["unixepoch()"], ["extract"]),
+        ("sqlite", sqlite.dialect(), ["strftime", "cast"], ["extract", "unixepoch"]),
         ("mysql", mysql.dialect(), ["unix_timestamp", "current_timestamp"], ["extract"]),
     ],
 )
