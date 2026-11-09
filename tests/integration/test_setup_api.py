@@ -848,7 +848,7 @@ async def test_setup_complete_persists_multiple_models_and_binds_profile_to_firs
     assert profile.is_default is True
     assert profile.prompt_id == database["prompts"][0].id
     assert body["data"]["profile_id"] == profile.id
-    for channel_name in ("chat_channel", "context_summary_channel"):
+    for channel_name in ("chat_channel", "subagent_channel", "context_summary_channel"):
         rules = profile.configs["channel"][channel_name]["rules"]
         assert len(rules) == 1
         assert rules[0]["channel_id"] == channel.id
@@ -1088,7 +1088,7 @@ async def test_setup_complete_can_retry_invalid_model_token_budget_with_same_coo
         assert models[second_model_id if model_style == "list" else first_model_id]["max_tokens"] == 743
 
         profile = database["profiles"][0]
-        for channel_name in ("chat_channel", "context_summary_channel"):
+        for channel_name in ("chat_channel", "subagent_channel", "context_summary_channel"):
             rules = profile.configs["channel"][channel_name]["rules"]
             assert len(rules) == 1
             assert rules[0]["channel_id"] == channel.id
@@ -1186,7 +1186,7 @@ async def test_setup_complete_returns_token_data_and_creates_initial_records(
     assert profiles[0].prompt_id == prompts[0].id
     assert profiles[0].is_default is True
     assert body["data"]["profile_id"] == profiles[0].id
-    for channel_name in ("chat_channel", "context_summary_channel"):
+    for channel_name in ("chat_channel", "subagent_channel", "context_summary_channel"):
         rule = profiles[0].configs["channel"][channel_name]["rules"][0]
         assert rule["channel_id"] == channel.id
         assert rule["model_id"] == TEST_MODEL_ID

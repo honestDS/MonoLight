@@ -409,6 +409,7 @@ async def update_profile(
         old_cfg = ProfileConfig.model_validate(db_profile.configs or {})
         for old_channel_config in (
             old_cfg.channel.chat_channel,
+            old_cfg.channel.subagent_channel,
             old_cfg.channel.context_summary_channel,
             old_cfg.channel.auxiliary_channel,
             old_cfg.channel.rerank_channel,

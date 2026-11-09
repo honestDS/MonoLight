@@ -587,11 +587,16 @@ async def generate_interactive_turn(
                 session_id=state.session_id,
                 **channel_log_extra(state.chat_channel_obj, state.model_entry),
             ).warning(t("LOG_DISPATCHER_NON_STREAM_CHANNEL_FAILED", error=format_exception_message(exc)))
+            if is_subagent_work:
+                retry_call_context = f"subagent_dispatch_{state.dispatcher_mode}_retry"
+            else:
+                retry_call_context = f"chat_dispatch_{state.dispatcher_mode}_retry"
+
             selection = await select_channel(
                 state.db,
                 state.chat_channel,
                 "CHAT",
-                call_context=f"chat_dispatch_{state.dispatcher_mode}_retry",
+                call_context=retry_call_context,
                 excluded_priorities=excluded_priorities,
                 cursor_key=state.chat_cursor_key,
             )

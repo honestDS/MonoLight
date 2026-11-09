@@ -94,6 +94,17 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
                         }
                     ]
                 },
+                "subagent_channel": {
+                    "rules": [
+                        {
+                            "channel_id": channel.id,
+                            "model_id": request.channel.model_ids[0].model_id,
+                            "priority": 1,
+                            "weight": 100,
+                            "is_enabled": True,
+                        }
+                    ]
+                },
                 "context_summary_channel": {
                     "rules": [
                         {

@@ -1441,3 +1441,108 @@ async def test_regular_user_image_compression_invalid_values_return_422_without_
 
     _assert_standard(response, 422)
     assert await _profile_snapshot(session_factory) == before
+
+
+@pytest.mark.asyncio
+async def test_profile_subagent_channel_create_and_update_persists_rules(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
+) -> None:
+    app, session_factory, profile_ids = api_context
+    before = await _profile_snapshot(session_factory)
+    source_profile = next(row for row in before if row["id"] == profile_ids["user-a"]["target"])
+    channel_id = source_profile["configs"]["channel"]["chat_channel"]["rules"][0]["channel_id"]
+    chat_rule = {
+        "channel_id": channel_id,
+        "model_id": "chat-model",
+        "priority": 1,
+        "weight": 100,
+    }
+    create_subagent_rule = {
+        "channel_id": channel_id,
+        "model_id": "chat-model",
+        "priority": 2,
+        "weight": 50,
+    }
+    create_configs = {
+        "channel": {
+            "chat_channel": {"rules": [chat_rule]},
+            "subagent_channel": {"rules": [create_subagent_rule]},
+        }
+    }
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        create_response = await _create_profile(
+            client,
+            _token("user-a"),
+            {"name": "subagent-channel-persistence", "configs": create_configs},
+        )
+        created_data = _assert_profile_success(create_response)
+        profile_id = created_data["id"]
+        created_subagent_rules = created_data["configs"]["channel"]["subagent_channel"]["rules"]
+        assert len(created_subagent_rules) == 1
+        assert created_subagent_rules[0]["channel_id"] == channel_id
+        assert created_subagent_rules[0]["model_id"] == "chat-model"
+        assert created_subagent_rules[0]["priority"] == 2
+        assert created_subagent_rules[0]["weight"] == 50
+        assert created_data["configs"]["channel"]["chat_channel"]["rules"][0]["priority"] == 1
+
+        after_create = await _profile_snapshot(session_factory)
+        persisted_after_create = next(row for row in after_create if row["id"] == profile_id)
+        assert persisted_after_create["configs"] == created_data["configs"]
+        assert persisted_after_create["configs"]["channel"]["subagent_channel"]["rules"] == created_subagent_rules
+        assert tuple(row for row in after_create if row["id"] != profile_id) == before
+
+        update_subagent_rule = {
+            "channel_id": channel_id,
+            "model_id": "chat-model",
+            "priority": 3,
+            "weight": 25,
+        }
+        update_response = await _update_profile(
+            client,
+            _token("user-a"),
+            profile_id,
+            {"configs": {"channel": {"subagent_channel": {"rules": [update_subagent_rule]}}}},
+        )
+        updated_data = _assert_profile_success(update_response)
+        updated_subagent_rules = updated_data["configs"]["channel"]["subagent_channel"]["rules"]
+        assert len(updated_subagent_rules) == 1
+        assert updated_subagent_rules[0]["channel_id"] == channel_id
+        assert updated_subagent_rules[0]["model_id"] == "chat-model"
+        assert updated_subagent_rules[0]["priority"] == 3
+        assert updated_subagent_rules[0]["weight"] == 25
+        assert updated_data["configs"]["channel"]["chat_channel"]["rules"] == created_data["configs"]["channel"]["chat_channel"]["rules"]
+
+        after_update = await _profile_snapshot(session_factory)
+        persisted_after_update = next(row for row in after_update if row["id"] == profile_id)
+        assert persisted_after_update["configs"] == updated_data["configs"]
+        assert persisted_after_update["configs"]["channel"]["subagent_channel"]["rules"] == updated_subagent_rules
+
+        before_invalid_create = await _profile_snapshot(session_factory)
+        invalid_channel_configs = deepcopy(create_configs)
+        invalid_channel_configs["channel"]["subagent_channel"]["rules"][0]["channel_id"] = 999999
+        invalid_channel_response = await _create_profile(
+            client,
+            _token("user-a"),
+            {"name": "subagent-channel-invalid-channel", "configs": invalid_channel_configs},
+        )
+        _assert_standard(invalid_channel_response, 400)
+        assert await _profile_snapshot(session_factory) == before_invalid_create
+
+        before_invalid_update = await _profile_snapshot(session_factory)
+        invalid_config_response = await _update_profile(
+            client,
+            _token("user-a"),
+            profile_id,
+            {
+                "configs": {
+                    "channel": {
+                        "subagent_channel": {
+                            "rules": [{"channel_id": channel_id, "model_id": "chat-model", "priority": 0, "weight": 1}]
+                        }
+                    }
+                }
+            },
+        )
+        _assert_standard(invalid_config_response, 422)
+        assert await _profile_snapshot(session_factory) == before_invalid_update

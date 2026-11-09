@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel.router import select_channel
-from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND
+from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND, TOOL_WORKFLOW_SUBAGENT
 from app.core.context import ContextManager
 from app.core.exceptions import LLMException
 from app.core.utils.dispatcher.helpers import get_multimodal_from_entry, resolve_chat_params
@@ -25,6 +25,7 @@ class DispatcherValidationMixin:
         profile,
         attachments: list[str] | None = None,
         additional_system_prompt: str | None = None,
+        tool_workflow: str | None = None,
     ) -> None:
         dispatcher_module = import_module("app.core.dispatchers.dispatcher")
         validate_profile = getattr(dispatcher_module, "validate_profile_and_cfg", validate_profile_and_cfg)
@@ -33,8 +34,13 @@ class DispatcherValidationMixin:
         del additional_system_prompt
 
         cfg = await validate_profile(db, profile)
-        chat_channel = cfg.channel.chat_channel
-        selection = await select_chat_channel(db, chat_channel, "CHAT", call_context="chat_preflight", cursor_key=None, log_selection=False)
+        if tool_workflow == TOOL_WORKFLOW_SUBAGENT:
+            chat_channel = cfg.channel.resolve_subagent_channel()
+            call_context = "subagent_preflight"
+        else:
+            chat_channel = cfg.channel.chat_channel
+            call_context = "chat_preflight"
+        selection = await select_chat_channel(db, chat_channel, "CHAT", call_context=call_context, cursor_key=None, log_selection=False)
         if not selection:
             raise LLMException(message=ERR_CHAT_CHANNEL_NOT_FOUND)
 

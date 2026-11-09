@@ -244,6 +244,16 @@
               </div>
 
               <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.subagent_channel') }}</div>
+                <ChannelEditor
+                  :channel="form.configs.channel.subagent_channel"
+                  :channels="channels"
+                  usage="CHAT"
+                  :label="$t('profiles.subagent_model')"
+                />
+              </div>
+
+              <div class="settings-section">
                 <div class="settings-section-title">
                   {{ $t('profiles.context_summary_channel') }}
                   <HelpTooltip :content="$t('profiles.context_summary_channel_hint')" />

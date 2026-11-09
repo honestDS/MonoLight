@@ -57,14 +57,30 @@ class ChannelGroupConfig(BaseModel):
     """渠道管理组配置（渠道管理架构）"""
 
     chat_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="对话渠道配置")
+    subagent_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="子代理渠道配置")
     context_summary_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="上下文总结渠道配置")
     auxiliary_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="标题生成及前置召回预检辅助渠道配置")
     rerank_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="重排渠道配置")
     image_generation_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="图像生成渠道配置")
 
+    def resolve_subagent_channel(self) -> ChannelConfig:
+        """子代理渠道未配置规则时动态回退到对话渠道。"""
+        return self.subagent_channel if self.subagent_channel.rules else self.chat_channel
+
     def resolve_auxiliary_channel(self) -> ChannelConfig:
         """辅助渠道未配置规则时动态回退到对话渠道。"""
         return self.auxiliary_channel if self.auxiliary_channel.rules else self.chat_channel
+
+    @model_validator(mode="before")
+    @classmethod
+    def fallback_subagent_channel(cls, data: Any, info: ValidationInfo) -> Any:
+        """旧配置缺少子代理渠道时，运行期使用对话渠道的独立副本。"""
+        if (info.context or {}).get("partial_update") or not isinstance(data, dict) or "subagent_channel" in data:
+            return data
+
+        normalized = dict(data)
+        normalized["subagent_channel"] = copy.deepcopy(data.get("chat_channel", {}))
+        return normalized
 
     @model_validator(mode="before")
     @classmethod
@@ -264,6 +280,7 @@ class ProfileConfig(BaseModel):
         schema_map = {
             "channel": [
                 "chat_channel",
+                "subagent_channel",
                 "context_summary_channel",
                 "auxiliary_channel",
                 "rerank_channel",
@@ -376,6 +393,11 @@ PROFILE_EXAMPLE = {
                 "chat_timeout": 60.0,
                 "rules": [
                     {"channel_id": 1, "model_id": "gpt-4o", "priority": 1, "weight": 100},
+                ],
+            },
+            "subagent_channel": {
+                "rules": [
+                    {"channel_id": 1, "model_id": "gpt-4o-mini", "priority": 1, "weight": 100},
                 ],
             },
             "context_summary_channel": {

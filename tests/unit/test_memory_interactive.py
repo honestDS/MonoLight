@@ -44,13 +44,33 @@ class _Channel:
 
 class _Dispatcher(non_stream_module.NonStreamDispatcherMixin):
     @classmethod
-    async def validate_initial_message_before_save(cls, db, message, uid, session_id, profile, attachments):
+    async def validate_initial_message_before_save(
+        cls,
+        db,
+        message,
+        uid,
+        session_id,
+        profile,
+        attachments,
+        *,
+        tool_workflow=None,
+    ):
         return None
 
 
 class _StreamDispatcher(stream_module.StreamDispatcherMixin):
     @classmethod
-    async def validate_initial_message_before_save(cls, db, message, uid, session_id, profile, attachments):
+    async def validate_initial_message_before_save(
+        cls,
+        db,
+        message,
+        uid,
+        session_id,
+        profile,
+        attachments,
+        *,
+        tool_workflow=None,
+    ):
         return None
 
 

@@ -118,6 +118,8 @@ export default {
   chat_channel: 'Chat Channel',
   chat_channel_label: 'Chat Models',
   chat_model: 'Chat Model',
+  subagent_channel: 'Subagent Channel',
+  subagent_model: 'Subagent Model',
   context_summary_channel: 'Context Summary Channel',
   context_summary_model: 'Context Summary Model',
   context_summary_channel_hint: 'Used to condense older conversation history. Set it up separately from chat models; only chat-capable models can be selected.',

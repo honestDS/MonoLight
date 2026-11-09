@@ -31,6 +31,7 @@ async def lock_profile_channel_references(
 
     for channel_config in (
         cfg.channel.chat_channel,
+        cfg.channel.subagent_channel,
         cfg.channel.context_summary_channel,
         cfg.channel.auxiliary_channel,
         cfg.channel.rerank_channel,
@@ -126,6 +127,7 @@ async def validate_channel_configs(
     """校验 channel 配置中的渠道配置合法性。
 
     - chat_channel：至少需要一条启用规则
+    - subagent_channel：可选，有配置则按 CHAT 用途校验
     - context_summary_channel：可选，有配置则按 CHAT 用途校验
     - auxiliary_channel：可选，有配置则按 CHAT 用途校验
     - rerank_channel：可选，有配置则校验
@@ -134,6 +136,7 @@ async def validate_channel_configs(
     """
     channel_usage_map = {
         "chat_channel": ModelUsage.CHAT,
+        "subagent_channel": ModelUsage.CHAT,
         "context_summary_channel": ModelUsage.CHAT,
         "auxiliary_channel": ModelUsage.CHAT,
         "rerank_channel": ModelUsage.RERANK,

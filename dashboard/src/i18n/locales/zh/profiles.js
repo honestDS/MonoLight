@@ -118,6 +118,8 @@ export default {
   chat_channel: '对话渠道',
   chat_channel_label: '对话模型',
   chat_model: '对话模型',
+  subagent_channel: '子代理渠道',
+  subagent_model: '子代理模型',
   context_summary_channel: '总结渠道',
   context_summary_model: '总结模型',
   context_summary_channel_hint: '用于压缩较早对话历史，与对话模型独立配置；仅可选择具备对话能力的模型。',

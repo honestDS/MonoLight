@@ -1624,6 +1624,77 @@ test('configured auxiliary channel rules survive cleanup, save, reopen, and clea
   assert.deepEqual(normalize(row), originalRow)
 })
 
+test('subagent channel falls back to chat channel on legacy profiles and supports independent rules', async t => {
+  const chatConfig = {
+    ...defaultProfileConfigs().channel.chat_channel,
+    chat_timeout: 111,
+    rules: [{ channel_id: 41, model_id: 'chat-model', reasoning_effort: 'low', priority: 1, weight: 2 }],
+  }
+  const summaryConfig = {
+    ...defaultProfileConfigs().channel.context_summary_channel,
+    chat_timeout: 222,
+    rules: [{ channel_id: 42, model_id: 'summary-model', reasoning_effort: 'medium', priority: 1, weight: 2 }],
+  }
+  const legacyRow = {
+    id: 115,
+    uid: 'user-a',
+    name: 'legacy profile without subagent channel',
+    prompt_id: null,
+    knowledge_base_ids: [],
+    configs: {
+      channel: {
+        chat_channel: normalize(chatConfig),
+        context_summary_channel: normalize(summaryConfig),
+      },
+    },
+  }
+  const originalLegacyRow = normalize(legacyRow)
+  const harness = await createHarness(t)
+
+  harness.module.showDialog('edit', legacyRow)
+  await flush()
+
+  const subagentChannel = harness.module.form.configs.channel.subagent_channel
+  assert.deepEqual(normalize(subagentChannel), normalize(chatConfig))
+  assert.notEqual(subagentChannel, harness.module.form.configs.channel.chat_channel)
+
+  subagentChannel.rules = [
+    { channel_id: 52, model_id: 'sub-later', reasoning_effort: ' high ', priority: 20, weight: 2 },
+    { channel_id: 53, model_id: '', reasoning_effort: 'low', priority: 5, weight: 1 },
+    { channel_id: 51, model_id: 'sub-first', reasoning_effort: ' none ', priority: 10, weight: 0 },
+    { channel_id: null, model_id: 'orphan-model', reasoning_effort: 'medium', priority: 3, weight: 1 },
+  ]
+
+  const expectedSubagentRules = [
+    { channel_id: 51, model_id: 'sub-first', priority: 10, weight: 0, reasoning_effort: 'none' },
+    { channel_id: 52, model_id: 'sub-later', priority: 20, weight: 2, reasoning_effort: 'high' },
+  ]
+  const expectedSubagent = {
+    ...normalize(chatConfig),
+    rules: expectedSubagentRules,
+  }
+
+  await harness.module.submitForm()
+  await flush()
+
+  const firstPayload = harness.api.updates[0].payload
+  assert.deepEqual(normalize(firstPayload.configs.channel.subagent_channel), expectedSubagent)
+  assert.deepEqual(normalize(firstPayload.configs.channel.chat_channel), chatConfig)
+  assert.deepEqual(normalize(legacyRow), originalLegacyRow)
+
+  const savedRow = { ...legacyRow, configs: normalize(firstPayload.configs) }
+  harness.module.showDialog('edit', savedRow)
+  await flush()
+  assert.deepEqual(normalize(harness.module.form.configs.channel.subagent_channel), expectedSubagent)
+
+  harness.module.form.configs.channel.subagent_channel.rules = []
+  await harness.module.submitForm()
+  await flush()
+
+  const secondPayload = harness.api.updates[1].payload
+  assert.deepEqual(normalize(secondPayload.configs.channel.subagent_channel.rules), [])
+})
+
 test('clearing permissions ignores late profile list permissions and rows', async t => {
   let resolveLateList
   let listRequestCount = 0

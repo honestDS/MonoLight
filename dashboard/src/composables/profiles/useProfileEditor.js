@@ -170,6 +170,11 @@ export function useProfileEditor({
           const p = row.configs.channel
           // 深合并渠道配置
           if (p.chat_channel) Object.assign(base.channel.chat_channel, JSON.parse(JSON.stringify(p.chat_channel)))
+          if (p.subagent_channel) {
+            Object.assign(base.channel.subagent_channel, JSON.parse(JSON.stringify(p.subagent_channel)))
+          } else {
+            base.channel.subagent_channel = JSON.parse(JSON.stringify(base.channel.chat_channel))
+          }
           if (p.context_summary_channel) {
             Object.assign(base.channel.context_summary_channel, JSON.parse(JSON.stringify(p.context_summary_channel)))
           } else {
@@ -244,6 +249,7 @@ export function useProfileEditor({
       }
     }
     cleanChannel(form.configs.channel.chat_channel)
+    cleanChannel(form.configs.channel.subagent_channel)
     cleanChannel(form.configs.channel.context_summary_channel)
     cleanChannel(form.configs.channel.auxiliary_channel)
     cleanChannel(form.configs.channel.rerank_channel)

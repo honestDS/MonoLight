@@ -140,7 +140,15 @@ async def dispatch_interactive(
                 )
             dispatch_logger.bind(uid=uid, session_id=session_id).info(log_message)
 
-        await validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
+        await validate_initial_message_before_save(
+            db,
+            message,
+            uid,
+            session_id,
+            profile,
+            attachments,
+            tool_workflow=tool_workflow,
+        )
 
         initial_msg = persisted_initial_message or await save_initial_message(db, session_id, uid, profile, message, attachments, source=session_source)
 
@@ -326,13 +334,20 @@ async def dispatch_interactive(
                 if state.is_first_iter:
                     await mark_initial_message_processed(db, state.initial_msg.id)
 
-                state.chat_channel = state.cfg.channel.chat_channel
-                state.chat_cursor_key = f"{profile.id}:CHAT"
+                if is_subagent_work:
+                    state.chat_channel = state.cfg.channel.resolve_subagent_channel()
+                    state.chat_cursor_key = f"{profile.id}:SUBAGENT"
+                    channel_call_context = f"subagent_dispatch_{dispatcher_mode}"
+                else:
+                    state.chat_channel = state.cfg.channel.chat_channel
+                    state.chat_cursor_key = f"{profile.id}:CHAT"
+                    channel_call_context = f"chat_dispatch_{dispatcher_mode}"
+
                 selection = await select_channel(
                     db,
                     state.chat_channel,
                     "CHAT",
-                    call_context=f"chat_dispatch_{dispatcher_mode}",
+                    call_context=channel_call_context,
                     cursor_key=state.chat_cursor_key,
                 )
                 if not selection:

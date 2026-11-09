@@ -50,6 +50,7 @@ const defaultChannelConfig = () => ({
 export const defaultProfileConfigs = (defaults = {}) => ({
   channel: {
     chat_channel: defaultChannelConfig(),
+    subagent_channel: defaultChannelConfig(),
     context_summary_channel: defaultChannelConfig(),
     auxiliary_channel: defaultChannelConfig(),
     rerank_channel: defaultChannelConfig(),
