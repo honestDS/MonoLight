@@ -16,7 +16,7 @@ greenlet
 sqlalchemy
 sqlmodel
 Pillow
-firecrawl-py # 搜索引擎 网页解析引擎
+firecrawl-py==4.28.2 # 搜索引擎 网页解析引擎
 tiktoken
 
 markdown

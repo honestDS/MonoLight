@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from firecrawl import AsyncV1FirecrawlApp
+from firecrawl import AsyncFirecrawl
+from firecrawl.v2.utils.error_handler import UnauthorizedError
+from httpx import RequestError
 
 from app.core.constants import (
     ERR_TOOL_FIRECRAWL_API_KEY_MISSING,
@@ -38,35 +40,39 @@ class FirecrawlWebClient:
         mobile: bool = False,
         wait_for: int = 0,
     ) -> Any:
-        formats = ["rawHtml" if item == "raw_html" else item for item in formats]
         options = {"only_main_content": only_main_content, "mobile": mobile, "wait_for": wait_for}
         self.logger.bind(uid=self.uid, url=url).info(t("LOG_FIRECRAWL_SCRAPING", formats=formats, options=options))
         return await self._request("scrape", url=url, formats=formats, **options)
 
     async def _request(self, operation: Literal["search", "scrape"], **params: Any) -> Any:
         try:
-            app = AsyncV1FirecrawlApp(api_key=self.api_key)
-            if operation == "search":
-                result = await app.search(query=params["query"], limit=10)
-            else:
-                result = await app.scrape_url(
-                    params["url"],
-                    formats=params["formats"],
-                    only_main_content=params["only_main_content"],
-                    mobile=params["mobile"],
-                    wait_for=params["wait_for"],
-                )
-            return result.model_dump() if hasattr(result, "model_dump") else result
+            app = AsyncFirecrawl(api_key=self.api_key)
+            try:
+                if operation == "search":
+                    result = await app.search(query=params["query"], limit=10, timeout=30000)
+                else:
+                    result = await app.scrape(
+                        params["url"],
+                        formats=params["formats"],
+                        only_main_content=params["only_main_content"],
+                        mobile=params["mobile"],
+                        wait_for=params["wait_for"],
+                        timeout=30000,
+                        max_age=0,
+                        skip_tls_verification=False,
+                    )
+                return result.model_dump()
+            finally:
+                await app.v2.async_http_client.close()
         except Exception as exc:
             if operation == "search":
                 self.logger.bind(uid=self.uid, query=params["query"]).error(t("LOG_FIRECRAWL_SEARCH_FAILED"), exc_info=True)
             else:
                 self.logger.bind(uid=self.uid, url=params["url"]).error(t("LOG_FIRECRAWL_SCRAPE_FAILED"), exc_info=True)
 
-            error_msg = str(exc)
-            if "NoneType" in error_msg:
+            if isinstance(exc, RequestError):
                 raise ServerException(ERR_TOOL_FIRECRAWL_NETWORK_FAILED) from exc
-            if "401" in error_msg or "Unauthorized" in error_msg:
+            if isinstance(exc, UnauthorizedError):
                 raise ApiKeyException(ERR_TOOL_FIRECRAWL_AUTH_FAILED) from exc
             raise
 
