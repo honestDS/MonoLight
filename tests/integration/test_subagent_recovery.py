@@ -10,6 +10,7 @@ from app.core.constants import AGENT_WORK_TOOL_NAME, END_SESSION_TOOL_NAME, FILE
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.prompts import SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.consumer import SessionReplyConsumer
+from app.core.utils.llm_request_params import build_session_cache_key
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
@@ -78,9 +79,13 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
             child = await _child_for_parent(db, parent_work_id)
             assert child.id is not None and child.subagent_id is not None
             child_work_id, subagent_id = child.id, child.subagent_id
+            parent_key = build_session_cache_key(uid=runtime.uid, session_id=runtime.session_id)
+            child_key = build_session_cache_key(uid=runtime.uid, session_id=runtime.session_id, subagent_id=subagent_id)
+            assert parent_key != child_key
             parent_call = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id))).scalars().one()
             parent_tool_call_id = parent_call.tool_call_id
 
+        child_provider_start = len(runtime.provider_payloads)
         write_call_id = "recovery-child-write-call"
         runtime.outputs.append(
             InternalMessage(
@@ -118,6 +123,9 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
         assert interrupted and target.read_text(encoding="utf-8") == written_content
         target.write_text(sentinel_content, encoding="utf-8")
         assert isinstance(write_result_call_id, str) and write_result_call_id
+        interrupted_child_provider_payloads = runtime.provider_payloads[child_provider_start:]
+        assert interrupted_child_provider_payloads
+        assert all(payload["prompt_cache_key"] == child_key for payload in interrupted_child_provider_payloads)
 
         async with runtime.factory() as db:
             child = await db.get(SessionReplyWorkItem, child_work_id)
@@ -207,6 +215,9 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
         assert new_child_done is not None and new_child_done.id == new_child_work_id
         assert new_child_done.status == SessionReplyWorkStatus.SUCCEEDED
         assert target.read_text(encoding="utf-8") == sentinel_content
+        new_child_provider_payloads = runtime.provider_payloads[provider_start:]
+        assert new_child_provider_payloads
+        assert all(payload["prompt_cache_key"] == child_key for payload in new_child_provider_payloads)
 
         first_resume_request = json.dumps(runtime.provider_payloads[provider_start], ensure_ascii=False)
         assert write_result_call_id in first_resume_request and new_child_message in first_resume_request

@@ -36,6 +36,7 @@ from app.core.session_reply_queue.manager_common import is_scheduled_task_work, 
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.core.utils.dispatcher.terminal_watch_snapshot import strip_terminal_watch_snapshot
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
+from app.core.utils.llm_request_params import build_session_cache_key
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.request_token_baseline import build_session_cache_metrics
 from app.models.message import InternalMessage, MessageRole, MessageType
@@ -517,6 +518,7 @@ async def _dispatch_interactive_work(
         "db": db,
         "message": message,
         "uid": uid,
+        "cache_key": build_session_cache_key(uid=uid, session_id=session_id, subagent_id=work.subagent_id),
         "actor_uid": execution_state.get("actor_uid") or uid,
         "actor_username": execution_state.get("actor_username"),
         "session_id": session_id,

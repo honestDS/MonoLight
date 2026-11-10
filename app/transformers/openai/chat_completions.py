@@ -156,6 +156,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         tool_choice: str,
         top_p: Any,
         reasoning_effort: Any = None,
+        cache_key: str | None = None,
     ) -> dict[str, Any]:
         payload = {
             "model": model_id,
@@ -175,6 +176,8 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             payload["top_p"] = top_p
         if reasoning_effort is not None:
             payload["reasoning_effort"] = reasoning_effort
+        if cache_key:
+            payload["prompt_cache_key"] = cache_key
         return payload
 
     async def generate(
@@ -206,6 +209,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             tool_choice=tool_choice,
             top_p=kwargs.get("top_p"),
             reasoning_effort=kwargs.get("reasoning_effort"),
+            cache_key=kwargs.get("cache_key"),
         )
 
         url = f"{base_url.rstrip('/')}/chat/completions"
@@ -251,6 +255,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             tool_choice=tool_choice,
             top_p=kwargs.get("top_p"),
             reasoning_effort=kwargs.get("reasoning_effort"),
+            cache_key=kwargs.get("cache_key"),
         )
 
         url = f"{base_url.rstrip('/')}/chat/completions"

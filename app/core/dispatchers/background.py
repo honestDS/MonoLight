@@ -74,6 +74,7 @@ from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo
 from app.core.utils.dispatcher.tool_call_correction import build_virtual_tool_feedback_messages
 from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
+from app.core.utils.llm_request_params import build_session_cache_key
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
@@ -145,6 +146,7 @@ class BackgroundDispatcherMixin:
         tool_workflow: str = TOOL_WORKFLOW_BACKGROUND_PROACTIVE,
         reply_source: str = "background_task",
         final_message_dedupe_key: str | None = None,
+        cache_key: str | None = None,
         audit_execution_binding_callback: Callable[[dict[str, Any] | None], Awaitable[None]] | None = None,
         request_metadata_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> tuple[InternalMessage, list[InternalMessage], list[dict[str, Any]]]:
@@ -249,6 +251,7 @@ class BackgroundDispatcherMixin:
                     tools=tools,
                     tool_choice="auto",  # 最终阶段由本地拦截，避免上游 none 处理差异。
                     require_content_or_tools=False,
+                    cache_key=cache_key,
                     request_metadata_callback=request_metadata_callback,
                     context_length_recovery_callback=partial(
                         recover_context_length,
@@ -342,6 +345,7 @@ class BackgroundDispatcherMixin:
             session_id=session_id,
             tools=tools,
             tool_choice="auto",
+            cache_key=cache_key,
             request_metadata_callback=request_metadata_callback,
             context_length_recovery_callback=partial(
                 recover_context_length,
@@ -390,6 +394,7 @@ class BackgroundDispatcherMixin:
                     session_id=session_id,
                     tools=tools,
                     tool_choice="auto",
+                    cache_key=cache_key,
                     request_metadata_callback=request_metadata_callback,
                     context_length_recovery_callback=partial(
                         recover_context_length,
@@ -431,6 +436,7 @@ class BackgroundDispatcherMixin:
                         session_id=session_id,
                         tools=tools,
                         tool_choice="auto",  # 最终阶段由本地拦截，避免上游 none 处理差异。
+                        cache_key=cache_key,
                         request_metadata_callback=request_metadata_callback,
                         context_length_recovery_callback=partial(
                             recover_context_length,
@@ -789,6 +795,7 @@ class BackgroundDispatcherMixin:
             tools=tools,
             tool_choice="auto",  # 最终阶段由本地拦截，避免上游 none 处理差异。
             require_content_or_tools=False,
+            cache_key=cache_key,
             request_metadata_callback=request_metadata_callback,
             context_length_recovery_callback=partial(
                 recover_context_length,
@@ -858,6 +865,7 @@ class BackgroundDispatcherMixin:
                 call_context="background_task_proactive_reply",
                 allow_tools=True,
                 reply_source="background_task",
+                cache_key=build_session_cache_key(uid=task_uid, session_id=task_session_id),
             )
             content = parse_assistant_files_content(ai_msg.content)
             return {

@@ -39,6 +39,7 @@ from app.core.utils.background_task_result import build_background_task_success_
 from app.core.utils.dispatcher.process_single_tool import process_single_tool
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
+from app.core.utils.llm_request_params import build_session_cache_key
 from app.handler import register_handlers
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.channel import ModelChannel
@@ -1562,6 +1563,8 @@ async def test_completed_background_image_tasks_do_not_regenerate_images_in_fina
     assert all(call["n"] == 1 for call in image_generation_calls)
     assert all(call["model_id"] == "background-image-model" for call in image_generation_calls)
     assert len(gateway_requests) == 2
+    expected_cache_key = build_session_cache_key(uid=UID, session_id=session_id)
+    assert [request["prompt_cache_key"] for request in gateway_requests] == [expected_cache_key, expected_cache_key]
     assert gateway_requests[0]["tools"]
     assert gateway_requests[0]["tool_choice"] == "auto"
     assert gateway_requests[1]["tools"] == gateway_requests[0]["tools"]

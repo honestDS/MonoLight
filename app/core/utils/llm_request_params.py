@@ -1,3 +1,5 @@
+import hashlib
+import json
 from typing import Any
 
 from app.core.constants import (
@@ -7,6 +9,15 @@ from app.core.constants import (
     MEMORY_RECALL_PRECHECK_TOP_P,
     SESSION_TITLE_TOP_P,
 )
+
+
+def build_session_cache_key(*, uid: str, session_id: str, subagent_id: str | None = None) -> str:
+    identities = [uid, session_id]
+    if subagent_id is not None:
+        identities.append(subagent_id)
+    serialized = json.dumps(identities, ensure_ascii=False, separators=(",", ":"))
+    encoded = serialized.encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def clean_generation_params(
@@ -123,6 +134,7 @@ __all__ = [
     "build_context_summary_generation_params",
     "build_internal_task_generation_params",
     "build_memory_recall_precheck_generation_params",
+    "build_session_cache_key",
     "build_session_title_generation_params",
     "clean_generation_params",
 ]

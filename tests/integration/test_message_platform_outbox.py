@@ -656,6 +656,7 @@ async def test_outbound_text_refinement_uses_minimal_independent_request_contrac
         assert payload["messages"] == expected_messages
         assert "tools" not in payload
         assert payload["tool_choice"] == "none"
+        assert "prompt_cache_key" not in payload
         assert sentinel not in json.dumps(payload, ensure_ascii=False)
 
     async with AsyncSessionLocal() as db:

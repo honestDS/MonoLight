@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.constants import AGENT_WORK_TOOL_NAME, ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS
+from app.core.utils.llm_request_params import build_session_cache_key
 from app.models.channel import ModelChannel
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
@@ -151,6 +152,17 @@ async def _run_dispatch(
     else:
         assert [payload["model"] for payload in child_payloads] == expected_child_models
 
+    assert isinstance(child_done.subagent_id, str) and child_done.subagent_id
+    parent_cache_key = build_session_cache_key(uid=runtime.uid, session_id=runtime.session_id)
+    child_cache_key = build_session_cache_key(
+        uid=runtime.uid,
+        session_id=runtime.session_id,
+        subagent_id=child_done.subagent_id,
+    )
+    assert parent_cache_key != child_cache_key
+    assert all(payload["prompt_cache_key"] == parent_cache_key for payload in parent_payloads)
+    assert all(payload["prompt_cache_key"] == child_cache_key for payload in child_payloads)
+
     return parent_done, child_done
 
 
@@ -176,6 +188,93 @@ async def test_subagent_falls_back_to_chat_channel_when_subagent_rules_empty(ima
     async with image_chat_runtime(protocol="OPENAI_RESPONSES", goal_mode=False) as runtime:
         await _configure_runtime(runtime, [])
         await _run_dispatch(runtime, expected_child_model="http-image-model")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"])
+async def test_subagent_cache_keys_are_scoped_across_two_children_and_parent_resume(image_chat_runtime, protocol) -> None:
+    async with image_chat_runtime(protocol=protocol, goal_mode=False) as runtime:
+        await _configure_runtime(runtime, [])
+        runtime.outputs.append(
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                tool_calls=[
+                    InternalToolCall(
+                        id="create-child-alpha",
+                        name=AGENT_WORK_TOOL_NAME,
+                        arguments={
+                            "operation": "create",
+                            "name": "child alpha",
+                            "message": "Complete the first independent child task.",
+                        },
+                    ),
+                    InternalToolCall(
+                        id="create-child-beta",
+                        name=AGENT_WORK_TOOL_NAME,
+                        arguments={
+                            "operation": "create",
+                            "name": "child beta",
+                            "message": "Complete the second independent child task.",
+                        },
+                    ),
+                ],
+            )
+        )
+
+        accepted = await runtime.client.post(
+            "/api/v1/chat/completions",
+            json={
+                "session_id": runtime.session_id,
+                "request_id": "two-child-cache-key-request",
+                "message": "Create both independent child tasks.",
+            },
+        )
+        assert accepted.status_code == 200
+        parent_work_id = accepted.json()["data"]["work_id"]
+
+        parent_provider_start = len(runtime.provider_payloads)
+        parent_waiting = await runtime.run_next(independent_only=False)
+        assert parent_waiting is not None
+        assert parent_waiting.id == parent_work_id
+        assert parent_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        parent_payloads = runtime.provider_payloads[parent_provider_start:]
+        assert parent_payloads
+        parent_cache_key = build_session_cache_key(uid=runtime.uid, session_id=runtime.session_id)
+        assert all(payload["prompt_cache_key"] == parent_cache_key for payload in parent_payloads)
+
+        child_works = []
+        child_cache_keys = []
+        for child_content in ("First child completed.", "Second child completed."):
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=child_content))
+            child_provider_start = len(runtime.provider_payloads)
+            child_done = await runtime.run_next(independent_only=True)
+            assert child_done is not None
+            assert child_done.status == SessionReplyWorkStatus.SUCCEEDED
+            assert isinstance(child_done.subagent_id, str) and child_done.subagent_id
+            child_payloads = runtime.provider_payloads[child_provider_start:]
+            assert child_payloads
+            child_cache_key = build_session_cache_key(
+                uid=runtime.uid,
+                session_id=runtime.session_id,
+                subagent_id=child_done.subagent_id,
+            )
+            assert child_cache_key != parent_cache_key
+            assert all(payload["prompt_cache_key"] == child_cache_key for payload in child_payloads)
+            child_works.append(child_done)
+            child_cache_keys.append(child_cache_key)
+
+        assert len({work.subagent_id for work in child_works}) == 2
+        assert len(set(child_cache_keys)) == 2
+
+        parent_resume_provider_start = len(runtime.provider_payloads)
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="Parent task completed."))
+        parent_done = await runtime.run_next(independent_only=False)
+        assert parent_done is not None
+        assert parent_done.id == parent_work_id
+        assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+        parent_resume_payloads = runtime.provider_payloads[parent_resume_provider_start:]
+        assert parent_resume_payloads
+        assert all(payload["prompt_cache_key"] == parent_cache_key for payload in parent_resume_payloads)
 
 
 @pytest.mark.asyncio

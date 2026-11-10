@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module
 from app.core.constants import AGENT_WORK_TOOL_NAME, FILE_TOOL_NAME
+from app.core.utils.llm_request_params import build_session_cache_key
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session_reply_work_item import (
@@ -575,6 +576,11 @@ async def test_completed_subagent_starts_new_round_with_previous_context(
             subagent_id = child.subagent_id
             assert old_child_work_id is not None
             assert isinstance(subagent_id, str) and subagent_id
+            parent_key = build_session_cache_key(uid=runtime.uid, session_id=runtime.session_id)
+            child_key = build_session_cache_key(uid=runtime.uid, session_id=runtime.session_id, subagent_id=subagent_id)
+            assert parent_key != child_key
+
+        assert all(payload["prompt_cache_key"] == parent_key for payload in runtime.provider_payloads[first_parent_provider_start:])
 
         runtime.outputs.extend(
             [
@@ -591,10 +597,14 @@ async def test_completed_subagent_starts_new_round_with_previous_context(
                 InternalMessage(role=MessageRole.ASSISTANT, content=first_summary),
             ]
         )
+        first_child_provider_start = len(runtime.provider_payloads)
         first_child_done = await runtime.run_next()
         assert first_child_done is not None
         assert first_child_done.id == old_child_work_id
         assert first_child_done.status == SessionReplyWorkStatus.SUCCEEDED
+        first_child_provider_payloads = runtime.provider_payloads[first_child_provider_start:]
+        assert first_child_provider_payloads
+        assert all(payload["prompt_cache_key"] == child_key for payload in first_child_provider_payloads)
 
         async with runtime.factory() as db:
             old_round = await db.get(SubagentWork, old_child_work_id)
@@ -680,6 +690,8 @@ async def test_completed_subagent_starts_new_round_with_previous_context(
         assert new_parent_done.id == new_parent_work_id
         assert new_parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
         assert len(runtime.provider_payloads) == new_parent_provider_start + 2
+        new_parent_provider_payloads = runtime.provider_payloads[new_parent_provider_start:]
+        assert [payload["prompt_cache_key"] for payload in new_parent_provider_payloads] == [parent_key, parent_key]
 
         async with runtime.factory() as db:
             new_child = (
@@ -781,7 +793,10 @@ async def test_completed_subagent_starts_new_round_with_previous_context(
         assert second_child_done.id == new_child_work_id
         assert second_child_done.status == SessionReplyWorkStatus.SUCCEEDED
 
-        child_provider_dump = json.dumps(runtime.provider_payloads[child_provider_start:], ensure_ascii=False)
+        second_child_provider_payloads = runtime.provider_payloads[child_provider_start:]
+        assert second_child_provider_payloads
+        assert all(payload["prompt_cache_key"] == child_key for payload in second_child_provider_payloads)
+        child_provider_dump = json.dumps(second_child_provider_payloads, ensure_ascii=False)
         assert file_content in child_provider_dump
         assert first_summary in child_provider_dump
         assert new_child_message in child_provider_dump

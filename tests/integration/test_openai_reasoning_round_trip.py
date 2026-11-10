@@ -9,15 +9,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.constants import GOAL_EXECUTION_PHASE_RUNNING, TOOL_WORKFLOW_FOREGROUND
 from app.core.context import ContextManager
 from app.core.dispatchers import interactive_generation as interactive_generation_module
+from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.exceptions import LLMException
 from app.core.utils.dispatcher import channel_call
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_message import save_message
+from app.core.utils.llm_request_params import build_session_cache_key
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, InternalResponse, Message, MessageResponse, MessageRole, MessageType
 from app.models.profile import OtherConfig, Profile, ToolConfig
 from app.models.session import ChatSession
 from app.providers.llm.client import LLMClient
+from app.transformers import http_transport
 from app.transformers.openai.base import BaseOpenAITransformer
 from app.transformers.openai.chat_completions import OpenAIChatCompletionsTransformer
 from app.transformers.openai.responses import OpenAIResponsesTransformer
@@ -152,6 +155,7 @@ async def _ignore_content(_content: str) -> None:
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("with_tools", [False, True])
 @pytest.mark.parametrize("reasoning", ["Think carefully.", ""])
+@pytest.mark.parametrize("cache_key", [None, "stable-request-cache-key"])
 @pytest.mark.asyncio
 async def test_openai_reasoning_round_trip(
     db_session: AsyncSession,
@@ -160,6 +164,7 @@ async def test_openai_reasoning_round_trip(
     stream: bool,
     with_tools: bool,
     reasoning: str,
+    cache_key: str | None,
 ) -> None:
     db_session.add(ChatSession(session_id=SESSION_ID, uid=UID, profile_id=PROFILE_ID))
     await db_session.commit()
@@ -203,6 +208,7 @@ async def test_openai_reasoning_round_trip(
         "tools": tools if with_tools else None,
         "protocol": protocol,
         "channel_id": 1,
+        "cache_key": cache_key,
     }
     if stream:
         call_kwargs["on_content"] = _ignore_content
@@ -261,6 +267,12 @@ async def test_openai_reasoning_round_trip(
     call_kwargs["messages"] = history
     await generate(**call_kwargs)
     assert len(captured_payloads) == 2
+    for payload in captured_payloads:
+        assert "cache_key" not in payload
+        if cache_key is None:
+            assert "prompt_cache_key" not in payload
+        else:
+            assert payload["prompt_cache_key"] == cache_key
     first_payload, second_payload = captured_payloads
     if protocol == "openai_responses":
         assert first_payload["store"] is False
@@ -706,6 +718,7 @@ async def test_real_channel_fallback_preserves_persisted_provider_state(
             cursor_key=None,
             uid=UID,
             session_id=SESSION_ID,
+            cache_key=build_session_cache_key(uid=UID, session_id=SESSION_ID),
         )
         assert selected_channel.id == 2
         assert selected_model["model_id"] == MODEL_ID
@@ -791,6 +804,9 @@ async def test_real_channel_fallback_preserves_persisted_provider_state(
 
     assert len(captured_payloads) == 2
     first_payload, second_payload = captured_payloads
+    expected_cache_key = build_session_cache_key(uid=UID, session_id=SESSION_ID)
+    assert [payload["prompt_cache_key"] for payload in captured_payloads] == [expected_cache_key, expected_cache_key]
+    assert all("cache_key" not in payload for payload in captured_payloads)
     assert first_payload["model"] == MODEL_ID
     assert second_payload["model"] == MODEL_ID
     if protocol == "openai":
@@ -1040,6 +1056,7 @@ async def test_reasoning_effort_reaches_openai_protocol_payloads(
                 cursor_key=None,
                 uid=uid,
                 session_id=session_id,
+                cache_key=build_session_cache_key(uid=uid, session_id=session_id),
             )
             assert response.message.content == "Answer"
             assert chat_params["reasoning_effort"] == expected_effort
@@ -1072,6 +1089,13 @@ async def test_reasoning_effort_reaches_openai_protocol_payloads(
             mode=mode,
             expected_effort=expected_effort,
         )
+
+    cache_keys = [payload.get("prompt_cache_key") for payload in captured_payloads]
+    expected_cache_key = build_session_cache_key(uid=uid, session_id=session_id)
+    assert cache_keys == [expected_cache_key] * len(model_entries)
+    assert uid not in expected_cache_key
+    assert session_id not in expected_cache_key
+    assert all("cache_key" not in payload for payload in captured_payloads)
 
 
 @pytest.mark.parametrize("mode", ["non_stream", "stream", "background"])
@@ -1176,6 +1200,7 @@ async def test_automatic_fallback_uses_selected_rule_reasoning_effort(
             cursor_key=None,
             uid=uid,
             session_id=session_id,
+            cache_key=build_session_cache_key(uid=uid, session_id=session_id),
         )
         assert result.message.content == "Answer"
     else:
@@ -1207,3 +1232,60 @@ async def test_automatic_fallback_uses_selected_rule_reasoning_effort(
     assert [attempt["reasoning_effort"] for attempt in attempts] == ["primary-default", "fallback-default"]
     assert all(attempt["temperature"] is None for attempt in attempts)
     assert all(attempt["top_p"] is None for attempt in attempts)
+    cache_keys = [attempt["cache_key"] for attempt in attempts]
+    expected_cache_key = build_session_cache_key(uid=uid, session_id=session_id)
+    assert cache_keys == [expected_cache_key, expected_cache_key]
+
+
+@pytest.mark.asyncio
+async def test_audit_decision_reply_does_not_use_session_cache_key(image_chat_runtime) -> None:
+    async with image_chat_runtime("OPENAI_RESPONSES", goal_mode=False) as runtime:
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="Audit decision recorded."))
+        async with runtime.factory() as db:
+            profile = await db.get(Profile, runtime.profile.id)
+            assert profile is not None
+            final_message, _, _ = await ChatDispatcher._generate_reply_from_history(
+                db,
+                uid=runtime.uid,
+                session_id=runtime.session_id,
+                profile=profile,
+                call_context="session_reply_audit_decision",
+                reply_source="audit_decision",
+                allow_tools=False,
+                submission_context=[InternalMessage(role=MessageRole.USER, content="Tool execution was declined.")],
+                persist_response=False,
+            )
+
+        assert final_message.content == "Audit decision recorded."
+        assert len(runtime.provider_payloads) == 1
+        assert "prompt_cache_key" not in runtime.provider_payloads[0]
+
+
+@pytest.mark.parametrize("protocol", ["deepseek", "deepseek_responses"])
+@pytest.mark.asyncio
+async def test_deepseek_ignores_neutral_cache_key(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+) -> None:
+    captured_payloads: list[dict[str, Any]] = []
+
+    async def fake_post_json(*, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        captured_payloads.append(deepcopy(payload))
+        if protocol == "deepseek":
+            return _chat_response("", False)
+        return _responses_response("", False)
+
+    monkeypatch.setattr(http_transport, "post_json", fake_post_json)
+    response = await LLMClient.generate(
+        api_key=API_KEY,
+        base_url=BASE_URL,
+        model_id=MODEL_ID,
+        messages=[InternalMessage(role=MessageRole.USER, content="Question")],
+        protocol=protocol,
+        cache_key="stable-request-cache-key",
+    )
+
+    assert response.message.content == "Answer"
+    assert len(captured_payloads) == 1
+    assert "prompt_cache_key" not in captured_payloads[0]
+    assert "cache_key" not in captured_payloads[0]

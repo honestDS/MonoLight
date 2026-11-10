@@ -47,6 +47,7 @@ class NonStreamDispatcherMixin:
         tool_workflow: str | None = None,
         frozen_context_messages: list[InternalMessage] | None = None,
         call_context: str | None = None,
+        cache_key: str | None = None,
     ):
         return await dispatch_interactive(
             db=db,
@@ -78,6 +79,7 @@ class NonStreamDispatcherMixin:
             tool_workflow=tool_workflow,
             frozen_context_messages=frozen_context_messages,
             call_context=call_context,
+            cache_key=cache_key,
             dispatcher_mode="non_stream",
             validate_initial_message_before_save=cls.validate_initial_message_before_save,
         )

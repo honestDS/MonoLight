@@ -51,6 +51,7 @@ from app.core.utils.dispatcher.helpers import (
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts, refresh_latest_user_max_output_tokens_instruction
 from app.core.utils.dispatcher.tool_call_correction import build_virtual_tool_feedback_messages
 from app.core.utils.http_proxy import get_channel_http_proxy
+from app.core.utils.llm_request_params import build_session_cache_key
 from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
@@ -103,7 +104,10 @@ async def generate_interactive_turn(
     current_tools,
     tool_choice: str = "auto",
     response_id: str,
+    cache_key: str | None = None,
 ) -> InteractiveGenerationResult:
+    if cache_key is None:
+        cache_key = build_session_cache_key(uid=state.uid, session_id=state.session_id)
     excluded_priorities: set[int] = set()
     context_length_recovery_priorities: set[int] = set()
     tool_call_correction_attempts = 0
@@ -334,6 +338,7 @@ async def generate_interactive_turn(
             generation_kwargs = {
                 "api_key": api_key,
                 "base_url": base_url,
+                "cache_key": cache_key,
                 "channel_id": current_channel_id,
                 "model_id": model_id,
                 "messages": request_messages,

@@ -27,6 +27,7 @@ from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.frozen_context import capture_frozen_context_messages, load_frozen_context_messages, serialize_frozen_context_messages
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history, dump_output_history
+from app.core.utils.llm_request_params import build_session_cache_key
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType, decode_message_content
 from app.models.provider_usage import ProviderUsageType
@@ -231,6 +232,7 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
         request_purpose=ProviderUsageType.BACKGROUND_SUMMARY,
         uid=work.uid,
         session_id=work.session_id,
+        cache_key=build_session_cache_key(uid=work.uid, session_id=work.session_id),
         profile=profile,
         call_context="session_reply_background_summary",
         allow_tools=False,

@@ -90,6 +90,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
             tool_choice=tool_choice,
             top_p=kwargs.get("top_p"),
             reasoning_effort=kwargs.get("reasoning_effort"),
+            cache_key=kwargs.get("cache_key"),
         )
         url = f"{base_url.rstrip('/')}/responses"
         parsed = await self._post_json(
@@ -132,6 +133,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
             tool_choice=tool_choice,
             top_p=kwargs.get("top_p"),
             reasoning_effort=kwargs.get("reasoning_effort"),
+            cache_key=kwargs.get("cache_key"),
         )
         url = f"{base_url.rstrip('/')}/responses"
         argument_delta_indexes: set[tuple[str, int | str | None]] = set()
@@ -501,6 +503,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         tool_choice: str,
         top_p: Any,
         reasoning_effort: Any = None,
+        cache_key: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model_id,
@@ -509,6 +512,8 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
             "store": False,
             "include": ["reasoning.encrypted_content"],
         }
+        if cache_key:
+            payload["prompt_cache_key"] = cache_key
         if temperature is not None:
             payload["temperature"] = temperature
         if top_p is not None:

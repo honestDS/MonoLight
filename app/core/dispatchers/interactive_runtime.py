@@ -112,6 +112,7 @@ async def dispatch_interactive(
     tool_workflow: str | None = None,
     frozen_context_messages: list[InternalMessage] | None = None,
     call_context: str | None = None,
+    cache_key: str | None = None,
     *,
     validate_initial_message_before_save: Callable[..., Awaitable[None]],
 ):
@@ -570,6 +571,7 @@ async def dispatch_interactive(
                         # 最终阶段由本地阶段拦截，避免依赖上游对 none 的处理差异。
                         tool_choice="auto",
                         response_id=response_id,
+                        cache_key=cache_key,
                     )
                     ai_msg = generation_result.message
 
