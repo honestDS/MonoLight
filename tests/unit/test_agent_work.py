@@ -1,12 +1,25 @@
+import json
 from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
-from app.core.constants import END_SESSION_SCOPE_FOREGROUND, END_SESSION_SCOPE_TASK
+from app.core.constants import (
+    END_SESSION_SCOPE_FOREGROUND,
+    END_SESSION_SCOPE_TASK,
+    ERR_SUBAGENT_ARGUMENTS_INVALID,
+    ERR_TOOL_RUNTIME_CONTEXT_MISSING,
+)
+from app.core.i18n import t
 from app.core.prompts import SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
 from app.core.session_reply_queue import executor_agent_work as executor_agent_work_module
-from app.core.tools.agent_work import CreateArguments, SendArguments
+from app.core.tools.agent_work import (
+    AgentWorkExecutor,
+    BoardPostArguments,
+    BoardReadArguments,
+    CreateArguments,
+    SendArguments,
+)
 from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
 from app.models.message import Message, MessageRole, MessageType
 
@@ -240,3 +253,196 @@ def test_send_arguments_does_not_require_or_accept_name() -> None:
         )
 
     assert any(error["loc"] == ("name",) for error in exc_info.value.errors())
+
+
+@pytest.mark.parametrize("missing_field", ["stage", "content"])
+def test_board_post_arguments_require_stage_and_content(missing_field: str) -> None:
+    arguments = {"stage": "running", "content": "progress update"}
+    arguments.pop(missing_field)
+
+    with pytest.raises(ValidationError) as exc_info:
+        BoardPostArguments(**arguments)
+
+    assert any(error["loc"] == (missing_field,) and error["type"] == "missing" for error in exc_info.value.errors())
+
+
+@pytest.mark.parametrize("field", ["stage", "content"])
+@pytest.mark.parametrize(
+    ("value", "error_type"),
+    [
+        pytest.param("", "string_too_short", id="empty"),
+        pytest.param(" \t\n", "value_error", id="whitespace"),
+        pytest.param(None, "string_type", id="none"),
+        pytest.param(7, "string_type", id="integer"),
+        pytest.param(True, "string_type", id="boolean"),
+    ],
+)
+def test_board_post_arguments_reject_invalid_text_types(
+    field: str,
+    value: object,
+    error_type: str,
+) -> None:
+    arguments = {"stage": "running", "content": "progress update"}
+    arguments[field] = value
+
+    with pytest.raises(ValidationError) as exc_info:
+        BoardPostArguments(**arguments)
+
+    assert any(error["loc"] == (field,) and error["type"] == error_type for error in exc_info.value.errors())
+
+
+def test_board_post_arguments_enforce_stage_length() -> None:
+    accepted = BoardPostArguments(stage="s" * 64, content="progress update")
+    assert accepted.stage == "s" * 64
+
+    with pytest.raises(ValidationError) as exc_info:
+        BoardPostArguments(stage="s" * 65, content="progress update")
+
+    assert any(error["loc"] == ("stage",) and error["type"] == "string_too_long" for error in exc_info.value.errors())
+
+
+def test_board_post_arguments_preserve_formatted_content() -> None:
+    content = "\n  progress update  \t\n"
+
+    parsed = BoardPostArguments(stage="running", content=content)
+
+    assert parsed.content == content
+
+
+@pytest.mark.parametrize("extra_field", ["subagent_id", "work_id", "uid", "session_id", "profile_id", "message"])
+def test_board_post_arguments_reject_extra_fields(extra_field: str) -> None:
+    arguments = {"stage": "running", "content": "progress update", extra_field: "unexpected"}
+
+    with pytest.raises(ValidationError) as exc_info:
+        BoardPostArguments(**arguments)
+
+    assert any(error["loc"] == (extra_field,) and error["type"] == "extra_forbidden" for error in exc_info.value.errors())
+
+
+def test_board_read_arguments_require_subagent_id() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        BoardReadArguments()
+
+    assert any(error["loc"] == ("subagent_id",) and error["type"] == "missing" for error in exc_info.value.errors())
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        pytest.param("a", "a", id="one-character"),
+        pytest.param("a" * 32, "a" * 32, id="32-characters"),
+        pytest.param("  agent-1 \t", "agent-1", id="trim-surrounding-whitespace"),
+    ],
+)
+def test_board_read_arguments_trim_valid_subagent_id(raw_value: str, expected: str) -> None:
+    parsed = BoardReadArguments(subagent_id=raw_value)
+
+    assert parsed.subagent_id == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "error_type"),
+    [
+        pytest.param("", "string_too_short", id="empty"),
+        pytest.param(" \t\n", "string_too_short", id="blank-after-trim"),
+        pytest.param(None, "string_type", id="none"),
+        pytest.param(7, "string_type", id="integer"),
+        pytest.param(True, "string_type", id="boolean"),
+        pytest.param("a" * 33, "string_too_long", id="33-characters"),
+    ],
+)
+def test_board_read_arguments_reject_invalid_subagent_id(value: object, error_type: str) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        BoardReadArguments(subagent_id=value)
+
+    assert any(error["loc"] == ("subagent_id",) and error["type"] == error_type for error in exc_info.value.errors())
+
+
+@pytest.mark.parametrize("extra_field", ["work_id", "stage", "content", "range"])
+def test_board_read_arguments_reject_extra_fields(extra_field: str) -> None:
+    arguments = {"subagent_id": "agent-1", extra_field: "unexpected"}
+
+    with pytest.raises(ValidationError) as exc_info:
+        BoardReadArguments(**arguments)
+
+    assert any(error["loc"] == (extra_field,) and error["type"] == "extra_forbidden" for error in exc_info.value.errors())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["wait", "unknown"])
+async def test_agent_work_executor_rejects_unsupported_operations_without_context(operation: str) -> None:
+    payload = json.loads(await AgentWorkExecutor(project_root=".").execute(operation=operation))
+
+    assert payload == {
+        "status": "failed",
+        "operation": operation,
+        "error": t(ERR_SUBAGENT_ARGUMENTS_INVALID),
+        "details": [{"field": "operation", "type": "invalid_operation"}],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "arguments"),
+    [
+        pytest.param(
+            "board_post",
+            {"stage": "running", "content": "progress update"},
+            id="board-post",
+        ),
+        pytest.param("board_read", {"subagent_id": "agent-1"}, id="board-read"),
+    ],
+)
+async def test_agent_work_executor_reports_missing_context_for_board_operations(
+    operation: str,
+    arguments: dict[str, object],
+) -> None:
+    payload = json.loads(await AgentWorkExecutor(project_root=".").execute(operation=operation, **arguments))
+
+    assert payload == {
+        "status": "failed",
+        "operation": operation,
+        "error": t(ERR_TOOL_RUNTIME_CONTEXT_MISSING),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "arguments", "expected_details", "sensitive_value"),
+    [
+        pytest.param(
+            "board_post",
+            {"stage": "running", "content": {"secret": "private-board-content"}},
+            [{"field": "content", "type": "string_type"}],
+            "private-board-content",
+            id="board-post-strict-type",
+        ),
+        pytest.param(
+            "board_read",
+            {"subagent_id": {"secret": "private-subagent-id"}},
+            [{"field": "subagent_id", "type": "string_type"}],
+            "private-subagent-id",
+            id="board-read-strict-type",
+        ),
+        pytest.param(
+            "board_post",
+            {"stage": "running", "content": "progress update", "message": "private-extra"},
+            [{"field": "message", "type": "extra_forbidden"}],
+            "private-extra",
+            id="board-post-extra-field",
+        ),
+    ],
+)
+async def test_agent_work_executor_returns_sanitized_argument_errors(
+    operation: str,
+    arguments: dict[str, object],
+    expected_details: list[dict[str, str]],
+    sensitive_value: str,
+) -> None:
+    payload = json.loads(await AgentWorkExecutor(project_root=".").execute(operation=operation, **arguments))
+
+    assert payload["status"] == "failed"
+    assert payload["operation"] == operation
+    assert payload["error"] == t(ERR_SUBAGENT_ARGUMENTS_INVALID)
+    assert payload["details"] == expected_details
+    assert sensitive_value not in json.dumps(payload, ensure_ascii=False)

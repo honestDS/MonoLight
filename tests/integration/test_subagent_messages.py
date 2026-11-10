@@ -35,6 +35,24 @@ def _provider_tool_names(payload: dict) -> set[str]:
     return names
 
 
+def _provider_agent_work_operations(payload: dict) -> list[str] | None:
+    for tool in payload.get("tools", []):
+        if not isinstance(tool, dict):
+            continue
+        definition = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        if definition.get("name") != AGENT_WORK_TOOL_NAME:
+            continue
+        parameters = definition.get("parameters")
+        if not isinstance(parameters, dict):
+            continue
+        properties = parameters.get("properties")
+        operation = properties.get("operation") if isinstance(properties, dict) else None
+        operations = operation.get("enum") if isinstance(operation, dict) else None
+        if isinstance(operations, list) and all(isinstance(value, str) for value in operations):
+            return operations
+    return None
+
+
 @pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"])
 @pytest.mark.parametrize("with_new_user_message", [False, True])
 @pytest.mark.asyncio
@@ -298,7 +316,7 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
             assert child_done.id == child_work_id
             assert child_done.status == SessionReplyWorkStatus.SUCCEEDED
 
-            child_payloads = [payload for payload in runtime.provider_payloads if FILE_TOOL_NAME in _provider_tool_names(payload) and AGENT_WORK_TOOL_NAME not in _provider_tool_names(payload)]
+            child_payloads = [payload for payload in runtime.provider_payloads if FILE_TOOL_NAME in _provider_tool_names(payload) and _provider_agent_work_operations(payload) == ["board_post"]]
             assert len(child_payloads) == 2
             first_child_payload = json.dumps(child_payloads[0], ensure_ascii=False)
             next_child_payload = json.dumps(child_payloads[1], ensure_ascii=False)

@@ -55,7 +55,7 @@ MESSAGES = {
     "ERR_SUBAGENT_CONTEXT_INVALID": "子代理工作记录不完整，无法继续执行",
     "ERR_SUBAGENT_CALL_CONFLICT": "同一工具调用不能重复提交不同的子代理操作",
     "ERR_SUBAGENT_CANCELLED": "子代理工作已取消，已开始的操作可能已产生影响",
-    "MSG_SUBAGENT_SUBMITTED": "子代理工作已提交，可继续处理其他工作；需要等待结果时请使用 wait。",
+    "MSG_SUBAGENT_SUBMITTED": "子代理工作已提交，完成后会自动返回结果。",
     "TOOL_MANAGE_SCHEDULED_TASKS_LABEL": "管理定时任务",
     "TOOL_GENERATE_IMAGE_LABEL": "生成图像",
     "TOOL_READ_MULTIMODAL_FILE_LABEL": "读取多模态文件",

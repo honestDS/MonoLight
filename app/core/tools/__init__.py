@@ -10,6 +10,7 @@ from app.core.constants import (
     TOOL_WORKFLOW_FOREGROUND,
     TOOL_WORKFLOW_POLICIES,
     TOOL_WORKFLOW_SCHEDULED_TASK,
+    TOOL_WORKFLOW_SUBAGENT,
 )
 from app.core.crud.knowledge.base import knowledge_base_crud
 from app.core.embedding.knowledge_base import build_knowledge_base_whitelist
@@ -18,7 +19,7 @@ from app.models.channel import ChannelConfig
 from app.models.knowledge_base import KnowledgeBaseType
 from app.models.profile import Profile, ProfileConfig
 
-from .agent_work import AGENT_WORK_TOOL_SCHEMA, AgentWorkExecutor
+from .agent_work import AGENT_WORK_TOOL_NAME, AGENT_WORK_TOOL_SCHEMA, SUBAGENT_BOARD_TOOL_SCHEMA, AgentWorkExecutor
 from .background_tasks import MANAGE_BACKGROUND_TASKS_TOOL_SCHEMA, ManageBackgroundTasksExecutor
 from .end_session import (
     END_SESSION_TOOL_NAME as END_SESSION_TOOL_NAME,
@@ -156,7 +157,10 @@ def filter_tools_for_workflow(tool_schemas: list[dict[str, Any]], tool_workflow:
         if parameter_policy is None:
             continue
 
-        tool_schema = copy.deepcopy(schema)
+        if tool_workflow == TOOL_WORKFLOW_SUBAGENT and tool_name == AGENT_WORK_TOOL_NAME:
+            tool_schema = copy.deepcopy(SUBAGENT_BOARD_TOOL_SCHEMA)
+        else:
+            tool_schema = copy.deepcopy(schema)
         if parameter_policy:
             parameters = tool_schema.get("function", {}).get("parameters")
             properties = parameters.get("properties") if isinstance(parameters, dict) else None

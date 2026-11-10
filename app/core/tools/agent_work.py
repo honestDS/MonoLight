@@ -13,7 +13,7 @@ from app.core.i18n import t
 
 from .base import BaseExecutor
 
-__all__ = ["AGENT_WORK_TOOL_SCHEMA", "AgentWorkExecutor"]
+__all__ = ["AGENT_WORK_TOOL_SCHEMA", "SUBAGENT_BOARD_TOOL_SCHEMA", "AgentWorkExecutor"]
 
 
 AGENT_WORK_TOOL_SCHEMA = {
@@ -30,16 +30,15 @@ AGENT_WORK_TOOL_SCHEMA = {
             "Specify whether it should only investigate or may make changes, and what conclusions, evidence, or files it should return.\n\n"
             "Continuing and following up\n"
             'Reuse the returned subagent_id with send_message to add instructions, continue interrupted work, or request follow-up work. For a simple continuation, send "continue previous task".\n\n'
-            "Waiting and checking status\n"
+            "Status and board history\n"
             "create and send_message return immediately with a queued confirmation, so the main agent can continue other work. The task's eventual result is automatically delivered to the reply that submitted it when the task completes; completion, failure, and cancellation all resume that reply automatically. "
-            "query and list return progress immediately and never implicitly wait or suspend this reply. "
-            "Use list to immediately inspect all unfinished subagents in the current user, session, and Profile scope, including queued, running, and waiting work; completed subagents are omitted. "
-            "Use query to inspect status, saved results, or an interruption reason. Use wait only when this turn needs another task's result. "
-            "If the selected work is already complete, failed, or cancelled, wait returns its terminal result immediately; otherwise it queues and suspends this reply until the work completes, fails, or is cancelled, then resumes automatically. "
-            "wait does not transfer task ownership or replace the original create/send_message submission, whose reply remains responsible for automatic delivery. "
-            "Multiple wait operations can be issued in the same turn. Do not poll query or list, or use Shell or terminal_tool sleep, to wait. Use cancel to stop work that is no longer needed. Summarize the returned results for the user.\n\n"
+            "Use list for a lightweight directory of unfinished subagents in the current user, session, and Profile scope; completed subagents are omitted. "
+            "Use query for a targeted lookup of one subagent's status, saved result, or interruption reason. "
+            "Use board_read to inspect all persisted stage-history posts for one scoped subagent. "
+            "Use board_post from the currently executing subagent task to record its own progress; it returns immediately so execution can continue, and its identity comes from the current execution context rather than user-supplied identifiers. "
+            "Use cancel to stop work that is no longer needed. Summarize the returned results for the user.\n\n"
             "Important boundaries\n"
-            "wait is limited to the current user, session, and Profile. Cancelling does not undo earlier changes. If execution is reported as unknown, verify what actually happened before repeating an action. "
+            "board_post and board_read are limited to the current user, session, and Profile. Cancelling does not undo earlier changes. If execution is reported as unknown, verify what actually happened before repeating an action. "
             "Do not access subagents across users, sessions, or Profiles, or create nested subagents. Use only subagent_id values actually returned in this conversation under the current Profile."
         ),
         "parameters": {
@@ -47,11 +46,12 @@ AGENT_WORK_TOOL_SCHEMA = {
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["create", "list", "query", "send_message", "wait", "cancel"],
+                    "enum": ["create", "list", "query", "send_message", "cancel", "board_post", "board_read"],
                     "description": (
                         "create: delegate a new task; list: immediately list unfinished subagents in the current scope; "
-                        "send_message: add instructions or continue work with an existing subagent; query: inspect work immediately; "
-                        "wait: get a result now or suspend this reply until work finishes; cancel: stop unneeded work."
+                        "send_message: add instructions or continue work with an existing subagent; query: inspect one subagent's status and saved result immediately; "
+                        "cancel: stop unneeded work; board_post: record progress for the currently executing subagent task and return immediately; "
+                        "board_read: read all persisted stage-history posts for one subagent."
                     ),
                 },
                 "name": {
@@ -74,12 +74,23 @@ AGENT_WORK_TOOL_SCHEMA = {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 32,
-                    "description": "Required for query, send_message, wait, and cancel. Copy the subagent_id actually returned by create or list and reuse it for follow-up work with that subagent.",
+                    "description": "Required for query, send_message, cancel, and board_read. Copy the subagent_id actually returned by create or list and reuse it for work with that subagent.",
                 },
                 "work_id": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": ("For query, wait, and cancel. Copy a returned work_id to inspect, wait for, or cancel that particular task run; omit it for query to use the latest work, or for wait/cancel to use the current or latest work."),
+                    "description": ("For query and cancel only. Copy a returned work_id to inspect or cancel that particular task run; omit it to use the latest or current work."),
+                },
+                "stage": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Required for board_post only. A non-empty progress stage label, up to 64 characters.",
+                },
+                "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Required for board_post only. A non-empty progress update with its meaningful formatting preserved.",
                 },
             },
             "required": ["operation"],
@@ -88,9 +99,48 @@ AGENT_WORK_TOOL_SCHEMA = {
                 {"properties": {"operation": {"const": "list"}}, "additionalProperties": False},
                 {"properties": {"operation": {"const": "query"}}, "required": ["subagent_id"]},
                 {"properties": {"operation": {"const": "send_message"}}, "required": ["subagent_id", "message"]},
-                {"properties": {"operation": {"const": "wait"}}, "required": ["subagent_id"]},
                 {"properties": {"operation": {"const": "cancel"}}, "required": ["subagent_id"]},
+                {
+                    "properties": {
+                        "operation": {"const": "board_post"},
+                        "stage": {},
+                        "content": {},
+                    },
+                    "required": ["stage", "content"],
+                    "additionalProperties": False,
+                },
+                {
+                    "properties": {
+                        "operation": {"const": "board_read"},
+                        "subagent_id": {},
+                    },
+                    "required": ["subagent_id"],
+                    "additionalProperties": False,
+                },
             ],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+SUBAGENT_BOARD_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": AGENT_WORK_TOOL_NAME,
+        "description": ("Use board_post to record progress for the current subagent task. The framework determines the subagent identity and work round. After posting, continue the task immediately; a board post does not replace the final report. Do not create nested subagents or specify another identity."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["board_post"],
+                    "description": "Record progress for the current subagent task.",
+                },
+                "stage": AGENT_WORK_TOOL_SCHEMA["function"]["parameters"]["properties"]["stage"],
+                "content": AGENT_WORK_TOOL_SCHEMA["function"]["parameters"]["properties"]["content"],
+            },
+            "required": ["operation", "stage", "content"],
             "additionalProperties": False,
         },
     },
@@ -138,6 +188,26 @@ class ListArguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class BoardPostArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    stage: str = Field(min_length=1, max_length=64)
+    content: str = Field(min_length=1)
+
+    @field_validator("stage", "content")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("text must not be blank")
+        return value
+
+
+class BoardReadArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+
+    subagent_id: str = Field(min_length=1, max_length=32)
+
+
 def _validation_details(error: ValidationError) -> list[dict[str, str]]:
     details: list[dict[str, str]] = []
     for item in error.errors(include_url=False, include_context=False, include_input=False):
@@ -177,8 +247,12 @@ class AgentWorkExecutor(BaseExecutor):
             argument_model = ListArguments
         if operation == "send_message":
             argument_model = SendArguments
-        if operation in {"query", "cancel", "wait"}:
+        if operation in {"query", "cancel"}:
             argument_model = LookupArguments
+        if operation == "board_post":
+            argument_model = BoardPostArguments
+        if operation == "board_read":
+            argument_model = BoardReadArguments
         if argument_model is None:
             return _failure(
                 operation,
@@ -210,9 +284,10 @@ class AgentWorkExecutor(BaseExecutor):
             cancel_subagent,
             create_subagent,
             list_subagents,
+            post_subagent_board,
             query_subagent,
+            read_subagent_board,
             send_subagent_message,
-            wait_subagent,
         )
 
         try:
@@ -252,16 +327,6 @@ class AgentWorkExecutor(BaseExecutor):
                     subagent_id=parsed.subagent_id,
                     message=parsed.message,
                 )
-            if operation == "wait":
-                result = await wait_subagent(
-                    db,
-                    uid=uid,
-                    session_id=session_id,
-                    profile_id=profile_id,
-                    tool_call_id=tool_call_id,
-                    subagent_id=parsed.subagent_id,
-                    work_id=parsed.work_id,
-                )
             if operation == "cancel":
                 result = await cancel_subagent(
                     db,
@@ -270,6 +335,23 @@ class AgentWorkExecutor(BaseExecutor):
                     profile_id=profile_id,
                     subagent_id=parsed.subagent_id,
                     work_id=parsed.work_id,
+                )
+            if operation == "board_post":
+                result = await post_subagent_board(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    profile_id=profile_id,
+                    stage=parsed.stage,
+                    content=parsed.content,
+                )
+            if operation == "board_read":
+                result = await read_subagent_board(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    profile_id=profile_id,
+                    subagent_id=parsed.subagent_id,
                 )
         except ParameterException as exc:
             await db.rollback()

@@ -7,6 +7,7 @@ import pytest_asyncio
 from app.core import constants as C
 from app.core.i18n import t
 from app.core.tools import get_tools_for_profile
+from app.core.tools.agent_work import AGENT_WORK_TOOL_SCHEMA
 from app.core.tools.file_tool import FILE_TOOL_SCHEMA
 from app.core.tools.shell import SHELL_TOOL_SCHEMA
 from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round, process_single_tool
@@ -167,21 +168,123 @@ async def test_file_tool_rejects_run_in_background_from_complete_schema(workflow
 @pytest.mark.asyncio
 async def test_subagent_shell_companions_follow_profile_policy_and_prevalidate(workflow_db, tmp_path: Path) -> None:
     profile, cfg = _profile(tmp_path, enabled_tools=[*ENABLED_TOOLS, C.AGENT_WORK_TOOL_NAME])
+    source_operation_enum = list(AGENT_WORK_TOOL_SCHEMA["function"]["parameters"]["properties"]["operation"]["enum"])
     tools, _ = await get_tools_for_profile(workflow_db, profile, tool_workflow=C.TOOL_WORKFLOW_SUBAGENT)
     names = _names(tools)
 
     assert SHELL_TOOLS <= names
-    assert C.AGENT_WORK_TOOL_NAME not in names
+    assert _schema(tools, C.AGENT_WORK_TOOL_NAME)["function"]["parameters"]["properties"]["operation"]["enum"] == ["board_post"]
     assert set(_schema(tools, C.SHELL_TOOL_NAME)["function"]["parameters"]["properties"]["execution_mode"]["enum"]) == {"non_interactive", "interactive"}
     assert set(_schema(tools, C.TERMINAL_TOOL_NAME)["function"]["parameters"]["properties"]["operation"]["enum"]) == set(C.TERMINAL_TOOL_OPERATIONS)
+    assert AGENT_WORK_TOOL_SCHEMA["function"]["parameters"]["properties"]["operation"]["enum"] == source_operation_enum
 
     for execution_mode in ("non_interactive", "interactive"):
         call = _call(f"subagent-shell-{execution_mode}", C.SHELL_TOOL_NAME, {"command": "echo prevalidation-only", "execution_mode": execution_mode})
         assert prevalidate_tool_round([call], cfg, tool_schemas=tools, tool_workflow=C.TOOL_WORKFLOW_SUBAGENT) == {}
 
+    board_post = _call(
+        "subagent-agent-work-board-post",
+        C.AGENT_WORK_TOOL_NAME,
+        {"operation": "board_post", "stage": "verification", "content": "role policy checked"},
+    )
+    assert prevalidate_tool_round([board_post], cfg, tool_schemas=tools, tool_workflow=C.TOOL_WORKFLOW_SUBAGENT) == {}
+
     disabled_profile, _ = _profile(tmp_path, enabled_tools=[name for name in ENABLED_TOOLS if name != C.SHELL_TOOL_NAME])
     disabled_tools, _ = await get_tools_for_profile(workflow_db, disabled_profile, tool_workflow=C.TOOL_WORKFLOW_SUBAGENT)
     assert _names(disabled_tools).isdisjoint(SHELL_TOOLS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("workflow", "expected_operations"),
+    [
+        pytest.param(
+            C.TOOL_WORKFLOW_FOREGROUND,
+            {"create", "list", "query", "send_message", "cancel", "board_read"},
+            id="foreground",
+        ),
+        pytest.param(C.TOOL_WORKFLOW_SCHEDULED_TASK, set(), id="scheduled"),
+        pytest.param(C.TOOL_WORKFLOW_BACKGROUND_PROACTIVE, set(), id="background"),
+        pytest.param(C.TOOL_WORKFLOW_AUDIT, set(), id="audit"),
+    ],
+)
+async def test_agent_work_workflow_exposure(workflow_db, tmp_path: Path, workflow: str, expected_operations: set[str]) -> None:
+    profile, _ = _profile(tmp_path, enabled_tools=[*ENABLED_TOOLS, C.AGENT_WORK_TOOL_NAME])
+    source_operation_enum = list(AGENT_WORK_TOOL_SCHEMA["function"]["parameters"]["properties"]["operation"]["enum"])
+    tools, _ = await get_tools_for_profile(workflow_db, profile, tool_workflow=workflow)
+
+    if expected_operations:
+        operation_enum = _schema(tools, C.AGENT_WORK_TOOL_NAME)["function"]["parameters"]["properties"]["operation"]["enum"]
+        assert set(operation_enum) == expected_operations
+        assert {"wait", "board_post"}.isdisjoint(operation_enum)
+    else:
+        assert C.AGENT_WORK_TOOL_NAME not in _names(tools)
+    assert AGENT_WORK_TOOL_SCHEMA["function"]["parameters"]["properties"]["operation"]["enum"] == source_operation_enum
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "arguments"),
+    [
+        pytest.param("create", {"operation": "create", "name": "child-task", "message": "inspect independently"}, id="create"),
+        pytest.param("list", {"operation": "list"}, id="list"),
+        pytest.param("query", {"operation": "query", "subagent_id": "child-1", "work_id": 1}, id="query"),
+        pytest.param("send_message", {"operation": "send_message", "subagent_id": "child-1", "message": "continue"}, id="send-message"),
+        pytest.param("cancel", {"operation": "cancel", "subagent_id": "child-1", "work_id": 1}, id="cancel"),
+        pytest.param("board_read", {"operation": "board_read", "subagent_id": "child-1"}, id="board-read"),
+    ],
+)
+async def test_main_agent_work_operations_pass_prevalidation(workflow_db, tmp_path: Path, operation: str, arguments: dict[str, object]) -> None:
+    profile, cfg = _profile(tmp_path, enabled_tools=[*ENABLED_TOOLS, C.AGENT_WORK_TOOL_NAME])
+    tools, _ = await get_tools_for_profile(workflow_db, profile, tool_workflow=C.TOOL_WORKFLOW_FOREGROUND)
+    call = _call(f"main-agent-work-{operation}", C.AGENT_WORK_TOOL_NAME, arguments)
+    assert prevalidate_tool_round([call], cfg, tool_schemas=tools, tool_workflow=C.TOOL_WORKFLOW_FOREGROUND) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "arguments"),
+    [
+        pytest.param("create", {"operation": "create", "name": "nested-task", "message": "must be rejected"}, id="create"),
+        pytest.param("list", {"operation": "list"}, id="list"),
+        pytest.param("query", {"operation": "query", "subagent_id": "parent-child", "work_id": 1}, id="query"),
+        pytest.param("send_message", {"operation": "send_message", "subagent_id": "parent-child", "message": "must be rejected"}, id="send-message"),
+        pytest.param("cancel", {"operation": "cancel", "subagent_id": "parent-child", "work_id": 1}, id="cancel"),
+        pytest.param("board_read", {"operation": "board_read", "subagent_id": "parent-child"}, id="board-read"),
+        pytest.param("wait", {"operation": "wait", "subagent_id": "parent-child", "work_id": 1}, id="wait"),
+    ],
+)
+async def test_subagent_agent_work_rejects_primary_operations(workflow_db, tmp_path: Path, operation: str, arguments: dict[str, object]) -> None:
+    profile, cfg = _profile(tmp_path, enabled_tools=[*ENABLED_TOOLS, C.AGENT_WORK_TOOL_NAME])
+    tools, _ = await get_tools_for_profile(workflow_db, profile, tool_workflow=C.TOOL_WORKFLOW_SUBAGENT)
+    call = _call(f"subagent-agent-work-{operation}", C.AGENT_WORK_TOOL_NAME, arguments)
+    errors = prevalidate_tool_round([call], cfg, tool_schemas=tools, tool_workflow=C.TOOL_WORKFLOW_SUBAGENT)
+    assert call.id in errors
+    assert json.loads(errors[call.id])["status"] == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("workflow", "arguments"),
+    [
+        pytest.param(C.TOOL_WORKFLOW_FOREGROUND, {"operation": "list"}, id="foreground"),
+        pytest.param(
+            C.TOOL_WORKFLOW_SUBAGENT,
+            {"operation": "board_post", "stage": "verification", "content": "must be rejected"},
+            id="subagent",
+        ),
+    ],
+)
+async def test_agent_work_disabled_profile_is_hidden_and_rejected(workflow_db, tmp_path: Path, workflow: str, arguments: dict[str, object]) -> None:
+    profile, cfg = _profile(tmp_path, enabled_tools=list(ENABLED_TOOLS))
+    tools, _ = await get_tools_for_profile(workflow_db, profile, tool_workflow=workflow)
+    assert C.AGENT_WORK_TOOL_NAME not in _names(tools)
+
+    target = tmp_path / "agent-work-disabled.txt"
+    target.write_text("stable\n", encoding="utf-8")
+    before_files = _files(tmp_path)
+    call = _call(f"disabled-agent-work-{workflow}", C.AGENT_WORK_TOOL_NAME, arguments)
+    await _assert_rejected(workflow_db, profile, cfg, call, [AGENT_WORK_TOOL_SCHEMA], workflow, target, before_files)
 
 
 @pytest.mark.asyncio

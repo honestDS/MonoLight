@@ -58,7 +58,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
 )
-from app.models.subagent import Subagent, SubagentToolCall
+from app.models.subagent import Subagent, SubagentBoardPost, SubagentToolCall
 
 logger = get_logger(__name__)
 
@@ -67,10 +67,39 @@ __all__ = [
     "cancel_subagent",
     "create_subagent",
     "list_subagents",
+    "post_subagent_board",
     "query_subagent",
+    "read_subagent_board",
     "send_subagent_message",
     "wait_subagent",
 ]
+
+
+async def _load_claimed_work(
+    db: AsyncSession,
+    *,
+    uid: str,
+    session_id: str,
+    profile_id: int,
+    lock_claim: bool = True,
+) -> SessionReplyWorkItem:
+    db_info = getattr(db, "info", None)
+    claim_info = db_info.get(SESSION_REPLY_WORK_CLAIM_INFO_KEY) if isinstance(db_info, dict) else None
+    if not isinstance(claim_info, tuple) or len(claim_info) != 2 or not isinstance(claim_info[0], int) or isinstance(claim_info[0], bool) or claim_info[0] <= 0 or not isinstance(claim_info[1], str) or not claim_info[1].strip():
+        raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+
+    if lock_claim:
+        await ensure_session_reply_work_claim(db)
+    parent = await session_reply_work_item_crud.get(db, claim_info[0])
+    if parent is None:
+        raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+    await db.refresh(parent)
+
+    if parent.uid != uid or parent.session_id != session_id or parent.profile_id != profile_id:
+        raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+    if lock_claim and (parent.status != SessionReplyWorkStatus.RUNNING or parent.locked_by != claim_info[1]):
+        raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+    return parent
 
 
 async def _load_parent(
@@ -80,18 +109,13 @@ async def _load_parent(
     session_id: str,
     profile_id: int,
 ) -> SessionReplyWorkItem:
-    db_info = getattr(db, "info", None)
-    claim_info = db_info.get(SESSION_REPLY_WORK_CLAIM_INFO_KEY) if isinstance(db_info, dict) else None
-    if not isinstance(claim_info, tuple) or len(claim_info) != 2 or not isinstance(claim_info[0], int) or isinstance(claim_info[0], bool) or claim_info[0] <= 0 or not isinstance(claim_info[1], str) or not claim_info[1].strip():
-        raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
-
-    await ensure_session_reply_work_claim(db)
-    parent = await session_reply_work_item_crud.get(db, claim_info[0])
-    if parent is None:
-        raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
-    await db.refresh(parent)
-
-    if parent.uid != uid or parent.session_id != session_id or parent.profile_id != profile_id or parent.status != SessionReplyWorkStatus.RUNNING or parent.locked_by != claim_info[1] or parent.work_category != SessionReplyWorkCategory.FOREGROUND or getattr(parent, "subagent_id", None) is not None:
+    parent = await _load_claimed_work(
+        db,
+        uid=uid,
+        session_id=session_id,
+        profile_id=profile_id,
+    )
+    if parent.work_category != SessionReplyWorkCategory.FOREGROUND or getattr(parent, "subagent_id", None) is not None:
         raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
     return parent
 
@@ -117,6 +141,123 @@ async def _get_scoped_subagent(
     if subagent is None:
         raise ParameterException(ERR_SUBAGENT_NOT_FOUND)
     return subagent
+
+
+def _serialize_board_post(post: SubagentBoardPost) -> dict[str, Any]:
+    return post.model_dump(
+        mode="json",
+        include={"id", "subagent_id", "child_work_id", "stage", "content", "created_at"},
+    )
+
+
+async def post_subagent_board(
+    db: AsyncSession,
+    *,
+    uid: str,
+    session_id: str,
+    profile_id: int,
+    stage: str,
+    content: str,
+) -> dict[str, Any]:
+    try:
+        work = await _load_claimed_work(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            lock_claim=False,
+        )
+        subagent_id = getattr(work, "subagent_id", None)
+        if work.work_category != SessionReplyWorkCategory.SUBAGENT or not isinstance(subagent_id, str) or not subagent_id.strip():
+            raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+
+        subagent = await _get_scoped_subagent(
+            db,
+            subagent_id=subagent_id,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            touch=False,
+        )
+        work = await _load_claimed_work(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+        )
+        if work.work_category != SessionReplyWorkCategory.SUBAGENT or getattr(work, "subagent_id", None) != subagent.id:
+            raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+        round_row = await subagent_crud.get_round_for_work(db, work=work)
+        if round_row is None or subagent.active_child_work_id != round_row.child_work_id or round_row.result is not None or round_row.waiting_confirmation is not False:
+            raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
+
+        post = await subagent_crud.create_board_post(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            subagent_id=subagent.id,
+            child_work_id=round_row.child_work_id,
+            stage=stage,
+            content=content,
+        )
+        await db.commit()
+        return {
+            "status": "success",
+            "operation": "board_post",
+            "subagent_id": subagent.id,
+            "work_id": round_row.child_work_id,
+            "post": _serialize_board_post(post),
+        }
+    except BaseException:
+        await db.rollback()
+        raise
+
+
+async def read_subagent_board(
+    db: AsyncSession,
+    *,
+    uid: str,
+    session_id: str,
+    profile_id: int,
+    subagent_id: str,
+) -> dict[str, Any]:
+    try:
+        await _load_parent(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+        )
+        subagent = await _get_scoped_subagent(
+            db,
+            subagent_id=subagent_id,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            touch=False,
+        )
+        posts = await subagent_crud.list_board_posts(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            subagent_id=subagent.id,
+        )
+        await db.commit()
+
+        serialized_posts = []
+        for post in posts:
+            serialized_posts.append(_serialize_board_post(post))
+        return {
+            "status": "success",
+            "operation": "board_read",
+            "subagent_id": subagent.id,
+            "posts": serialized_posts,
+        }
+    except BaseException:
+        await db.rollback()
+        raise
 
 
 def build_subagent_queued_result(call: SubagentToolCall) -> dict[str, Any]:
@@ -797,6 +938,13 @@ async def cancel_subagent(
         await db.refresh(work)
         await finish_child_work(db, work=work)
         snapshot = await get_child_snapshot(db, subagent=subagent, round_row=round_row)
+        result = {
+            "status": "success",
+            "operation": "cancel",
+            "subagent_id": subagent.id,
+            "work": snapshot,
+        }
+        delivery_child_work_id = round_row.child_work_id
         await db.commit()
 
         for audit_record_id in dict.fromkeys([*background_audit_ids, *terminal_audit_ids]):
@@ -804,13 +952,8 @@ async def cancel_subagent(
 
         if confirmation_cancellation is not None:
             await broadcast_pending_confirmation_cancellation(db, cancellation=confirmation_cancellation)
-        await deliver_child_work_results(db, child_work_id=round_row.child_work_id)
-        return {
-            "status": "success",
-            "operation": "cancel",
-            "subagent_id": subagent.id,
-            "work": snapshot,
-        }
+        await deliver_child_work_results(db, child_work_id=delivery_child_work_id)
+        return result
     except BaseException:
         await db.rollback()
         raise

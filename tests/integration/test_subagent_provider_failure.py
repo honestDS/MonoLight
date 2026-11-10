@@ -104,7 +104,7 @@ async def _add_fallback_rule(runtime, protocol: str) -> str:
         profile = await db.get(Profile, runtime.profile.id)
         assert profile is not None
         configs = deepcopy(profile.configs)
-        configs["channel"]["chat_channel"]["rules"].append(
+        configs["channel"]["subagent_channel"]["rules"].append(
             {
                 "channel_id": 1,
                 "model_id": fallback_model_id,
