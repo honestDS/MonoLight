@@ -6,6 +6,7 @@ from app.core.constants import (
     ERR_FILE_TOOL_NOT_REGULAR,
     ERR_FILE_TOOL_OPERATION_INVALID,
     ERR_TOOL_WRITE_PROTECTED_DIRECTORY,
+    FILE_TOOL_GREP_MAX_OUTPUT_BYTES,
 )
 from app.core.i18n import t
 from app.core.paths import get_user_temp_dir
@@ -39,7 +40,21 @@ class FileToolExecutor(BaseExecutor):
 
     @staticmethod
     def _dump(payload: dict[str, Any]) -> str:
-        return json.dumps(payload, ensure_ascii=False)
+        if payload.get("operation") != "grep" or payload.get("status") != "failed":
+            return json.dumps(payload, ensure_ascii=False)
+
+        error = payload["error"]
+        if len(error) <= FILE_TOOL_GREP_MAX_OUTPUT_BYTES:
+            serialized = json.dumps(payload, ensure_ascii=False)
+            if len(serialized.encode("utf-8")) <= FILE_TOOL_GREP_MAX_OUTPUT_BYTES:
+                return serialized
+
+        truncated_payload = {**payload, "error": "", "error_truncated": True}
+        shell_bytes = len(json.dumps(truncated_payload, ensure_ascii=False).encode("utf-8"))
+        # Escaped JSON characters can use up to six UTF-8 bytes each.
+        max_error_chars = max(0, (FILE_TOOL_GREP_MAX_OUTPUT_BYTES - shell_bytes) // 6)
+        truncated_payload["error"] = error[:max_error_chars]
+        return json.dumps(truncated_payload, ensure_ascii=False)
 
     @staticmethod
     def _failed(operation: str, error: str, **details: Any) -> str:
@@ -70,6 +85,8 @@ class FileToolExecutor(BaseExecutor):
         ignore_case: bool = False,
         context_lines: int = 2,
         max_results: int = 100,
+        before_chars: int | None = None,
+        after_chars: int | None = None,
     ) -> str:
         if operation not in FILE_TOOL_OPERATIONS:
             return self._failed(str(operation), t(ERR_FILE_TOOL_OPERATION_INVALID, operation=operation))
@@ -118,6 +135,8 @@ class FileToolExecutor(BaseExecutor):
                     ignore_case=ignore_case,
                     context_lines=context_lines,
                     max_results=max_results,
+                    before_chars=before_chars,
+                    after_chars=after_chars,
                 )
             return self._dump(result)
         except UnicodeDecodeError:

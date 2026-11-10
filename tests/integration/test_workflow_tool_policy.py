@@ -124,7 +124,7 @@ async def test_subagent_file_operations_use_filtered_schema_and_real_executor(wo
         ("edit", {"old_text": "alpha", "new_text": "delta"}, "delta\nbeta\n"),
         ("patch", {"patch": "@@\n-beta\n+gamma\n"}, "delta\ngamma\n"),
         ("read", {}, "delta\ngamma\n"),
-        ("grep", {"pattern": "gamma"}, "delta\ngamma\n"),
+        ("grep", {"pattern": "gamma", "before_chars": 2, "after_chars": 1}, "delta\ngamma\n"),
     ]
     for index, (operation, arguments, expected_text) in enumerate(steps):
         call = _call(f"subagent-file-{index}", C.FILE_TOOL_NAME, {"operation": operation, "path": str(target), **arguments})
@@ -138,6 +138,78 @@ async def test_subagent_file_operations_use_filtered_schema_and_real_executor(wo
             assert payload["content"] == "1: delta\n2: gamma"
         elif operation == "grep":
             assert payload["match_count"] == 1
+            assert payload["matches"][0]["content"] == "a\ngamma\n"
+            assert payload["matches"][0]["content_omitted"] is False
+
+
+@pytest.mark.asyncio
+async def test_subagent_grep_retries_omitted_content_with_character_context(workflow_db, tmp_path: Path) -> None:
+    profile, cfg = _profile(tmp_path)
+    tools, _ = await get_tools_for_profile(workflow_db, profile, tool_workflow=C.TOOL_WORKFLOW_SUBAGENT)
+    file_schema = _schema(tools, C.FILE_TOOL_NAME)
+    schemas = [file_schema]
+
+    original_content = "x" * (700 * 1024) + "needle tail"
+    target = tmp_path / "long-line.txt"
+    target.write_text(original_content, encoding="utf-8")
+
+    first_call = _call(
+        "subagent-grep-omitted",
+        C.FILE_TOOL_NAME,
+        {"operation": "grep", "path": str(target), "pattern": "needle"},
+    )
+    assert prevalidate_tool_round([first_call], cfg, tool_schemas=schemas, tool_workflow=C.TOOL_WORKFLOW_SUBAGENT) == {}
+    first_result = await _run(workflow_db, profile, cfg, first_call, schemas, C.TOOL_WORKFLOW_SUBAGENT)
+    assert first_result.tool_execution_status == "succeeded"
+    first_payload = json.loads(first_result.content)
+    assert first_payload["status"] == "success"
+    assert first_payload["match_count"] == 1
+    assert len(first_payload["matches"]) == 1
+    first_match = first_payload["matches"][0]
+    assert first_match["path"] == str(target)
+    first_coordinates = (
+        first_match["start_line"],
+        first_match["end_line"],
+        first_match["start_column"],
+        first_match["end_column"],
+    )
+    assert first_coordinates == (1, 1, 700 * 1024 + 1, 700 * 1024 + 6)
+    assert first_match["content_omitted"] is True
+    assert "before_chars" in first_payload["instruction"]
+    assert "after_chars" in first_payload["instruction"]
+    assert len(first_result.content.encode("utf-8")) <= 65536
+    assert target.read_text(encoding="utf-8") == original_content
+
+    retry_call = _call(
+        "subagent-grep-retry",
+        C.FILE_TOOL_NAME,
+        {
+            "operation": "grep",
+            "path": str(target),
+            "pattern": "needle",
+            "before_chars": 2,
+            "after_chars": 5,
+        },
+    )
+    assert prevalidate_tool_round([retry_call], cfg, tool_schemas=schemas, tool_workflow=C.TOOL_WORKFLOW_SUBAGENT) == {}
+    retry_result = await _run(workflow_db, profile, cfg, retry_call, schemas, C.TOOL_WORKFLOW_SUBAGENT)
+    assert retry_result.tool_execution_status == "succeeded"
+    retry_payload = json.loads(retry_result.content)
+    assert retry_payload["status"] == "success"
+    assert retry_payload["match_count"] == 1
+    assert len(retry_payload["matches"]) == 1
+    retry_match = retry_payload["matches"][0]
+    retry_coordinates = (
+        retry_match["start_line"],
+        retry_match["end_line"],
+        retry_match["start_column"],
+        retry_match["end_column"],
+    )
+    assert retry_coordinates == first_coordinates
+    assert retry_match["content"] == "xxneedle tail"
+    assert retry_match["content_omitted"] is False
+    assert "instruction" not in retry_payload
+    assert target.read_text(encoding="utf-8") == original_content
 
 
 @pytest.mark.asyncio
