@@ -78,7 +78,6 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
             ),
         ]
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=create_calls))
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="主代理已创建两个子任务"))
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -93,7 +92,7 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
         waiting = await runtime.run_next(independent_only=False)
         assert waiting is not None
         assert waiting.id == parent_work_id
-        assert waiting.status == SessionReplyWorkStatus.SUCCEEDED
+        assert waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)

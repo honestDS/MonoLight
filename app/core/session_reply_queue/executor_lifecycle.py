@@ -12,6 +12,7 @@ from app.core.constants import (
     ERR_INTERNAL_SERVER_ERROR,
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED,
+    GOAL_EXECUTION_PHASE_RUNNING,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
 )
 from app.core.crud.session.event import session_event_crud
@@ -166,6 +167,33 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
                 raise RuntimeError(t(ERR_INTERNAL_SERVER_ERROR))
             skip_reply = isinstance(response, dict) and response.get("skip_reply") is True
 
+        current_execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+        if skip_reply and work.subagent_id is None and current_execution_state.get("subagent_board_review_pending") is True:
+            state = dict(current_execution_state)
+            pending_tools = []
+            for field in ("child_work_waits", "pending_tools", "terminal_watch_waits"):
+                field_slots = state.get(field)
+                if isinstance(field_slots, list) and field_slots:
+                    pending_tools.extend(field_slots)
+            if pending_tools:
+                await ensure_session_reply_work_claim(db)
+                checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)
+                if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("messages"), list):
+                    raise RuntimeError(t(ERR_INTERNAL_SERVER_ERROR))
+                checkpoint = dict(checkpoint)
+                checkpoint.pop("reply_skipped", None)
+                checkpoint["current_turn"] = 0
+                checkpoint["execution_phase"] = GOAL_EXECUTION_PHASE_RUNNING
+                checkpoint["turn_messages"] = []
+                state.pop("subagent_board_review_pending", None)
+                state.pop("response", None)
+                await session_reply_work_item_crud.save_checkpoint(db, work.id, checkpoint)
+                work.execution_state = state
+                response = {
+                    "status": "waiting_external_work",
+                    "pending_tools": pending_tools,
+                }
+
         if isinstance(response, dict) and response.get("status") == "waiting_external_work":
             pending_tools = response.get("pending_tools")
             if not isinstance(pending_tools, list) or not pending_tools or any(not isinstance(pending_tool, dict) for pending_tool in pending_tools):
@@ -174,7 +202,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
                 db,
                 work=work,
                 worker_id=worker_id,
-                pending_tools=response["pending_tools"],
+                pending_tools=pending_tools,
                 commit=True,
             ):
                 return
@@ -182,7 +210,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
                 (pending_tool.get("child_work_id") for pending_tool in pending_tools if isinstance(pending_tool.get("child_work_id"), int) and not isinstance(pending_tool.get("child_work_id"), bool) and pending_tool.get("child_work_id") > 0),
                 None,
             )
-            if child_work_id is not None:
+            if child_work_id is not None or current_execution_state.get("child_work_waits"):
                 async with AsyncSessionLocal() as delivery_db:
                     await resume_child_work_for_parent(delivery_db, parent_work_id=work.id)
             for pending_tool in pending_tools:

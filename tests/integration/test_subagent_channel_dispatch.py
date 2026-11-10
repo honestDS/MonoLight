@@ -116,7 +116,6 @@ async def _run_dispatch(
                     )
                 ],
             ),
-            InternalMessage(role=MessageRole.ASSISTANT, content="Main task completed."),
             InternalMessage(role=MessageRole.ASSISTANT, content="Child task completed."),
         ]
     )
@@ -136,7 +135,7 @@ async def _run_dispatch(
     parent_done = await runtime.run_next()
     assert parent_done is not None
     assert parent_done.id == parent_work_id
-    assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+    assert parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
     parent_payloads = runtime.provider_payloads[parent_provider_start:]
     assert parent_payloads
     assert all(payload["model"] == "http-image-model" for payload in parent_payloads)
@@ -237,7 +236,7 @@ async def test_subagent_independent_channel_uses_its_own_fallback_after_primary_
             expected_child_models=[primary_model, fallback_model],
         )
 
-        assert all(payload["model"] == runtime.chat_model_id for payload in runtime.provider_payloads[:2])
+        assert all(payload["model"] == runtime.chat_model_id for payload in runtime.provider_payloads[:1])
         assert main_fallback_model not in [payload["model"] for payload in runtime.provider_payloads]
 
         assert child_done.id is not None

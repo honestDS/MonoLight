@@ -85,7 +85,6 @@ async def _query_transaction_case(image_chat_runtime):
             ),
         ]
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=create_calls))
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="主代理已创建两个子任务"))
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -100,7 +99,7 @@ async def _query_transaction_case(image_chat_runtime):
         waiting = await runtime.run_next(independent_only=False)
         assert waiting is not None
         assert waiting.id == parent_work_id
-        assert waiting.status == SessionReplyWorkStatus.SUCCEEDED
+        assert waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
         async with runtime.factory() as db:
             children = (

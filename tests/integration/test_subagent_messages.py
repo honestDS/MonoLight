@@ -95,7 +95,6 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
                 ],
             )
         )
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="parent confirmed child creation and continues"))
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -113,8 +112,8 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
         first_parent_done = await runtime.run_next()
         assert first_parent_done is not None
         assert first_parent_done.id == first_parent_work_id
-        assert first_parent_done.status == SessionReplyWorkStatus.SUCCEEDED
-        assert len(runtime.provider_payloads) == first_parent_provider_start + 2
+        assert first_parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert len(runtime.provider_payloads) == first_parent_provider_start + 1
 
         async with runtime.factory() as db:
             child_rows = (
@@ -206,7 +205,6 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
                     ],
                 )
             )
-            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="parent confirmed follow-up submission and continues"))
             second_parent_accepted = await runtime.client.post(
                 "/api/v1/chat/completions",
                 json={
@@ -225,8 +223,8 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
             second_parent_done = await runtime.run_next()
             assert second_parent_done is not None
             assert second_parent_done.id == second_parent_work_id
-            assert second_parent_done.status == SessionReplyWorkStatus.SUCCEEDED
-            assert len(runtime.provider_payloads) == second_parent_provider_start + 2
+            assert second_parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+            assert len(runtime.provider_payloads) == second_parent_provider_start + 1
 
             async with runtime.factory() as db:
                 children = (
@@ -541,7 +539,6 @@ async def test_completed_subagent_starts_new_round_with_previous_context(
             arguments={"operation": "create", "name": "读取文件内容", "message": child_instruction},
         )
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[create_call]))
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="parent confirmed child creation and continues"))
 
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
@@ -557,8 +554,8 @@ async def test_completed_subagent_starts_new_round_with_previous_context(
         first_parent_done = await runtime.run_next()
         assert first_parent_done is not None
         assert first_parent_done.id == first_parent_work_id
-        assert first_parent_done.status == SessionReplyWorkStatus.SUCCEEDED
-        assert len(runtime.provider_payloads) == first_parent_provider_start + 2
+        assert first_parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert len(runtime.provider_payloads) == first_parent_provider_start + 1
 
         async with runtime.factory() as db:
             child = (
@@ -665,7 +662,6 @@ async def test_completed_subagent_starts_new_round_with_previous_context(
             [
                 InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[query_latest_call, query_old_call]),
                 InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[send_call]),
-                InternalMessage(role=MessageRole.ASSISTANT, content="parent confirmed follow-up submission and continues"),
             ]
         )
         new_parent_accepted = await runtime.client.post(
@@ -682,8 +678,8 @@ async def test_completed_subagent_starts_new_round_with_previous_context(
         new_parent_done = await runtime.run_next()
         assert new_parent_done is not None
         assert new_parent_done.id == new_parent_work_id
-        assert new_parent_done.status == SessionReplyWorkStatus.SUCCEEDED
-        assert len(runtime.provider_payloads) == new_parent_provider_start + 3
+        assert new_parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert len(runtime.provider_payloads) == new_parent_provider_start + 2
 
         async with runtime.factory() as db:
             new_child = (
@@ -852,15 +848,14 @@ async def test_saved_child_text_with_late_message_stays_in_same_round(
             await db.commit()
 
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[InternalToolCall(id="model-create-race", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "create", "name": "完成独立子任务", "message": "完成一个独立子任务。"})]))
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="parent confirmed child creation and continues"))
         accepted = await runtime.client.post("/api/v1/chat/completions", json={"session_id": runtime.session_id, "request_id": "saved-child-text-create", "message": "创建子任务并等待结果。"})
         assert accepted.status_code == 200
         first_parent_work_id = accepted.json()["data"]["work_id"]
         first_parent_provider_start = len(runtime.provider_payloads)
         first_parent_done = await runtime.run_next()
         assert first_parent_done is not None and first_parent_done.id == first_parent_work_id
-        assert first_parent_done.status == SessionReplyWorkStatus.SUCCEEDED
-        assert len(runtime.provider_payloads) == first_parent_provider_start + 2
+        assert first_parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert len(runtime.provider_payloads) == first_parent_provider_start + 1
 
         async with runtime.factory() as db:
             child = (
@@ -926,15 +921,14 @@ async def test_saved_child_text_with_late_message_stays_in_same_round(
                     ],
                 )
             )
-            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="parent confirmed late message submission and continues"))
             second_accepted = await runtime.client.post("/api/v1/chat/completions", json={"session_id": runtime.session_id, "request_id": "saved-child-text-send", "message": "另一个父任务追加消息。"})
             assert second_accepted.status_code == 200
             second_parent_work_id = second_accepted.json()["data"]["work_id"]
             second_parent_provider_start = len(runtime.provider_payloads)
             second_parent_done = await runtime.run_next(independent_only=False)
             assert second_parent_done is not None and second_parent_done.id == second_parent_work_id
-            assert second_parent_done.status == SessionReplyWorkStatus.SUCCEEDED
-            assert len(runtime.provider_payloads) == second_parent_provider_start + 2
+            assert second_parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+            assert len(runtime.provider_payloads) == second_parent_provider_start + 1
 
             async def load_state():
                 async with runtime.factory() as db:
@@ -950,7 +944,7 @@ async def test_saved_child_text_with_late_message_stays_in_same_round(
             assert [(call.arguments["operation"], call.child_work_id) for call in calls] == [("create", child_work_id), ("send_message", child_work_id)]
             assert calls[0].arguments["name"] == "完成独立子任务"
             assert calls[0].tool_call_id and all(call.delivered is False for call in calls)
-            assert all(parent is not None and parent.status == SessionReplyWorkStatus.SUCCEEDED for parent in parents)
+            assert all(parent is not None and parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK for parent in parents)
             assert len(late_rows) == 1 and late_rows[0].is_processed is False
 
             release.set()
@@ -960,7 +954,7 @@ async def test_saved_child_text_with_late_message_stays_in_same_round(
             assert child_done.status == SessionReplyWorkStatus.READY_FOR_LLM
             children, rounds, calls, parents, late_rows = await load_state()
             assert children[0].status == SessionReplyWorkStatus.READY_FOR_LLM and rounds[0].result is None
-            assert all(parent is not None and parent.status == SessionReplyWorkStatus.SUCCEEDED for parent in parents)
+            assert all(parent is not None and parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK for parent in parents)
             assert len(late_rows) == 1 and late_rows[0].is_processed is False
 
             provider_start = len(runtime.provider_payloads)

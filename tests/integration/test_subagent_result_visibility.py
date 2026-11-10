@@ -70,7 +70,6 @@ async def test_subagent_result_delivery_is_hidden_from_user_history_but_kept_for
         )
         child_summary = "SUBAGENT_SUMMARY_MUST_REACH_PARENT_MODEL_ONLY"
         parent_summary = "PARENT_FINAL_SUMMARY_REMAINS_VISIBLE"
-        create_confirmation = "PARENT_CREATE_SUBMISSION_CONFIRMATION"
 
         async with runtime.factory() as db:
             profile = await db.get(Profile, runtime.profile.id)
@@ -100,7 +99,6 @@ async def test_subagent_result_delivery_is_hidden_from_user_history_but_kept_for
             arguments={"operation": "create", "name": "结果汇总", "message": "Return the child result as a concise summary."},
         )
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[create_call]))
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=create_confirmation))
 
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
@@ -127,7 +125,7 @@ async def test_subagent_result_delivery_is_hidden_from_user_history_but_kept_for
         parent_create_done = await runtime.run_next(independent_only=False)
         assert parent_create_done is not None
         assert parent_create_done.id == parent_work_id
-        assert parent_create_done.status == SessionReplyWorkStatus.SUCCEEDED
+        assert parent_create_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
         async with runtime.factory() as db:
             child = (
@@ -153,16 +151,8 @@ async def test_subagent_result_delivery_is_hidden_from_user_history_but_kept_for
         initial_reply_response = await runtime.client.get(f"/api/v1/chat/reply-works/{parent_work_id}")
         assert initial_reply_response.status_code == 200
         initial_reply_data = initial_reply_response.json()["data"]
-        assert initial_reply_data["status"] == SessionReplyWorkStatus.SUCCEEDED.value
-        assert initial_reply_data["response"]["choices"][0]["message"]["content"] == create_confirmation
-        initial_reply_history = initial_reply_data["response"]["history"]
-        assert any(item.get("content") == create_confirmation for item in initial_reply_history)
-        initial_tool_results = [item for item in initial_reply_history if item.get("id") == tool_result_id]
-        if show_tool_calls:
-            assert len(initial_tool_results) == 1
-            assert initial_tool_results[0]["type"] == MessageType.TOOL_RESULT.value
-        else:
-            assert initial_tool_results == []
+        assert initial_reply_data["status"] == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK.value
+        assert initial_reply_data["response"] is None
 
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=child_summary))
         child_done = await runtime.run_next(independent_only=True)
@@ -366,7 +356,6 @@ async def test_subagent_tool_context_isolated_from_parent_and_sibling_terminal_s
         runtime.outputs.extend(
             [
                 InternalMessage(role=MessageRole.ASSISTANT, tool_calls=create_calls),
-                InternalMessage(role=MessageRole.ASSISTANT, content="Parent created both independent children."),
             ]
         )
         accepted = await runtime.client.post(
@@ -382,7 +371,7 @@ async def test_subagent_tool_context_isolated_from_parent_and_sibling_terminal_s
         parent_done = await runtime.run_next(independent_only=False)
         assert parent_done is not None
         assert parent_done.id == parent_work_id
-        assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+        assert parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
         async with runtime.factory() as db:
             children = (

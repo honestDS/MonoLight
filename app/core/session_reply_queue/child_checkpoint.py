@@ -187,7 +187,7 @@ async def recover_child_work_wait(db: AsyncSession, *, work: SessionReplyWorkIte
     turn_changed = False
 
     for call in recover_calls:
-        if call.parent_work_id != work.id or call.delivered is not False or not isinstance(call.tool_call_id, str) or not call.tool_call_id.strip() or not isinstance(call.arguments, dict) or call.arguments.get("operation") not in {"create", "send_message", "wait"} or not _valid_id(call.id):
+        if call.parent_work_id != work.id or call.delivered is not False or not isinstance(call.tool_call_id, str) or not call.tool_call_id.strip() or not isinstance(call.arguments, dict) or not isinstance(call.arguments.get("operation"), str) or not call.arguments["operation"].strip() or not _valid_id(call.id):
             _bad()
         matches = [(assistant, tool_call) for assistant in messages if assistant.role == MessageRole.ASSISTANT for tool_call in assistant.tool_calls or [] if tool_call.id == call.tool_call_id and tool_call.name == AGENT_WORK_TOOL_NAME and tool_call.arguments == call.arguments]
         if len(matches) != 1:
@@ -252,6 +252,13 @@ async def recover_child_work_wait(db: AsyncSession, *, work: SessionReplyWorkIte
     if not tail_child_call_ids:
         return None
 
+    saved_child_work_waits = new_execution_state.get("child_work_waits")
+    if not isinstance(saved_child_work_waits, list):
+        return None
+    tail_child_slots = [dict(slot) for slot in saved_child_work_waits if isinstance(slot, dict) and slot.get("tool_call_id") in tail_child_call_ids]
+    if not tail_child_slots:
+        return None
+
     from app.core.session_reply_queue.executor_resume import restore_interactive_tool_replies
     from app.core.utils.dispatcher.external_work import build_terminal_wait_response
 
@@ -261,12 +268,17 @@ async def recover_child_work_wait(db: AsyncSession, *, work: SessionReplyWorkIte
     if restored_tail_group is None:
         return None
     restored_assistant, tool_results = restored_tail_group
+    non_child_tool_calls = [tool_call for tool_call in restored_assistant.tool_calls or [] if tool_call.id not in tail_child_call_ids and tool_call.name != AGENT_WORK_TOOL_NAME]
+    non_child_tool_results = [result for result in tool_results if result.tool_call_id not in tail_child_call_ids]
     external_wait = await build_terminal_wait_response(
         db,
         uid=work.uid,
         session_id=work.session_id,
         profile_id=work.profile_id,
-        tool_calls=restored_assistant.tool_calls or [],
-        tool_results=tool_results,
+        tool_calls=non_child_tool_calls,
+        tool_results=non_child_tool_results,
     )
-    return external_wait
+    pending_tools = list(tail_child_slots)
+    if external_wait is not None:
+        pending_tools.extend(external_wait["pending_tools"])
+    return {"status": "waiting_external_work", "pending_tools": pending_tools}

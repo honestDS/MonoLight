@@ -726,10 +726,16 @@ async def test_concurrent_board_post_and_cancel_preserve_cancelled_child_work(db
     assert persisted_round.result is not None
     assert persisted_round.result["completed"] is True
     assert persisted_round.result["status"] == "cancelled"
+    cancelled_posts = [post for post in persisted_posts if post.stage == "cancelled"]
+    concurrent_posts = [post for post in persisted_posts if post.stage == "concurrent"]
+    assert len(cancelled_posts) == 1
+    cancelled_result = json.loads(cancelled_posts[0].content)
+    assert cancelled_result["work_id"] == child_work_id
+    assert cancelled_result == persisted_round.result
 
     if post_result.get("cancelled") is True:
         assert post_result == {"cancelled": True}
-        assert persisted_posts == []
+        assert concurrent_posts == []
     else:
         post = post_result["result"]
         assert post["status"] == "success"
@@ -738,8 +744,10 @@ async def test_concurrent_board_post_and_cancel_preserve_cancelled_child_work(db
         assert post["work_id"] == child_work_id
         assert post["post"]["stage"] == "concurrent"
         assert post["post"]["content"] == "concurrent board post"
-        assert len(persisted_posts) == 1
-        assert persisted_posts[0].content == "concurrent board post"
+        assert len(concurrent_posts) == 1
+        assert concurrent_posts[0].content == "concurrent board post"
+
+    assert len(persisted_posts) == len(concurrent_posts) + 1
 
     async with session_factory() as stale_writer:
         stale_profile = await stale_writer.get(Profile, PROFILE_ID)

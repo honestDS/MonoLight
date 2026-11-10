@@ -24,8 +24,8 @@ from app.core.crud.session.subagent import subagent_crud
 from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.i18n import t
 from app.core.message_platforms.notifier import send_session_stream_event
-from app.core.prompts import SUBAGENT_EXECUTION_GUIDANCE_PROMPT
-from app.core.session_reply_queue.child_delivery import acknowledge_queried_child_results
+from app.core.prompts import SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT, SUBAGENT_EXECUTION_GUIDANCE_PROMPT
+from app.core.session_reply_queue.child_delivery import acknowledge_observed_child_results
 from app.core.session_reply_queue.executor_common import (
     _metadata_with_work_order,
     _result_message_dedupe_key,
@@ -348,7 +348,7 @@ async def _save_interactive_work_execution_checkpoint(
                     continue
                 arguments = tool_call.get("arguments")
                 operation = arguments.get("operation") if isinstance(arguments, dict) else None
-                if not isinstance(operation, str) or operation not in {"create", "send_message", "wait"}:
+                if not isinstance(operation, str) or operation not in {"create", "send_message"}:
                     continue
                 tool_result_message_id = message.get("id")
                 if not isinstance(tool_result_message_id, int) or isinstance(tool_result_message_id, bool) or tool_result_message_id <= 0:
@@ -394,7 +394,7 @@ async def _save_interactive_work_execution_checkpoint(
                     execution_state=state,
                     slots=child_tool_slots,
                 )
-            await acknowledge_queried_child_results(
+            await acknowledge_observed_child_results(
                 db,
                 parent=work,
                 checkpoint=checkpoint,
@@ -562,8 +562,14 @@ async def _dispatch_interactive_work(
         else:
             additional_system_prompt = SUBAGENT_EXECUTION_GUIDANCE_PROMPT
         dispatch_kwargs["additional_system_prompt"] = additional_system_prompt
-    elif isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
-        dispatch_kwargs["additional_system_prompt"] = additional_system_prompt.strip()
+    else:
+        if execution_state.get("subagent_board_review_pending") is True:
+            if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
+                additional_system_prompt = f"{additional_system_prompt.strip()}\n\n{SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT}"
+            else:
+                additional_system_prompt = SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT
+        if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
+            dispatch_kwargs["additional_system_prompt"] = additional_system_prompt.strip()
     if not stream_requested:
         response = await ChatDispatcher.dispatch(
             **dispatch_kwargs,

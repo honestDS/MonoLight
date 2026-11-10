@@ -37,7 +37,6 @@ from app.core.session_reply_queue.child_delivery import deliver_child_work_resul
 from app.core.session_reply_queue.child_lifecycle import finish_child_work
 from app.core.session_reply_queue.child_result import (
     _parse_audit_record_id,
-    build_child_call_result,
     get_child_snapshot,
     load_child_work,
 )
@@ -71,7 +70,6 @@ __all__ = [
     "query_subagent",
     "read_subagent_board",
     "send_subagent_message",
-    "wait_subagent",
 ]
 
 
@@ -201,14 +199,25 @@ async def post_subagent_board(
             stage=stage,
             content=content,
         )
-        await db.commit()
-        return {
+        subagent_id = subagent.id
+        child_work_id = round_row.child_work_id
+        result = {
             "status": "success",
             "operation": "board_post",
-            "subagent_id": subagent.id,
-            "work_id": round_row.child_work_id,
+            "subagent_id": subagent_id,
+            "work_id": child_work_id,
             "post": _serialize_board_post(post),
         }
+        await db.commit()
+        try:
+            async with AsyncSession(bind=db.bind, expire_on_commit=False) as delivery_db:
+                await deliver_child_work_results(delivery_db, child_work_id=child_work_id)
+        except Exception:
+            logger.exception(
+                "Subagent board post delivery failed",
+                extra={"subagent_id": subagent_id, "child_work_id": child_work_id},
+            )
+        return result
     except BaseException:
         await db.rollback()
         raise
@@ -268,8 +277,7 @@ def build_subagent_queued_result(call: SubagentToolCall) -> dict[str, Any]:
         "work_id": call.child_work_id,
         "child_work_id": call.child_work_id,
     }
-    if call.arguments["operation"] != "wait":
-        result["message"] = t(MSG_SUBAGENT_SUBMITTED)
+    result["message"] = t(MSG_SUBAGENT_SUBMITTED)
     return result
 
 
@@ -668,100 +676,6 @@ async def send_subagent_message(
         )
         await db.commit()
         _log_subagent_message(subagent, call, message)
-        return build_subagent_queued_result(call)
-    except BaseException:
-        await db.rollback()
-        raise
-
-
-async def wait_subagent(
-    db: AsyncSession,
-    *,
-    uid: str,
-    session_id: str,
-    profile_id: int,
-    tool_call_id: str,
-    subagent_id: str,
-    work_id: int | None = None,
-) -> dict[str, Any]:
-    try:
-        parent = await _load_parent(
-            db,
-            uid=uid,
-            session_id=session_id,
-            profile_id=profile_id,
-        )
-        arguments = {
-            "operation": "wait",
-            "subagent_id": subagent_id,
-        }
-        if work_id is not None:
-            arguments["work_id"] = work_id
-
-        existing_call = await subagent_crud.get_call(
-            db,
-            parent_work_id=parent.id,
-            tool_call_id=tool_call_id,
-        )
-        if existing_call is not None:
-            if existing_call.arguments != arguments:
-                raise ParameterException(ERR_SUBAGENT_CALL_CONFLICT)
-            result = await _existing_submission(
-                db,
-                call=existing_call,
-                uid=uid,
-                session_id=session_id,
-                profile_id=profile_id,
-            )
-            await db.commit()
-            return result
-
-        subagent = await _get_scoped_subagent(
-            db,
-            subagent_id=subagent_id,
-            uid=uid,
-            session_id=session_id,
-            profile_id=profile_id,
-            touch=True,
-        )
-        child_work_id = work_id
-        if child_work_id is None:
-            child_work_id = subagent.active_child_work_id or subagent.latest_child_work_id
-        if child_work_id is None:
-            raise ParameterException(ERR_SUBAGENT_WORK_NOT_FOUND)
-
-        round_row = await subagent_crud.get_round(
-            db,
-            child_work_id=child_work_id,
-            subagent_id=subagent.id,
-        )
-        if round_row is None:
-            raise ParameterException(ERR_SUBAGENT_WORK_NOT_FOUND)
-
-        work = await load_child_work(db, subagent=subagent, round_row=round_row)
-        snapshot = await get_child_snapshot(db, subagent=subagent, round_row=round_row)
-        if snapshot.get("completed") is True:
-            if round_row.result is None:
-                await finish_child_work(db, work=work)
-                snapshot = await get_child_snapshot(db, subagent=subagent, round_row=round_row)
-
-        call = await subagent_crud.create_call(
-            db,
-            subagent_id=subagent.id,
-            child_work_id=round_row.child_work_id,
-            parent_work_id=parent.id,
-            tool_call_id=tool_call_id,
-            arguments=arguments,
-        )
-        parent_state = dict(parent.execution_state) if isinstance(parent.execution_state, dict) else {}
-        parent_state["has_child_work"] = True
-        parent.execution_state = parent_state
-        db.add(parent)
-        await db.commit()
-
-        if snapshot.get("completed") is True:
-            return build_child_call_result(call, snapshot)
-
         return build_subagent_queued_result(call)
     except BaseException:
         await db.rollback()

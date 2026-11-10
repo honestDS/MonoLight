@@ -1,8 +1,13 @@
+import json
 from copy import deepcopy
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.constants import ERR_SUBAGENT_CONTEXT_INVALID, GOAL_EXECUTION_PHASE_RUNNING
+from app.core.constants import (
+    ERR_SUBAGENT_CONTEXT_INVALID,
+    GOAL_EXECUTION_PHASE_RUNNING,
+    SUBAGENT_BOARD_TEXT_MAX_BYTES,
+)
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud as reply_work_crud
 from app.core.crud.session.subagent import subagent_crud
 from app.core.exceptions import ParameterException
@@ -133,6 +138,29 @@ async def finish_child_work(db: AsyncSession, *, work: SessionReplyWorkItem) -> 
         return False
 
     round_row.result = deepcopy(snapshot)
+    board_content = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+    if len(board_content.encode("utf-8")) > SUBAGENT_BOARD_TEXT_MAX_BYTES:
+        board_content = json.dumps(
+            {
+                "work_id": snapshot["work_id"],
+                "current_work_id": snapshot["current_work_id"],
+                "completed": snapshot["completed"],
+                "status": snapshot["status"],
+                "full_result_operation": "query",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    await subagent_crud.create_board_post(
+        db,
+        uid=actual_work.uid,
+        session_id=actual_work.session_id,
+        profile_id=actual_work.profile_id,
+        subagent_id=subagent.id,
+        child_work_id=round_row.child_work_id,
+        stage=snapshot["status"],
+        content=board_content,
+    )
     round_row.waiting_confirmation = False
     if subagent.active_child_work_id == round_row.child_work_id:
         subagent.active_child_work_id = None

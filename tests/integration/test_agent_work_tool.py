@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from sqlalchemy import select
 
 from app.core.constants import (
     AGENT_WORK_TOOL_NAME,
+    END_SESSION_TOOL_NAME,
     FILE_TOOL_NAME,
     SHELL_TOOL_NAME,
     TERMINAL_TOOL_NAME,
@@ -48,10 +50,6 @@ def _provider_tool_names(payload: dict) -> set[str]:
     return names
 
 
-def _append_parent_confirmation(runtime, content: str = "parent ordinary confirmation") -> None:
-    runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=content))
-
-
 @pytest.mark.asyncio
 async def test_agent_work_create_executes_private_child_and_resumes_parent(
     image_chat_runtime,
@@ -81,7 +79,6 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
         assert parent_secret not in child_instruction
         assert child_secret not in child_instruction
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[create_call]))
-        _append_parent_confirmation(runtime, "主代理已提交子任务")
 
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
@@ -99,12 +96,12 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
         parent_done = await runtime.run_next()
         assert parent_done is not None
         assert parent_done.id == parent_work_id
-        assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+        assert parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
             assert parent is not None
-            assert parent.status == SessionReplyWorkStatus.SUCCEEDED
+            assert parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
             assert parent.work_type == SessionReplyWorkType.FOREGROUND_REPLY
 
             child = (
@@ -378,12 +375,19 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
                 .scalars()
                 .all()
             )
-            assert len(board_posts) == 1
+            assert len(board_posts) == 2
             board_post = board_posts[0]
+            completion_board_post = board_posts[1]
+            assert board_post.id is not None
             assert board_post.stage == "verification"
             assert board_post.content == board_marker
             assert board_post.child_work_id == child_work_id
             assert board_post.subagent_id == child.subagent_id
+            assert completion_board_post.id is not None
+            assert completion_board_post.stage == "succeeded"
+            assert json.loads(completion_board_post.content) == round_row.result
+            assert completion_board_post.child_work_id == child_work_id
+            assert completion_board_post.subagent_id == child.subagent_id
 
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
             assert parent is not None
@@ -495,12 +499,19 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
             assert board_read_result["status"] == "success"
             assert board_read_result["operation"] == "board_read"
             assert board_read_result["subagent_id"] == child.subagent_id
-            assert len(board_read_result["posts"]) == 1
+            assert len(board_read_result["posts"]) == 2
             returned_post = board_read_result["posts"][0]
             assert returned_post["subagent_id"] == child.subagent_id
             assert returned_post["child_work_id"] == child_work_id
+            assert returned_post["id"] == board_post.id
             assert returned_post["stage"] == "verification"
             assert returned_post["content"] == board_marker
+            returned_completion_post = board_read_result["posts"][1]
+            assert returned_completion_post["subagent_id"] == child.subagent_id
+            assert returned_completion_post["child_work_id"] == child_work_id
+            assert returned_completion_post["id"] == completion_board_post.id
+            assert returned_completion_post["stage"] == "succeeded"
+            assert json.loads(returned_completion_post["content"]) == round_row.result
 
             leaked_stage_messages = (
                 (
@@ -544,7 +555,30 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
                 .scalars()
                 .all()
             )
-            assert len(markers_before) == 1
+            assert len(markers_before) == 2
+            stage_marker, completion_marker = markers_before
+            stage_payload = json.loads(stage_marker.content or "{}")
+            completion_payload = json.loads(completion_marker.content or "{}")
+            assert stage_marker.role == MessageRole.USER
+            assert stage_marker.dedupe_key == f"subagent-board:{parent_work_id}:{board_post.id}"
+            assert stage_payload["type"] == "subagent_board_update"
+            assert stage_payload["source"] == "subagent"
+            assert stage_payload["subagent_id"] == child.subagent_id
+            assert stage_payload["work_id"] == child_work_id
+            assert stage_payload["post_id"] == board_post.id
+            assert stage_payload["stage"] == "verification"
+            assert "content" not in stage_payload
+            assert board_marker not in (stage_marker.content or "")
+            assert completion_marker.role == MessageRole.USER
+            assert completion_marker.dedupe_key == f"subagent-result:{call.id}"
+            assert completion_payload["type"] == "external_work_resume"
+            assert completion_payload["source"] == "subagent"
+            assert completion_payload["tool_call"] == {
+                "id": internal_create_call_id,
+                "name": AGENT_WORK_TOOL_NAME,
+                "arguments": create_call.arguments,
+            }
+            assert completion_payload["results"] == [create_result]
             marker_snapshot = [(row.id, row.dedupe_key, row.content) for row in markers_before]
 
         async with runtime.factory() as db:
@@ -722,7 +756,7 @@ async def test_agent_work_and_image_completion_resumes_parent_per_batch_and_keep
                 )
                 parent = await db.get(SessionReplyWorkItem, parent_work_id)
                 call = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id))).scalars().one()
-            expected_parent_status = SessionReplyWorkStatus.WAITING_EXTERNAL_WORK if completion_order == "child_first" and result_type == "child" else SessionReplyWorkStatus.READY_FOR_LLM
+            expected_parent_status = SessionReplyWorkStatus.READY_FOR_LLM
             assert parent is not None and parent.status == expected_parent_status
             assert call.delivered is child_completed
             pending_image_ids = set(image_task_ids) - set(completed_task_ids)
@@ -737,7 +771,7 @@ async def test_agent_work_and_image_completion_resumes_parent_per_batch_and_keep
             expected_resume_task_ids = [result_id] if result_type == "image" else []
             assert resume_task_ids == expected_resume_task_ids
 
-            if step_index < len(completion_steps) - 1 and not (completion_order == "child_first" and result_type == "child"):
+            if step_index < len(completion_steps) - 1:
                 runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=f"{interim_parent_content}-step-{step_index}"))
                 interim_done = await runtime.run_next(independent_only=False)
                 assert interim_done is not None and interim_done.id == parent_work_id
@@ -823,7 +857,7 @@ async def test_agent_work_and_image_completion_resumes_parent_per_batch_and_keep
                 assert image_task.status == BackgroundTaskStatus.SUCCEEDED
                 assert image_task.attempt_count == 1
                 assert image_task.result == image_results[image_task.id]
-        assert [request["prompt"] for request in runtime.image_requests] == image_prompts
+        assert Counter(request["prompt"] for request in runtime.image_requests) == Counter(image_prompts)
 
 
 @pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"])
@@ -876,7 +910,6 @@ async def test_agent_work_two_children_are_delivered_in_batches(
                 ),
             ]
             runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=create_calls))
-            _append_parent_confirmation(runtime, f"two-child-parent-initial-confirmation-{protocol}-{late_parent_state}")
             accepted = await runtime.client.post(
                 "/api/v1/chat/completions",
                 json={
@@ -891,12 +924,12 @@ async def test_agent_work_two_children_are_delivered_in_batches(
             initial_done = await runtime.run_next(independent_only=False)
             assert initial_done is not None
             assert initial_done.id == parent_work_id
-            assert initial_done.status == SessionReplyWorkStatus.SUCCEEDED
+            assert initial_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
             async with runtime.factory() as db:
                 parent = await db.get(SessionReplyWorkItem, parent_work_id)
                 assert parent is not None
-                assert parent.status == SessionReplyWorkStatus.SUCCEEDED
+                assert parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
                 children = (
                     (
                         await db.execute(
@@ -1096,7 +1129,18 @@ async def test_agent_work_two_children_are_delivered_in_batches(
                     return response
 
                 monkeypatch.setattr(transformer, "_post_json", hold_parent_post_json)
-                runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=first_parent_reply))
+                runtime.outputs.append(
+                    InternalMessage(
+                        role=MessageRole.ASSISTANT,
+                        tool_calls=[
+                            InternalToolCall(
+                                id="two-child-review-end-session",
+                                name=END_SESSION_TOOL_NAME,
+                                arguments={"skip_reply": True},
+                            )
+                        ],
+                    )
+                )
                 parent_recovery_task = asyncio.create_task(runtime.run_next(independent_only=False))
                 await asyncio.wait_for(parent_request_started.wait(), timeout=5)
                 held_parent_payload = runtime.provider_payloads[-1]
@@ -1173,17 +1217,17 @@ async def test_agent_work_two_children_are_delivered_in_batches(
                                 select(Message).where(
                                     Message.session_id == runtime.session_id,
                                     Message.uid == runtime.uid,
+                                    Message.profile_id == runtime.profile.id,
+                                    Message.work_id.is_(None),
                                     Message.role == MessageRole.ASSISTANT,
-                                    Message.content == first_parent_reply,
+                                    Message.type == MessageType.TEXT,
                                 )
                             )
                         )
                         .scalars()
                         .all()
                     )
-                    assert len(previous_parent_messages) == 1
-                    previous_parent_result_id = previous_parent_messages[0].id
-                    assert previous_parent_result_id is not None
+                    assert previous_parent_messages == []
 
                 parent_provider_start = len(runtime.provider_payloads)
                 runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=final_parent_reply))
@@ -1350,7 +1394,6 @@ async def test_agent_work_parent_commit_interrupt_recovers_submission_without_du
             arguments={"operation": "create", "name": "恢复子任务", "message": child_instruction},
         )
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[create_call]))
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="parent ordinary reply before child completion"))
 
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
@@ -1457,19 +1500,14 @@ async def test_agent_work_parent_commit_interrupt_recovers_submission_without_du
         recovered_done = await runtime.run_next()
         assert recovered_done is not None
         assert recovered_done.id == parent_work_id
-        assert recovered_done.status == SessionReplyWorkStatus.SUCCEEDED
+        assert recovered_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
         assert not runtime.outputs
-        assert len(runtime.provider_payloads) == provider_payload_count + 1
-        recovered_payload = runtime.provider_payloads[provider_payload_count]
-        recovered_output = next(item for item in recovered_payload["input"] if item.get("type") == "function_call_output" and item.get("call_id") == actual_tool_call_id)
-        recovered_output_payload = json.loads(recovered_output["output"])
-        assert recovered_output_payload["status"] == "queued"
-        assert recovered_output_payload["child_work_id"] == child_work_id
+        assert len(runtime.provider_payloads) == provider_payload_count
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
             assert parent is not None
-            assert parent.status == SessionReplyWorkStatus.SUCCEEDED
+            assert parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
             calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id))).scalars().all()
             assert len(calls) == 1
             call = calls[0]
@@ -1663,7 +1701,6 @@ async def test_agent_work_child_finishes_before_parent_reply_is_delivered_once(
             [
                 InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[create_call]),
                 InternalMessage(role=MessageRole.ASSISTANT, content=child_content),
-                InternalMessage(role=MessageRole.ASSISTANT, content="parent ordinary confirmation"),
             ]
         )
 
@@ -1717,8 +1754,7 @@ async def test_agent_work_child_finishes_before_parent_reply_is_delivered_once(
                 assert child_done is not None
                 assert child_done.id == child_work_id
                 assert child_done.status == SessionReplyWorkStatus.SUCCEEDED
-                assert len(runtime.outputs) == 1
-                assert runtime.outputs[0].content == "parent ordinary confirmation"
+                assert not runtime.outputs
 
                 async with runtime.factory() as child_db:
                     parent = await child_db.get(SessionReplyWorkItem, parent_work_id)
@@ -1771,9 +1807,8 @@ async def test_agent_work_child_finishes_before_parent_reply_is_delivered_once(
         assert parent_ready.id == parent_work_id
         assert parent_ready.status == SessionReplyWorkStatus.READY_FOR_LLM
         assert not runtime.outputs
-        assert len(runtime.provider_payloads) == 3
+        assert len(runtime.provider_payloads) == 2
         assert subagent_id not in json.dumps(runtime.provider_payloads[1], ensure_ascii=False)
-        assert subagent_id in json.dumps(runtime.provider_payloads[2], ensure_ascii=False)
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
@@ -1854,7 +1889,9 @@ async def test_agent_work_child_finishes_before_parent_reply_is_delivered_once(
         assert parent_done.id == parent_work_id
         assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
         assert len(runtime.provider_payloads[parent_provider_start:]) == 1
-        assert any(child_content in json.dumps(payload, ensure_ascii=False) for payload in runtime.provider_payloads[parent_provider_start:])
+        parent_resume_payload = runtime.provider_payloads[parent_provider_start]
+        assert subagent_id in json.dumps(parent_resume_payload, ensure_ascii=False)
+        assert child_content in json.dumps(parent_resume_payload, ensure_ascii=False)
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
@@ -1975,7 +2012,6 @@ async def test_agent_work_cross_scope_operations_fail_without_side_effects(
                 ],
             )
         )
-        _append_parent_confirmation(runtime, "ordinary parent submission confirmation")
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -1989,7 +2025,7 @@ async def test_agent_work_cross_scope_operations_fail_without_side_effects(
         parent_submitted = await runtime.run_next()
         assert parent_submitted is not None
         assert parent_submitted.id == parent_work_id
-        assert parent_submitted.status == SessionReplyWorkStatus.SUCCEEDED
+        assert parent_submitted.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
         async with runtime.factory() as db:
             create_rows = (
@@ -2190,7 +2226,7 @@ async def test_agent_work_cross_scope_operations_fail_without_side_effects(
             subagent_after = await db.get(Subagent, subagent_id)
             round_after = await db.get(SubagentWork, child_work_id)
             assert parent_after is not None and child_after is not None and subagent_after is not None and round_after is not None
-            assert parent_after.status == SessionReplyWorkStatus.SUCCEEDED
+            assert parent_after.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
             assert parent_after.model_dump(mode="json") == parent_snapshot
             assert child_after.model_dump(mode="json") == child_snapshot
             assert subagent_after.model_dump(mode="json") == subagent_snapshot

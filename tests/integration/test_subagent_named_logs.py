@@ -80,7 +80,6 @@ async def test_named_subagent_identity_persists_across_real_work_rounds(
                     ],
                 )
             )
-            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="首轮主代理已提交子任务"))
             accepted = await runtime.client.post(
                 "/api/v1/chat/completions",
                 json={
@@ -103,7 +102,7 @@ async def test_named_subagent_identity_persists_across_real_work_rounds(
             first_parent_replied = await runtime.run_next()
             assert first_parent_replied is not None
             assert first_parent_replied.id == first_parent_work_id
-            assert first_parent_replied.status == SessionReplyWorkStatus.SUCCEEDED
+            assert first_parent_replied.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
             async with runtime.factory() as db:
                 first_child = (
@@ -175,7 +174,6 @@ async def test_named_subagent_identity_persists_across_real_work_rounds(
                     ],
                 )
             )
-            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="第二轮主代理已提交补充指令"))
             second_accepted = await runtime.client.post(
                 "/api/v1/chat/completions",
                 json={
@@ -198,7 +196,7 @@ async def test_named_subagent_identity_persists_across_real_work_rounds(
             second_parent_replied = await runtime.run_next()
             assert second_parent_replied is not None
             assert second_parent_replied.id == second_parent_work_id
-            assert second_parent_replied.status == SessionReplyWorkStatus.SUCCEEDED
+            assert second_parent_replied.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
             async with runtime.factory() as db:
                 second_child = (
@@ -291,7 +289,6 @@ async def test_send_message_to_ready_subagent_logs_as_subagent_main_message(imag
                 ],
             )
         )
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="主代理已提交实时核查子任务"))
         first_accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -305,7 +302,7 @@ async def test_send_message_to_ready_subagent_logs_as_subagent_main_message(imag
         first_parent_replied = await runtime.run_next(independent_only=False)
         assert first_parent_replied is not None
         assert first_parent_replied.id == first_parent_work_id
-        assert first_parent_replied.status == SessionReplyWorkStatus.SUCCEEDED
+        assert first_parent_replied.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
         async with runtime.factory() as db:
             child = (
@@ -355,7 +352,6 @@ async def test_send_message_to_ready_subagent_logs_as_subagent_main_message(imag
                     ],
                 )
             )
-            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="主代理已提交追加指令"))
             second_accepted = await runtime.client.post(
                 "/api/v1/chat/completions",
                 json={
@@ -369,7 +365,7 @@ async def test_send_message_to_ready_subagent_logs_as_subagent_main_message(imag
             second_parent_replied = await runtime.run_next(independent_only=False)
             assert second_parent_replied is not None
             assert second_parent_replied.id == second_parent_work_id
-            assert second_parent_replied.status == SessionReplyWorkStatus.SUCCEEDED
+            assert second_parent_replied.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
             matching_logs = [(text, extra) for text, extra in captured_logs if extra.get("work_id") == child_work_id and appended_instruction in text]
             assert matching_logs

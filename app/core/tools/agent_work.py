@@ -23,7 +23,7 @@ AGENT_WORK_TOOL_SCHEMA = {
         "description": (
             "When to use a subagent\n"
             "Prefer delegating independently deliverable parts when work involves broad investigation, large volumes of material, multi-source verification, comparing plans or alternatives, independent checking, or context isolation. Delegate before completing that work, not after. "
-            "Use ordinary tools directly for simple lookups and reads. Independent create operations may be submitted in the same turn or in separate turns; they do not need to be submitted together to run independently. For dependent work, reuse the subagent with send_message.\n\n"
+            "Use ordinary tools directly for simple lookups and reads. Dispatch independent create operations in the same tool batch so they can run in parallel; for dependent work, wait for the relevant result before using send_message.\n\n"
             "Creating a task\n"
             "Use create with a short, human-readable name and the goal, necessary background, inputs or file paths, constraints, and expected deliverable. The subagent has no access to this conversation's history, so make the task self-contained. "
             "It may use Shell (non_interactive or interactive), terminal_tool, and watch when enabled by the current Profile; actual availability and use remain governed by Profile enablement, audit decisions, and directory rules. "
@@ -31,7 +31,11 @@ AGENT_WORK_TOOL_SCHEMA = {
             "Continuing and following up\n"
             'Reuse the returned subagent_id with send_message to add instructions, continue interrupted work, or request follow-up work. For a simple continuation, send "continue previous task".\n\n'
             "Status and board history\n"
-            "create and send_message return immediately with a queued confirmation, so the main agent can continue other work. The task's eventual result is automatically delivered to the reply that submitted it when the task completes; completion, failure, and cancellation all resume that reply automatically. "
+            "After the tool returns a queued confirmation, the framework saves the current batch result and "
+            "checkpoint, then automatically pauses the parent reply. Board updates and completion, failure, or "
+            "cancellation wake the parent for review. If no stage adjustment is needed and the task is still "
+            "unfinished, call end_session(skip_reply=true) to wait silently again; once all tasks are complete, "
+            "verify and summarize the results. "
             "Use list for a lightweight directory of unfinished subagents in the current user, session, and Profile scope; completed subagents are omitted. "
             "Use query for a targeted lookup of one subagent's status, saved result, or interruption reason. "
             "Use board_read to inspect all persisted stage-history posts for one scoped subagent. "

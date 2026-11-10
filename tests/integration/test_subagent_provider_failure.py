@@ -25,7 +25,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
-from app.models.subagent import SubagentToolCall, SubagentWork
+from app.models.subagent import SubagentBoardPost, SubagentToolCall, SubagentWork
 from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 
@@ -141,12 +141,7 @@ async def _start_parent(runtime) -> tuple[int, int, tuple[Any, Any]]:
             "message": "Complete the isolated task and return the verified result.",
         },
     )
-    runtime.outputs.extend(
-        [
-            InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[create_call]),
-            InternalMessage(role=MessageRole.ASSISTANT, content="parent accepted the child task"),
-        ]
-    )
+    runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[create_call]))
     accepted = await runtime.client.post(
         "/api/v1/chat/completions",
         json={
@@ -163,7 +158,7 @@ async def _start_parent(runtime) -> tuple[int, int, tuple[Any, Any]]:
     parent_done = await runtime.run_next(independent_only=False)
     assert parent_done is not None
     assert parent_done.id == parent_work_id
-    assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+    assert parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
     async with runtime.factory() as db:
         parent = await db.get(SessionReplyWorkItem, parent_work_id)
@@ -212,6 +207,21 @@ async def _assert_failed_child_delivery(runtime, parent_work_id: int, child_work
         assert round_row.result["completed"] is True
         assert round_row.result["status"] == "failed"
         assert round_row.result["error"] == expected_error
+
+        failed_posts = (
+            (
+                await db.execute(
+                    select(SubagentBoardPost).where(
+                        SubagentBoardPost.child_work_id == child_work_id,
+                        SubagentBoardPost.stage == "failed",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(failed_posts) == 1
+        assert json.loads(failed_posts[0].content) == round_row.result
 
         call = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id))).scalars().one()
         assert call.delivered is True

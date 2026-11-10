@@ -85,7 +85,6 @@ async def _create_child(runtime, *, instruction: str, prefix: str) -> tuple[int,
     runtime.outputs.extend(
         [
             InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[create_call]),
-            InternalMessage(role=MessageRole.ASSISTANT, content=f"{prefix}-parent-confirmation"),
         ]
     )
     accepted = await runtime.client.post(
@@ -93,7 +92,7 @@ async def _create_child(runtime, *, instruction: str, prefix: str) -> tuple[int,
         json={
             "session_id": runtime.session_id,
             "request_id": f"{prefix}-parent-request",
-            "message": f"Create the independent child for {prefix} and continue the parent reply.",
+            "message": f"Create the independent child for {prefix} and wait for the child result.",
         },
     )
     assert accepted.status_code == 200
@@ -104,7 +103,7 @@ async def _create_child(runtime, *, instruction: str, prefix: str) -> tuple[int,
     parent_done = await runtime.run_next(independent_only=False)
     assert parent_done is not None
     assert parent_done.id == parent_work_id
-    assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+    assert parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
     async with runtime.factory() as db:
         child = await _child_for_parent(db, parent_work_id)

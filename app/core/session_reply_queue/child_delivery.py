@@ -26,9 +26,10 @@ from app.core.session_reply_queue.child_result import (
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkStatus
+from app.models.subagent import SubagentBoardPost
 
 __all__ = [
-    "acknowledge_queried_child_results",
+    "acknowledge_observed_child_results",
     "resume_child_work_for_parent",
     "deliver_child_work_results",
 ]
@@ -228,7 +229,7 @@ async def _apply_child_call_result(
     return stored.tool_call_id, replacement_payload, needs_resume_message
 
 
-async def acknowledge_queried_child_results(
+async def acknowledge_observed_child_results(
     db: AsyncSession,
     *,
     parent,
@@ -247,34 +248,34 @@ async def acknowledge_queried_child_results(
     if "turn_messages" in checkpoint:
         turn_messages = _parse_checkpoint_messages(checkpoint["turn_messages"])
 
-    query_calls: dict[str, Any] = {}
+    observed_calls: dict[str, Any] = {}
     candidates: dict[tuple[str, int], list[tuple[InternalMessage, dict[str, Any]]]] = {}
     for message in messages:
         if message.role == MessageRole.ASSISTANT:
-            query_calls = {}
+            observed_calls = {}
             for tool_call in message.tool_calls or []:
-                if tool_call.name != AGENT_WORK_TOOL_NAME or not isinstance(tool_call.arguments, dict) or tool_call.arguments.get("operation") != "query":
+                if tool_call.name != AGENT_WORK_TOOL_NAME or not isinstance(tool_call.arguments, dict) or tool_call.arguments.get("operation") not in ("query", "cancel"):
                     continue
                 subagent_id = tool_call.arguments.get("subagent_id")
                 if not isinstance(subagent_id, str) or not subagent_id.strip():
                     continue
-                query_calls[tool_call.id] = tool_call
+                observed_calls[tool_call.id] = tool_call
             continue
         if message.role != MessageRole.TOOL:
-            query_calls = {}
+            observed_calls = {}
             continue
 
-        query_call = query_calls.get(message.tool_call_id) if isinstance(message.tool_call_id, str) else None
-        if query_call is None:
+        observed_call = observed_calls.get(message.tool_call_id) if isinstance(message.tool_call_id, str) else None
+        if observed_call is None:
             continue
         try:
             payload = json.loads(message.content or "{}")
         except (TypeError, ValueError):
             continue
-        if not isinstance(payload, dict) or payload.get("status") != "success" or payload.get("operation") != "query":
+        if not isinstance(payload, dict) or payload.get("status") != "success" or payload.get("operation") != observed_call.arguments.get("operation"):
             continue
 
-        arguments = query_call.arguments
+        arguments = observed_call.arguments
         subagent_id = arguments["subagent_id"]
         if payload.get("subagent_id") != subagent_id:
             continue
@@ -322,7 +323,16 @@ async def acknowledge_queried_child_results(
                 _invalid_context()
             continue
 
-        if call.parent_work_id != parent.id or call.delivered is not False or not isinstance(call.tool_call_id, str) or not call.tool_call_id.strip() or not isinstance(call.arguments, dict) or call.arguments.get("operation") not in {"create", "send_message", "wait"} or not _is_positive_int(call.tool_result_message_id):
+        if (
+            call.parent_work_id != parent.id
+            or call.delivered is not False
+            or not isinstance(call.tool_call_id, str)
+            or not call.tool_call_id.strip()
+            or not isinstance(call.arguments, dict)
+            or not isinstance(call.arguments.get("operation"), str)
+            or not call.arguments["operation"].strip()
+            or not _is_positive_int(call.tool_result_message_id)
+        ):
             _invalid_context()
 
         subagent = await subagent_crud.get_scoped(
@@ -348,16 +358,16 @@ async def acknowledge_queried_child_results(
         if not isinstance(snapshot, dict) or snapshot.get("completed") is not True:
             continue
 
-        for query_message, payload in call_candidates:
+        for observed_message, payload in call_candidates:
             if payload.get("work") != snapshot:
                 continue
-            if not _is_positive_int(query_message.id) or query_message.id <= call.tool_result_message_id:
+            if not _is_positive_int(observed_message.id) or observed_message.id <= call.tool_result_message_id:
                 continue
-            persisted = await message_crud.get(db, query_message.id)
+            persisted = await message_crud.get(db, observed_message.id)
             if persisted is None:
                 continue
             if (
-                persisted.id != query_message.id
+                persisted.id != observed_message.id
                 or persisted.uid != parent.uid
                 or persisted.session_id != parent.session_id
                 or persisted.profile_id != parent.profile_id
@@ -372,7 +382,7 @@ async def acknowledge_queried_child_results(
                 stored_payload = json.loads(stored.content or "{}")
             except (TypeError, ValueError):
                 continue
-            if stored.role != MessageRole.TOOL or stored.tool_call_id != query_message.tool_call_id or stored_payload != payload:
+            if stored.role != MessageRole.TOOL or stored.tool_call_id != observed_message.tool_call_id or stored_payload != payload:
                 continue
 
             await _apply_child_call_result(
@@ -424,13 +434,12 @@ async def resume_child_work_for_parent(
         parent = work
 
         state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
-        parent_was_waiting = work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
         child_slots = state.get("child_work_waits")
         if not isinstance(child_slots, list) or not child_slots:
             await db.rollback()
             return False
 
-        validated_slots: list[tuple[dict[str, Any], Any, Any, Any]] = []
+        validated_slots: list[tuple[dict[str, Any], Any, Any]] = []
         seen_slot_keys: set[tuple[int, str]] = set()
         for slot in child_slots:
             if not isinstance(slot, dict):
@@ -477,15 +486,46 @@ async def resume_child_work_for_parent(
             child_state = child_work.execution_state if child_work is not None and isinstance(child_work.execution_state, dict) else {}
             if child_work is None or child_work.id != round_row.current_work_id or child_work.uid != parent.uid or child_work.session_id != parent.session_id or child_work.profile_id != parent.profile_id or child_work.subagent_id != subagent_id or child_state.get("child_work_id", child_work.id) != child_work_id:
                 _invalid_context()
-            validated_slots.append((slot, call, subagent, round_row))
+            validated_slots.append((slot, call, round_row))
 
-        pending_wait_call_ids = {call.tool_call_id for _slot, call, _subagent, _round_row in validated_slots if call.delivered is False and isinstance(call.arguments, dict) and call.arguments.get("operation") == "wait"}
+        existing_board_cursors = state.get("subagent_board_cursors")
+        if existing_board_cursors is None:
+            board_cursors: dict[str, Any] = {}
+        elif not isinstance(existing_board_cursors, dict):
+            _invalid_context()
+        else:
+            board_cursors = dict(existing_board_cursors)
+
         has_new_result = False
-        for _slot, call, _subagent, round_row in validated_slots:
+        new_board_posts: list[SubagentBoardPost] = []
+        checked_board_work_ids: set[int] = set()
+        for _slot, call, round_row in validated_slots:
             if isinstance(round_row.result, dict) and call.delivered is False:
                 has_new_result = True
-                break
-        if not has_new_result:
+            if isinstance(round_row.result, dict) or call.delivered is not False or round_row.child_work_id in checked_board_work_ids:
+                continue
+            checked_board_work_ids.add(round_row.child_work_id)
+            latest_post = await subagent_crud.get_latest_board_post(
+                db,
+                uid=parent.uid,
+                session_id=parent.session_id,
+                profile_id=parent.profile_id,
+                subagent_id=call.subagent_id,
+                child_work_id=round_row.child_work_id,
+            )
+            if latest_post is None:
+                continue
+            if not _is_positive_int(latest_post.id):
+                _invalid_context()
+            child_work_key = str(round_row.child_work_id)
+            cursor = board_cursors.get(child_work_key, 0)
+            if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
+                _invalid_context()
+            if latest_post.id > cursor:
+                board_cursors[child_work_key] = latest_post.id
+                new_board_posts.append(latest_post)
+
+        if not has_new_result and not new_board_posts:
             await db.rollback()
             return False
 
@@ -498,7 +538,6 @@ async def resume_child_work_for_parent(
             child_slots = state.get("child_work_waits")
             if not isinstance(child_slots, list) or not child_slots:
                 _invalid_context()
-
         checkpoint = await reply_work_crud.get_checkpoint(db, parent_work_id)
         if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("messages"), list):
             _invalid_context()
@@ -515,13 +554,11 @@ async def resume_child_work_for_parent(
 
         remaining_slots: list[dict[str, Any]] = []
         delivered_child_work_ids: list[int] = []
-        delivered_wait_result = False
         is_live_parent = not isinstance(state.get("frozen_context_message_ids"), list)
         checkpoint_message_ids = {message.id for message in messages if _is_positive_int(message.id)}
-        message_work_id_loaded = False
-        message_work_id: int | None = None
         turn_message_ids = {message.id for message in turn_messages if _is_positive_int(message.id)} if turn_messages is not None else set()
-        for slot, call, _subagent, round_row in validated_slots:
+        pending_notifications: list[tuple[InternalMessage, str, bool]] = []
+        for slot, call, round_row in validated_slots:
             snapshot = round_row.result
             if not isinstance(snapshot, dict):
                 remaining_slots.append(slot)
@@ -539,41 +576,73 @@ async def resume_child_work_for_parent(
                 messages=messages,
                 turn_messages=turn_messages,
             )
-            if call.tool_call_id in pending_wait_call_ids:
-                delivered_wait_result = True
             if is_live_parent or needs_resume_message:
                 resume_message = _build_resume_message(
                     call_id=call_id,
                     arguments=call.arguments,
                     result=replacement_payload,
                 )
-                if not message_work_id_loaded:
-                    message_work_id = await reply_work_crud.get_message_work_id(db, parent)
-                    message_work_id_loaded = True
+                pending_notifications.append(
+                    (
+                        resume_message,
+                        f"subagent-result:{call.id}",
+                        needs_resume_message,
+                    )
+                )
+
+        for post in new_board_posts:
+            board_message = InternalMessage(
+                role=MessageRole.USER,
+                type=MessageType.SUBAGENT_RESULT,
+                content=json.dumps(
+                    {
+                        "type": "subagent_board_update",
+                        "source": "subagent",
+                        "subagent_id": post.subagent_id,
+                        "work_id": post.child_work_id,
+                        "post_id": post.id,
+                        "stage": post.stage,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            pending_notifications.append(
+                (
+                    board_message,
+                    f"subagent-board:{parent_work_id}:{post.id}",
+                    False,
+                )
+            )
+
+        if pending_notifications:
+            message_work_id = await reply_work_crud.get_message_work_id(db, parent)
+            for notification, dedupe_key, include_in_turn in pending_notifications:
                 marker = await save_message(
                     db,
                     parent.session_id,
                     parent.uid,
                     MessageRole.USER,
                     MessageType.SUBAGENT_RESULT,
-                    resume_message,
+                    notification,
                     parent.profile_id,
                     is_processed=True,
-                    dedupe_key=f"subagent-result:{call.id}",
+                    dedupe_key=dedupe_key,
                     commit=False,
                     work_id=message_work_id,
                 )
                 if not _is_positive_int(marker.id):
                     _invalid_context()
-                resume_message.id = marker.id
-                resume_message.created_at = marker.created_at
+                notification.id = marker.id
+                notification.created_at = marker.created_at
                 if marker.id not in pending_resume_message_ids:
                     pending_resume_message_ids.append(marker.id)
                 if marker.id not in checkpoint_message_ids:
-                    messages.append(resume_message)
+                    messages.append(notification)
                     checkpoint_message_ids.add(marker.id)
-                if needs_resume_message and turn_messages is not None and marker.id not in turn_message_ids:
-                    turn_messages.append(resume_message.model_copy(deep=True))
+                if include_in_turn and turn_messages is not None and marker.id not in turn_message_ids:
+                    turn_messages.append(notification.model_copy(deep=True))
                     turn_message_ids.add(marker.id)
 
         checkpoint["messages"] = _serialize_checkpoint_messages(messages)
@@ -587,19 +656,20 @@ async def resume_child_work_for_parent(
         state.pop("child_work_waits", None)
         if remaining_slots:
             state["child_work_waits"] = remaining_slots
+        remaining_child_work_keys: set[str] = set()
+        for slot in remaining_slots:
+            if isinstance(slot, dict) and _is_positive_int(slot.get("child_work_id")):
+                remaining_child_work_keys.add(str(slot["child_work_id"]))
+        for child_work_key in list(board_cursors):
+            if child_work_key not in remaining_child_work_keys:
+                board_cursors.pop(child_work_key, None)
+        if board_cursors:
+            state["subagent_board_cursors"] = board_cursors
+        else:
+            state.pop("subagent_board_cursors", None)
 
-        if parent_was_waiting and not delivered_wait_result:
-            if not await external_work_crud.update_waiting_state(
-                db,
-                work_id=parent_work_id,
-                execution_state=state,
-                commit=False,
-            ):
-                await db.rollback()
-                return False
-            await reply_work_crud.save_checkpoint(db, parent_work_id, checkpoint)
-            await db.commit()
-            return False
+        state["subagent_board_review_pending"] = True
+        checkpoint.pop("reply_skipped", None)
 
         if work.status == SessionReplyWorkStatus.READY_FOR_LLM:
             if not await external_work_crud.update_active_reply(
@@ -614,6 +684,10 @@ async def resume_child_work_for_parent(
             return False
 
         state["external_resume_pending"] = True
+        checkpoint["current_turn"] = 0
+        checkpoint["execution_phase"] = GOAL_EXECUTION_PHASE_RUNNING
+        checkpoint["turn_messages"] = []
+        checkpoint["reload_history"] = True
         if not await external_work_crud.wake_waiting(
             db,
             work=work,
@@ -622,15 +696,14 @@ async def resume_child_work_for_parent(
         ):
             await db.rollback()
             return False
-        checkpoint["current_turn"] = 0
-        checkpoint["execution_phase"] = GOAL_EXECUTION_PHASE_RUNNING
-        checkpoint.pop("reply_skipped", None)
-        checkpoint["reload_history"] = not isinstance(state.get("frozen_context_message_ids"), list)
         await reply_work_crud.save_checkpoint(db, parent_work_id, checkpoint)
-        latest_child_work_id = max(delivered_child_work_ids)
+        if new_board_posts:
+            event_dedupe_key = f"subagent-board-ready:{parent_work_id}:{max(post.id for post in new_board_posts)}"
+        else:
+            event_dedupe_key = f"subagent-work-ready:{parent_work_id}:{max(delivered_child_work_ids)}"
         await session_event_crud.publish(
             db,
-            dedupe_key=f"subagent-work-ready:{parent_work_id}:{latest_child_work_id}",
+            dedupe_key=event_dedupe_key,
             uid=parent.uid,
             session_id=parent.session_id,
             event={"type": "work_ready", "session_id": parent.session_id, "work_id": parent_work_id},

@@ -12,6 +12,7 @@ from sqlmodel import select
 
 from app.core.constants import (
     AGENT_WORK_TOOL_NAME,
+    END_SESSION_TOOL_NAME,
     ERR_SUBAGENT_ARGUMENTS_INVALID,
     ERR_SUBAGENT_CONTEXT_INVALID,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
@@ -633,7 +634,6 @@ async def test_list_during_parent_child_conversation_reports_only_unfinished_sub
         runtime.outputs.extend(
             [
                 InternalMessage(role=MessageRole.ASSISTANT, tool_calls=create_calls),
-                InternalMessage(role=MessageRole.ASSISTANT, content="Both independent tasks are ready."),
             ]
         )
         accepted = await runtime.client.post(
@@ -650,8 +650,8 @@ async def test_list_during_parent_child_conversation_reports_only_unfinished_sub
         parent_created = await runtime.run_next(independent_only=False)
         assert parent_created is not None
         assert parent_created.id == parent_work_id
-        assert parent_created.status == SessionReplyWorkStatus.SUCCEEDED
-        assert len(runtime.provider_payloads) == 2
+        assert parent_created.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert len(runtime.provider_payloads) == 1
 
         async with runtime.factory() as db:
             calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id))).scalars().all()
@@ -679,17 +679,22 @@ async def test_list_during_parent_child_conversation_reports_only_unfinished_sub
             name=AGENT_WORK_TOOL_NAME,
             arguments={"operation": "list"},
         )
+        end_session_call = InternalToolCall(
+            id="subagent-list-first-end-session-call",
+            name=END_SESSION_TOOL_NAME,
+            arguments={"skip_reply": True},
+        )
         runtime.outputs.extend(
             [
                 InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[list_call]),
-                InternalMessage(role=MessageRole.ASSISTANT, content="The first result is ready; the second task continues."),
+                InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[end_session_call]),
             ]
         )
         list_provider_start = len(runtime.provider_payloads)
         parent_done = await runtime.run_next(independent_only=False)
         assert parent_done is not None
         assert parent_done.id == parent_work_id
-        assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+        assert parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
         list_provider_payloads = runtime.provider_payloads[list_provider_start:]
         assert len(list_provider_payloads) == 2
 

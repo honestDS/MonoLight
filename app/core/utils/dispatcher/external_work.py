@@ -38,11 +38,12 @@ def _build_external_wait_response(
             continue
 
         if tool_call.name == AGENT_WORK_TOOL_NAME:
-            if tool_call.arguments.get("operation") != "wait" or payload.get("operation") != "wait":
+            operation = tool_call.arguments.get("operation")
+            if operation not in ("create", "send_message") or payload.get("operation") != operation:
                 continue
             child_work_id = payload.get("child_work_id")
             subagent_id = payload.get("subagent_id")
-            if not isinstance(child_work_id, int) or isinstance(child_work_id, bool) or child_work_id <= 0 or not isinstance(subagent_id, str) or not subagent_id:
+            if not isinstance(child_work_id, int) or isinstance(child_work_id, bool) or child_work_id <= 0 or not isinstance(subagent_id, str) or not subagent_id.strip():
                 continue
             pending_tools.append(
                 {

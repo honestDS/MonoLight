@@ -167,13 +167,11 @@ async def _seed_cancel_round(runtime, tmp_path: Path, case: str) -> tuple[int, i
         [
             InternalMessage(
                 role=MessageRole.ASSISTANT,
-                tool_calls=[InternalToolCall(id=f"cancel-create-a-{case}", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "create", "name": "cancel-child-a", "message": child_instruction})],
+                tool_calls=[
+                    InternalToolCall(id=f"cancel-create-a-{case}", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "create", "name": "cancel-child-a", "message": child_instruction}),
+                    InternalToolCall(id=f"cancel-create-b-{case}", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "create", "name": "cancel-child-b", "message": sibling_instruction}),
+                ],
             ),
-            InternalMessage(
-                role=MessageRole.ASSISTANT,
-                tool_calls=[InternalToolCall(id=f"cancel-create-b-{case}", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "create", "name": "cancel-child-b", "message": sibling_instruction})],
-            ),
-            InternalMessage(role=MessageRole.ASSISTANT, content=f"parent ordinary confirmation {case}"),
         ]
     )
     accepted = await runtime.client.post(
@@ -181,13 +179,13 @@ async def _seed_cancel_round(runtime, tmp_path: Path, case: str) -> tuple[int, i
         json={
             "session_id": runtime.session_id,
             "request_id": f"subagent-shell-cancel-create-{case}",
-            "message": "Create child A and sibling child B, then continue the ordinary parent reply.",
+            "message": "Create child A and sibling child B, then wait for their results.",
         },
     )
     assert accepted.status_code == 200
     parent_work_id = accepted.json()["data"]["work_id"]
     parent_done = await runtime.run_next(independent_only=False)
-    assert parent_done is not None and parent_done.id == parent_work_id and parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+    assert parent_done is not None and parent_done.id == parent_work_id and parent_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
     async with runtime.factory() as db:
         children = (
@@ -218,6 +216,8 @@ async def _seed_cancel_round(runtime, tmp_path: Path, case: str) -> tuple[int, i
         assert child.id is not None and sibling.id is not None
         assert child.subagent_id == child_subagent.id
         assert sibling.subagent_id == sibling_subagent.id
+        assert sibling.status == SessionReplyWorkStatus.READY_FOR_LLM
+        sibling.available_at += 300
         parent_task = BackgroundTask(
             uid=runtime.uid,
             session_id=runtime.session_id,
@@ -311,7 +311,6 @@ async def test_subagent_shell_workflow_executes_recovers_and_reports_to_parent(i
         runtime.outputs.extend(
             [
                 InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[create_call]),
-                InternalMessage(role=MessageRole.ASSISTANT, content=f"parent ordinary confirmation {execution_mode}"),
             ]
         )
         accepted = await runtime.client.post(
@@ -330,7 +329,7 @@ async def test_subagent_shell_workflow_executes_recovers_and_reports_to_parent(i
         parent_submitted = await runtime.run_next(independent_only=False)
         assert parent_submitted is not None
         assert parent_submitted.id == parent_work_id
-        assert parent_submitted.status == SessionReplyWorkStatus.SUCCEEDED
+        assert parent_submitted.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
         async with runtime.factory() as db:
             child = await _child_for_parent(db, parent_work_id)
@@ -907,7 +906,7 @@ async def test_subagent_shell_cancel_fails_when_interactive_identity_is_missing(
             )
 
         assert parent is not None
-        assert parent.status == SessionReplyWorkStatus.SUCCEEDED
+        assert parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
         assert child is not None
         assert child.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
         assert round_row is not None

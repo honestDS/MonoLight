@@ -6,14 +6,16 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from app.core.constants import AGENT_WORK_TOOL_NAME, FILE_TOOL_NAME, SESSION_REPLY_WORK_CLAIM_INFO_KEY
+from app.core.constants import AGENT_WORK_TOOL_NAME, END_SESSION_TOOL_NAME, FILE_TOOL_NAME, SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.prompts import SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.consumer import SessionReplyConsumer
-from app.models.background_task import BackgroundTask, BackgroundTaskStatus
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
+from app.models.session_event import SessionEvent
 from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
-from app.models.subagent import SubagentToolCall, SubagentWork
+from app.models.subagent import SubagentBoardPost, SubagentToolCall, SubagentWork
 
 
 async def _child_for_parent(db, parent_work_id: int) -> SessionReplyWorkItem:
@@ -62,7 +64,6 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
                 tool_calls=[InternalToolCall(id="recovery-create-call", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "create", "name": "文件写入恢复", "message": child_instruction})],
             )
         )
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="主代理已提交子任务并继续"))
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={"session_id": runtime.session_id, "request_id": "subagent-recovery-create", "message": "Create the independent child task."},
@@ -71,7 +72,7 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
         parent_work_id = accepted.json()["data"]["work_id"]
         parent_submitted = await runtime.run_next()
         assert parent_submitted is not None and parent_submitted.id == parent_work_id
-        assert parent_submitted.status == SessionReplyWorkStatus.SUCCEEDED
+        assert parent_submitted.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
         async with runtime.factory() as db:
             child = await _child_for_parent(db, parent_work_id)
@@ -139,7 +140,16 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
             assert old_round is not None and old_round.result is not None and old_round.result["completed"] is True
             assert old_round.result["status"] == "execution_unknown"
             old_error = old_round.result["error"]
+            board_posts = (await db.execute(select(SubagentBoardPost).where(SubagentBoardPost.child_work_id == child_work_id))).scalars().all()
+            assert len(board_posts) == 1
+            assert board_posts[0].stage == "execution_unknown"
+            board_payload = json.loads(board_posts[0].content)
+            assert board_payload["status"] == old_round.result["status"]
+            assert board_payload["error"] == old_round.result["error"] == old_error
             assert parent is not None and parent.status == SessionReplyWorkStatus.READY_FOR_LLM
+            ready_events = (await db.execute(select(SessionEvent).where(SessionEvent.session_id == runtime.session_id, SessionEvent.uid == runtime.uid))).scalars().all()
+            ready_events = [event for event in ready_events if event.event.get("type") == "work_ready" and event.event.get("work_id") == parent_work_id]
+            assert len(ready_events) == 1
             result_call = await db.get(SubagentToolCall, parent_call.id)
             assert result_call is not None and result_call.delivered is True
             result_row = await db.get(Message, result_call.tool_result_message_id)
@@ -157,7 +167,6 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
         query_old = InternalToolCall(id="recovery-query-old", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "query", "subagent_id": subagent_id, "work_id": child_work_id})
         send_call = InternalToolCall(id="recovery-send-message", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "send_message", "subagent_id": subagent_id, "message": "继续上次任务并报告恢复结果。"})
         runtime.outputs.extend([InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[query_latest, query_old]), InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[send_call])])
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="主代理已提交恢复消息并继续"))
         new_accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={"session_id": runtime.session_id, "request_id": "subagent-recovery-new-parent", "message": "查询旧子轮后继续同一个子代理。"},
@@ -166,7 +175,7 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
         new_parent_work_id = new_accepted.json()["data"]["work_id"]
         new_parent_replied = await runtime.run_next()
         assert new_parent_replied is not None and new_parent_replied.id == new_parent_work_id
-        assert new_parent_replied.status == SessionReplyWorkStatus.SUCCEEDED
+        assert new_parent_replied.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
         async with runtime.factory() as db:
             result_rows = (await db.execute(select(Message).where(Message.role == MessageRole.TOOL, Message.type == MessageType.TOOL_RESULT))).scalars().all()
@@ -562,7 +571,6 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
             arguments={"operation": "create", "name": "独立初始任务", "message": first_instruction},
         )
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[first_create_call]))
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="second-round-initial-parent-confirmation"))
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -576,7 +584,7 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
 
         first_submitted = await runtime.run_next(independent_only=False)
         assert first_submitted is not None and first_submitted.id == parent_work_id
-        assert first_submitted.status == SessionReplyWorkStatus.SUCCEEDED
+        assert first_submitted.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=first_summary))
         first_child_done = await runtime.run_next(independent_only=True)
@@ -684,31 +692,15 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
         await SessionReplyConsumer()._recover_expired()
         assert not runtime.outputs
         assert len(runtime.provider_payloads) == provider_payload_count
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="second-round-recovery-parent-confirmation"))
-        recovery_provider_start = len(runtime.provider_payloads)
         recovered_parent = await runtime.run_next(independent_only=False)
         assert recovered_parent is not None and recovered_parent.id == parent_work_id
-        assert recovered_parent.status == SessionReplyWorkStatus.SUCCEEDED
+        assert recovered_parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
         assert not runtime.outputs
-        assert len(runtime.provider_payloads) == recovery_provider_start + 1
-        recovery_input = runtime.provider_payloads[recovery_provider_start]["input"]
-        recovered_outputs = []
-        for item in recovery_input:
-            if item.get("type") != "function_call_output":
-                continue
-            try:
-                output_payload = json.loads(item.get("output") or "{}")
-            except (TypeError, ValueError):
-                continue
-            if isinstance(output_payload, dict) and output_payload.get("status") == "queued":
-                recovered_outputs.append(output_payload)
-        assert len(recovered_outputs) == 1
-        assert recovered_outputs[0]["operation"] == operation
-        assert recovered_outputs[0]["child_work_id"] == second_child_work_id
+        assert len(runtime.provider_payloads) == provider_payload_count
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
-            assert parent is not None and parent.status == SessionReplyWorkStatus.SUCCEEDED
+            assert parent is not None and parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
             assert len((await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK, SessionReplyWorkItem.source_type == SessionReplySourceType.PARENT_WORK, SessionReplyWorkItem.source_id == str(parent_work_id)))).scalars().all()) == 2
             assert len((await db.execute(select(SubagentWork).where(SubagentWork.child_work_id.in_([first_child_work_id, second_child_work_id])))).scalars().all()) == 2
             calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id).order_by(SubagentToolCall.id))).scalars().all()
@@ -849,7 +841,6 @@ async def test_interrupted_parent_create_preserves_registered_child_delivery_wit
             arguments={"operation": "create", "name": "并行方案分析", "message": second_instruction},
         )
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[first_create_call, second_create_call]))
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="multi-child-recovery-parent-initial"))
         accepted = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -863,11 +854,11 @@ async def test_interrupted_parent_create_preserves_registered_child_delivery_wit
 
         initial_done = await runtime.run_next(independent_only=False)
         assert initial_done is not None and initial_done.id == parent_work_id
-        assert initial_done.status == SessionReplyWorkStatus.SUCCEEDED
+        assert initial_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
-            assert parent is not None and parent.status == SessionReplyWorkStatus.SUCCEEDED
+            assert parent is not None and parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
             children = (
                 (
                     await db.execute(
@@ -920,7 +911,6 @@ async def test_interrupted_parent_create_preserves_registered_child_delivery_wit
             assert {call.child_work_id for call in calls if call.delivered} == {child_a_work_id}
             assert {call.child_work_id for call in calls if not call.delivered} == {child_b_work_id}
             b_call = next(call for call in calls if call.child_work_id == child_b_work_id)
-            b_call_id = b_call.tool_call_id
             assert b_call.tool_result_message_id is not None
             b_result_message_id = b_call.tool_result_message_id
 
@@ -984,7 +974,6 @@ async def test_interrupted_parent_create_preserves_registered_child_delivery_wit
             c_call = next(call for call in calls if call.arguments == third_create_call.arguments)
             assert c_call.child_work_id is not None and c_call.child_work_id not in {child_a_work_id, child_b_work_id}
             child_c_work_id = c_call.child_work_id
-            c_call_id = c_call.tool_call_id
             assert {child.id for child in children} == {child_a_work_id, child_b_work_id, child_c_work_id}
             rounds = (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id.in_([child_a_work_id, child_b_work_id, child_c_work_id])))).scalars().all()
             assert len(rounds) == 3
@@ -1008,29 +997,15 @@ async def test_interrupted_parent_create_preserves_registered_child_delivery_wit
         await SessionReplyConsumer()._recover_expired()
         assert not runtime.outputs
         provider_count_after_recovery = len(runtime.provider_payloads)
-        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="multi-child-recovery-parent-after-recover"))
         recovered_done = await runtime.run_next(independent_only=False)
         assert recovered_done is not None and recovered_done.id == parent_work_id
-        assert recovered_done.status == SessionReplyWorkStatus.SUCCEEDED
+        assert recovered_done.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
         assert not runtime.outputs
-        assert len(runtime.provider_payloads) == provider_count_after_recovery + 1
-        recovery_input = runtime.provider_payloads[provider_count_after_recovery]["input"]
-        queued_outputs = []
-        for item in recovery_input:
-            if item.get("type") != "function_call_output":
-                continue
-            try:
-                output_payload = json.loads(item.get("output") or "{}")
-            except (TypeError, ValueError):
-                continue
-            if isinstance(output_payload, dict) and output_payload.get("status") == "queued":
-                queued_outputs.append((item.get("call_id"), output_payload))
-        assert sum(call_id == c_call_id and payload.get("child_work_id") == child_c_work_id for call_id, payload in queued_outputs) == 1
-        assert sum(call_id == b_call_id and payload.get("child_work_id") == child_b_work_id for call_id, payload in queued_outputs) == 1
+        assert len(runtime.provider_payloads) == provider_count_after_recovery
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
-            assert parent is not None and parent.status == SessionReplyWorkStatus.SUCCEEDED
+            assert parent is not None and parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
             children = (
                 (
                     await db.execute(
@@ -1174,3 +1149,160 @@ async def test_interrupted_parent_create_preserves_registered_child_delivery_wit
                 assert result_payload["status"] == "success"
                 assert result_payload["child_work_id"] == child_work_id
                 assert result_payload["work"]["result"]["content"] == expected_summary
+
+
+@pytest.mark.asyncio
+async def test_background_resume_fixed_context_reviews_first_child_before_resuspending(image_chat_runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.core.background_tasks.reply_trigger as reply_trigger_module
+
+    first_summary = "background-resume-first-child-summary"
+    second_summary = "background-resume-second-child-summary"
+    parent_final = "background-resume-parent-final"
+    fixed_context_marker = "background-resume-fixed-context"
+
+    async with image_chat_runtime("OPENAI_RESPONSES", goal_mode=False) as runtime:
+        async with runtime.factory() as db:
+            profile = await db.get(Profile, runtime.profile.id)
+            assert profile is not None
+            configs = deepcopy(profile.configs)
+            configs["tool"]["enabled_tools"] = list(dict.fromkeys([*configs["tool"]["enabled_tools"], AGENT_WORK_TOOL_NAME]))
+            profile.configs = configs
+            task = BackgroundTask(
+                uid=runtime.uid,
+                session_id=runtime.session_id,
+                profile_id=runtime.profile.id,
+                tool_call_id="background-resume-terminal-watch-call",
+                tool_name=TERMINAL_WATCH_TOOL_NAME,
+                status=BackgroundTaskStatus.SUCCEEDED,
+                arguments={"terminal_session_id": "background-resume-terminal", "after_offset": 0, "condition": "process_exit"},
+                result={"status": "succeeded", "tool_name": TERMINAL_WATCH_TOOL_NAME, "content": {"event": "process_exit", "eof": True}},
+                auto_reply=True,
+                reply_status=BackgroundTaskReplyStatus.PENDING,
+                extra={
+                    "auto_terminal_watch": True,
+                    "reply_mode": BackgroundTaskReplyMode.RESUME_AGENT.value,
+                    "terminal_session_id": "background-resume-terminal",
+                    "frozen_context_messages": [InternalMessage(role=MessageRole.USER, content=fixed_context_marker).model_dump(mode="json", exclude_none=True)],
+                },
+            )
+            db.add(task)
+            await db.commit()
+            assert task.id is not None
+            task_id = task.id
+
+        monkeypatch.setattr(reply_trigger_module, "AsyncSessionLocal", runtime.factory)
+        await reply_trigger_module.trigger_background_task_reply(task_id)
+
+        async with runtime.factory() as db:
+            queued_work = (
+                (
+                    await db.execute(
+                        select(SessionReplyWorkItem).where(
+                            SessionReplyWorkItem.work_type == SessionReplyWorkType.BACKGROUND_TASK_RESUME,
+                            SessionReplyWorkItem.source_type == SessionReplySourceType.BACKGROUND_TASK,
+                            SessionReplyWorkItem.source_id == str(task_id),
+                        )
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            assert queued_work.id is not None
+            parent_work_id = queued_work.id
+            assert queued_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+
+        first_create_call = InternalToolCall(
+            id="background-resume-first-create",
+            name=AGENT_WORK_TOOL_NAME,
+            arguments={"operation": "create", "name": "background resume child one", "message": "Complete child one and report its result."},
+        )
+        second_create_call = InternalToolCall(
+            id="background-resume-second-create",
+            name=AGENT_WORK_TOOL_NAME,
+            arguments={"operation": "create", "name": "background resume child two", "message": "Complete child two and report its result."},
+        )
+        parent_provider_start = len(runtime.provider_payloads)
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[first_create_call, second_create_call]))
+        initial_parent = await runtime.run_next(independent_only=False)
+        assert initial_parent is not None and initial_parent.id == parent_work_id
+        assert initial_parent.work_type == SessionReplyWorkType.BACKGROUND_TASK_RESUME
+        assert initial_parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert len(runtime.provider_payloads[parent_provider_start:]) == 1
+        assert fixed_context_marker in json.dumps(runtime.provider_payloads[parent_provider_start], ensure_ascii=False)
+
+        async with runtime.factory() as db:
+            parent = await db.get(SessionReplyWorkItem, parent_work_id)
+            assert parent is not None
+            assert isinstance(parent.execution_state.get("frozen_context_message_ids"), list)
+            children = (
+                (
+                    await db.execute(
+                        select(SessionReplyWorkItem)
+                        .where(
+                            SessionReplyWorkItem.work_type == SessionReplyWorkType.AGENT_WORK,
+                            SessionReplyWorkItem.source_type == SessionReplySourceType.PARENT_WORK,
+                            SessionReplyWorkItem.source_id == str(parent_work_id),
+                        )
+                        .order_by(SessionReplyWorkItem.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(children) == 2
+            child_work_ids = [child.id for child in children]
+            assert all(isinstance(child_work_id, int) for child_work_id in child_work_ids)
+            assert parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=first_summary))
+        first_child_done = await runtime.run_next(independent_only=True)
+        assert first_child_done is not None and first_child_done.id == child_work_ids[0]
+        assert first_child_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        async with runtime.factory() as db:
+            parent = await db.get(SessionReplyWorkItem, parent_work_id)
+            second_child = await db.get(SessionReplyWorkItem, child_work_ids[1])
+            second_round = await db.get(SubagentWork, child_work_ids[1])
+            assert parent is not None and parent.status == SessionReplyWorkStatus.READY_FOR_LLM
+            assert second_child is not None and second_child.status == SessionReplyWorkStatus.READY_FOR_LLM
+            assert second_round is not None and second_round.result is None
+
+        review_provider_start = len(runtime.provider_payloads)
+        runtime.outputs.append(
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                tool_calls=[InternalToolCall(id="background-resume-review-end", name=END_SESSION_TOOL_NAME, arguments={"skip_reply": True})],
+            )
+        )
+        reviewed_parent = await runtime.run_next(independent_only=False)
+        assert reviewed_parent is not None and reviewed_parent.id == parent_work_id
+        assert reviewed_parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        assert len(runtime.provider_payloads[review_provider_start:]) == 1
+        review_request_dump = json.dumps(runtime.provider_payloads[review_provider_start], ensure_ascii=False)
+        assert first_summary in review_request_dump
+        review_platform_constraints = []
+        for item in runtime.provider_payloads[review_provider_start]["input"]:
+            if item.get("role") != MessageRole.USER.value or not isinstance(item.get("content"), str):
+                continue
+            try:
+                user_content = json.loads(item["content"])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(user_content, dict):
+                review_platform_constraints.append(user_content.get("platform_constraints"))
+        assert any(isinstance(platform_constraints, str) and SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT in platform_constraints for platform_constraints in review_platform_constraints)
+
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=second_summary))
+        second_child_done = await runtime.run_next(independent_only=True)
+        assert second_child_done is not None and second_child_done.id == child_work_ids[1]
+        assert second_child_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        final_provider_start = len(runtime.provider_payloads)
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_final))
+        final_parent = await runtime.run_next(independent_only=False)
+        assert final_parent is not None and final_parent.id == parent_work_id
+        assert final_parent.status == SessionReplyWorkStatus.SUCCEEDED
+        assert len(runtime.provider_payloads[final_provider_start:]) == 1
+        final_request_dump = json.dumps(runtime.provider_payloads[final_provider_start], ensure_ascii=False)
+        assert first_summary in final_request_dump
+        assert second_summary in final_request_dump

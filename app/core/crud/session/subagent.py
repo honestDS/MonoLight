@@ -490,9 +490,27 @@ class CRUDSubagent:
         result = await db.execute(
             select(SubagentToolCall.parent_work_id)
             .join(SubagentWork, SubagentWork.child_work_id == SubagentToolCall.child_work_id)
+            .join(SessionReplyWorkItem, SessionReplyWorkItem.id == SubagentToolCall.parent_work_id)
             .where(
                 SubagentToolCall.delivered.is_(False),
-                SubagentWork.result.is_not(None),
+                SessionReplyWorkItem.status.in_(
+                    (
+                        SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+                        SessionReplyWorkStatus.READY_FOR_LLM,
+                        SessionReplyWorkStatus.SUCCEEDED,
+                    )
+                ),
+                or_(
+                    SubagentWork.result.is_not(None),
+                    exists(
+                        select(1)
+                        .select_from(SubagentBoardPost)
+                        .where(
+                            SubagentBoardPost.child_work_id == SubagentWork.child_work_id,
+                            SubagentBoardPost.subagent_id == SubagentWork.subagent_id,
+                        )
+                    ),
+                ),
                 SubagentToolCall.parent_work_id > after_id,
             )
             .distinct()
@@ -561,12 +579,7 @@ class CRUDSubagent:
         ]
         if child_work_id is not None:
             conditions.append(SubagentBoardPost.child_work_id == child_work_id)
-        result = await db.execute(
-            select(SubagentBoardPost)
-            .where(*conditions)
-            .order_by(SubagentBoardPost.id.asc())
-            .execution_options(populate_existing=True)
-        )
+        result = await db.execute(select(SubagentBoardPost).where(*conditions).order_by(SubagentBoardPost.id.asc()).execution_options(populate_existing=True))
         return list(result.scalars().all())
 
     async def get_latest_board_post(
@@ -587,13 +600,7 @@ class CRUDSubagent:
         ]
         if child_work_id is not None:
             conditions.append(SubagentBoardPost.child_work_id == child_work_id)
-        result = await db.execute(
-            select(SubagentBoardPost)
-            .where(*conditions)
-            .order_by(SubagentBoardPost.id.desc())
-            .limit(1)
-            .execution_options(populate_existing=True)
-        )
+        result = await db.execute(select(SubagentBoardPost).where(*conditions).order_by(SubagentBoardPost.id.desc()).limit(1).execution_options(populate_existing=True))
         return result.scalars().first()
 
 
