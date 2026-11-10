@@ -51,6 +51,7 @@ from app.models.session_reply_work_item import SessionReplySequence as SessionRe
 from app.models.session_reply_work_item import SessionReplyWorkItem as SessionReplyWorkItem
 from app.models.session_todo import SessionTodoPlan as SessionTodoPlan
 from app.models.subagent import Subagent as Subagent
+from app.models.subagent import SubagentBoardPost as SubagentBoardPost
 from app.models.subagent import SubagentToolCall as SubagentToolCall
 from app.models.subagent import SubagentWork as SubagentWork
 from app.models.system_log import SystemLog as SystemLog

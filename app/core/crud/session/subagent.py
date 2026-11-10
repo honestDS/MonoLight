@@ -18,7 +18,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
 )
-from app.models.subagent import Subagent, SubagentToolCall, SubagentWork
+from app.models.subagent import Subagent, SubagentBoardPost, SubagentToolCall, SubagentWork
 
 
 class CRUDSubagent:
@@ -500,6 +500,101 @@ class CRUDSubagent:
             .limit(limit)
         )
         return list(result.scalars().all())
+
+    async def create_board_post(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        subagent_id: str,
+        child_work_id: int,
+        stage: str,
+        content: str,
+    ) -> SubagentBoardPost:
+        subagent = await self.get_scoped(
+            db,
+            subagent_id=subagent_id,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            lock=False,
+            touch=False,
+        )
+        if subagent is None:
+            raise ValueError(f"Scoped subagent not found for subagent_id={subagent_id}")
+        round_row = await self.get_round(db, child_work_id=child_work_id, subagent_id=subagent_id)
+        if round_row is None:
+            raise ValueError(f"SubagentWork round not found for subagent_id={subagent_id}, child_work_id={child_work_id}")
+        work_item = await session_reply_work_item_crud.get(db, child_work_id)
+        if work_item is None or work_item.uid != uid or work_item.session_id != session_id or work_item.profile_id != profile_id:
+            raise ValueError(f"Work item scope mismatch for child_work_id={child_work_id}")
+        post = SubagentBoardPost(
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            subagent_id=subagent_id,
+            child_work_id=child_work_id,
+            stage=stage,
+            content=content,
+        )
+        db.add(post)
+        await db.flush()
+        return post
+
+    async def list_board_posts(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        subagent_id: str,
+        child_work_id: int | None = None,
+    ) -> list[SubagentBoardPost]:
+        conditions = [
+            SubagentBoardPost.uid == uid,
+            SubagentBoardPost.session_id == session_id,
+            SubagentBoardPost.profile_id == profile_id,
+            SubagentBoardPost.subagent_id == subagent_id,
+        ]
+        if child_work_id is not None:
+            conditions.append(SubagentBoardPost.child_work_id == child_work_id)
+        result = await db.execute(
+            select(SubagentBoardPost)
+            .where(*conditions)
+            .order_by(SubagentBoardPost.id.asc())
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
+    async def get_latest_board_post(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        subagent_id: str,
+        child_work_id: int | None = None,
+    ) -> SubagentBoardPost | None:
+        conditions = [
+            SubagentBoardPost.uid == uid,
+            SubagentBoardPost.session_id == session_id,
+            SubagentBoardPost.profile_id == profile_id,
+            SubagentBoardPost.subagent_id == subagent_id,
+        ]
+        if child_work_id is not None:
+            conditions.append(SubagentBoardPost.child_work_id == child_work_id)
+        result = await db.execute(
+            select(SubagentBoardPost)
+            .where(*conditions)
+            .order_by(SubagentBoardPost.id.desc())
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
+        return result.scalars().first()
 
 
 subagent_crud = CRUDSubagent()

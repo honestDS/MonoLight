@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import ForeignKeyConstraint
+from sqlalchemy import ForeignKeyConstraint, Text
 from sqlmodel import JSON, Column, DateTime, Field, SQLModel, UniqueConstraint
 
 from app.core.utils.time import get_local_time
@@ -95,6 +95,42 @@ class SubagentToolCall(SQLModel, table=True):
     tool_result_message_id: int | None = Field(default=None, index=True)
     response_id: str | None = Field(default=None, max_length=100)
     delivered: bool = Field(default=False, nullable=False)
+    created_at: datetime = Field(
+        default_factory=get_local_time,
+        sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
+    )
+
+
+class SubagentBoardPost(SQLModel, table=True):
+    __tablename__ = "subagent_board_post"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["session_id", "uid"],
+            ["chat_session.session_id", "chat_session.uid"],
+            name="fk_subagent_board_post_session_owner",
+            ondelete="CASCADE",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, index=True)
+    uid: str = Field(index=True, max_length=100, nullable=False)
+    session_id: str = Field(index=True, max_length=100, nullable=False)
+    profile_id: int = Field(index=True, foreign_key="profile.id", ondelete="CASCADE", nullable=False)
+    subagent_id: str = Field(
+        index=True,
+        max_length=32,
+        foreign_key="subagent.id",
+        ondelete="CASCADE",
+        nullable=False,
+    )
+    child_work_id: int = Field(
+        index=True,
+        foreign_key="subagent_work.child_work_id",
+        ondelete="CASCADE",
+        nullable=False,
+    )
+    stage: str = Field(min_length=1, max_length=64, nullable=False)
+    content: str = Field(sa_column=Column(Text, nullable=False))
     created_at: datetime = Field(
         default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
