@@ -72,7 +72,6 @@ from app.core.utils.dispatcher.save_assistant_message import save_assistant_mess
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
 from app.core.utils.dispatcher.tool_call_correction import build_virtual_tool_feedback_messages
-from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.channel import resolve_model_protocol
@@ -655,14 +654,6 @@ class BackgroundDispatcherMixin:
                         for tool_call in executable_tool_calls
                     ]
                 else:
-                    tool_result_round_budget_tokens = calculate_tool_result_round_budget_tokens(
-                        messages=_materialize_reply_request_messages(messages, tools_available=False),
-                        context_window_k=chat_params["context_window_k"],
-                        max_tokens=chat_params["max_tokens"],
-                        tools=tools,
-                        model_id=model_entry["model_id"],
-                        protocol=resolve_model_protocol(model_entry),
-                    )
                     tool_responses = await asyncio.gather(
                         *[
                             process_single_tool_with_isolated_db(
@@ -676,8 +667,6 @@ class BackgroundDispatcherMixin:
                                 uid,
                                 allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                                 context_window_k=chat_params["context_window_k"],
-                                tool_call_count=len(executable_tool_calls),
-                                tool_result_round_budget_tokens=tool_result_round_budget_tokens,
                                 model_id=model_entry["model_id"],
                                 protocol=resolve_model_protocol(model_entry),
                                 allow_background_submission=False,

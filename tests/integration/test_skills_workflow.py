@@ -163,7 +163,6 @@ async def _process_tool(
         SESSION_ID,
         1,
         uid,
-        tool_result_round_budget_tokens=4000,
     )
 
 

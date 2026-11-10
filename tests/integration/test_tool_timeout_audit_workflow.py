@@ -510,11 +510,10 @@ async def test_file_tool_timeout_persists_execution_unknown_audit_state(
         assert stored_message.tool_execution_status == "execution_unknown"
         assert get_tool_execution_status(stored_message) == "execution_unknown"
         assert stored_version.tool_execution_status == "execution_unknown"
-        if not exhausted_budget:
-            payload = json.loads(stored_version.content or "{}")
-            assert payload["status"] == AuditRecordStatus.EXECUTION_UNKNOWN.value
-            assert payload["error_code"] == ERR_TOOL_EXECUTION_TIMEOUT
-            assert payload["confirmation_decision"] == "approve"
+        payload = json.loads(stored_version.content or "{}")
+        assert payload["status"] == AuditRecordStatus.EXECUTION_UNKNOWN.value
+        assert payload["error_code"] == ERR_TOOL_EXECUTION_TIMEOUT
+        assert payload["confirmation_decision"] == "approve"
     finally:
         release.set()
         if execution_task is not None and not execution_task.done():
@@ -788,7 +787,6 @@ async def test_terminal_write_timeout_recovers_unknown_audit_and_late_command_re
                 0,
                 "timeout-owner",
                 context_window_k=16,
-                tool_result_round_budget_tokens=8192,
             )
         status_payload = json.loads(status_result.content or "{}")
         write_request = status_payload["write_request"]

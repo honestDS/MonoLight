@@ -765,7 +765,6 @@ async def test_default_profile_exposes_and_executes_scheduled_task_tool(
         session_id="owner-main",
         turn=1,
         uid="owner",
-        tool_result_round_budget_tokens=4096,
     )
 
     assert result.role == MessageRole.TOOL
@@ -823,7 +822,6 @@ async def test_disabled_profile_hides_and_rejects_scheduled_task_tool(
         session_id="owner-main",
         turn=1,
         uid="owner",
-        tool_result_round_budget_tokens=4096,
     )
 
     assert result.role == MessageRole.TOOL

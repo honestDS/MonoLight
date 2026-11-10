@@ -148,11 +148,6 @@ async def test_interactive_round_persists_rejected_calls_and_executes_prefix(mon
 
     monkeypatch.setattr(interactive_tools, "audit_tool_round", audit_tool_round)
     monkeypatch.setattr(interactive_tools, "_execute_isolated_tool_call", execute_isolated_tool_call)
-    monkeypatch.setattr(
-        interactive_tools,
-        "calculate_tool_result_round_budget_tokens",
-        lambda **_kwargs: 1,
-    )
     monkeypatch.setattr(interactive_tools, "extract_files_to_user", lambda _results: [])
 
     await interactive_tools.handle_interactive_tool_round(
