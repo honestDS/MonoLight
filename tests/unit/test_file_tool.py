@@ -5,6 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from app.core import paths
+from app.core.constants import MSG_FILE_TOOL_GREP_CONTENT_OMITTED
+from app.core.i18n import t
+from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.tools.file_tool import FILE_TOOL_SCHEMA, FileToolExecutor
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
 from app.models.profile import Profile, ProfileConfig
@@ -327,6 +330,288 @@ async def test_file_tool_grep_searches_file_or_directory_with_filters_and_contex
     assert file_result["files_scanned"] == 1
     assert file_result["matched_file_count"] == 1
     assert file_result["match_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_file_tool_grep_returns_all_matches_from_long_line_when_content_is_omitted(tmp_path):
+    target = tmp_path / "long-line.txt"
+    prefix = "x" * (700 * 1024)
+    target.write_text(prefix + "needle between needle\nshort needle\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+
+    raw_result = await executor.execute(operation="grep", path=str(target), pattern="needle", context_lines=0)
+    result = json.loads(raw_result)
+
+    assert result["truncated"] is False
+    assert result["match_count"] == 3
+    assert [(match["start_line"], match["start_column"]) for match in result["matches"]] == [
+        (1, len(prefix) + 1),
+        (1, len(prefix) + len("needle between ") + 1),
+        (2, len("short ") + 1),
+    ]
+    assert all(match["content"] == "" and match["content_omitted"] is True for match in result["matches"][:2])
+    assert result["matches"][2]["content"] == "2: short needle"
+    assert result["matches"][2]["content_omitted"] is False
+
+
+@pytest.mark.asyncio
+async def test_file_tool_grep_limits_escaped_json_result_to_65536_bytes(tmp_path):
+    target = tmp_path / "escaped-lines.txt"
+    backslash = "\\"
+    control = "\x01"
+    lines = [f'第 {index} 行包含 needle，"引号"、反斜杠 {backslash} 和控制字符 {control}' for index in range(400)]
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+
+    raw_result = await executor.execute(
+        operation="grep",
+        path=str(target),
+        pattern="needle",
+        context_lines=0,
+        max_results=1000,
+    )
+    result = json.loads(raw_result)
+
+    assert len(raw_result.encode("utf-8")) <= 65536
+    assert ("instruction" in result) == any(match["content_omitted"] for match in result["matches"])
+    assert any(not match["content_omitted"] and match["content"] for match in result["matches"])
+    assert result["truncated"] is True
+    assert len(result["matches"]) < len(lines)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", ["zh", "en"])
+@pytest.mark.parametrize(
+    "snippet_kwargs",
+    [{}, {"before_chars": 40_000, "after_chars": 40_000}],
+    ids=["default-line-mode", "oversized-character-snippet"],
+)
+async def test_file_tool_grep_omitted_content_returns_localized_instruction(tmp_path, locale, snippet_kwargs):
+    target = tmp_path / "localized-omitted.txt"
+    prefix = "x" * 40_000
+    suffix = "y" * 40_000
+    target.write_text(prefix + "needle" + suffix + "\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+    locale_token = set_current_locale(locale)
+    try:
+        raw_result = await executor.execute(
+            operation="grep",
+            path=str(target),
+            pattern="needle",
+            **snippet_kwargs,
+        )
+        result = json.loads(raw_result)
+        match = result["matches"][0]
+
+        assert len(raw_result.encode("utf-8")) <= 65536
+        assert result["status"] == "success"
+        assert result["match_count"] == 1
+        assert (match["start_line"], match["start_column"]) == (1, len(prefix) + 1)
+        assert (match["end_line"], match["end_column"]) == (1, len(prefix) + len("needle"))
+        assert match["content"] == ""
+        assert match["content_omitted"] is True
+        assert result["instruction"] == t(MSG_FILE_TOOL_GREP_CONTENT_OMITTED)
+        assert "before_chars" in result["instruction"]
+        assert "after_chars" in result["instruction"]
+        assert result["instruction"] != MSG_FILE_TOOL_GREP_CONTENT_OMITTED
+    finally:
+        reset_current_locale(locale_token)
+
+
+@pytest.mark.asyncio
+async def test_file_tool_grep_small_complete_results_do_not_include_instruction(tmp_path):
+    target = tmp_path / "complete-results.txt"
+    target.write_text("first needle\nsecond needle\nother\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+
+    complete = json.loads(
+        await executor.execute(
+            operation="grep",
+            path=str(target),
+            pattern="first needle",
+            context_lines=0,
+        )
+    )
+    explicit_zero = json.loads(
+        await executor.execute(
+            operation="grep",
+            path=str(target),
+            pattern="needle",
+            before_chars=0,
+            after_chars=0,
+        )
+    )
+    no_match = json.loads(await executor.execute(operation="grep", path=str(target), pattern="missing"))
+    limited = json.loads(
+        await executor.execute(
+            operation="grep",
+            path=str(target),
+            pattern="needle",
+            context_lines=0,
+            max_results=1,
+        )
+    )
+    failed = json.loads(await executor.execute(operation="grep", path=str(target), pattern="["))
+
+    assert len(complete["matches"]) == 1
+    complete_match = complete["matches"][0]
+    assert (complete_match["start_line"], complete_match["start_column"]) == (1, 1)
+    assert (complete_match["end_line"], complete_match["end_column"]) == (1, 12)
+    assert complete_match["content"] == "1: first needle"
+    assert complete_match["content_omitted"] is False
+    assert explicit_zero["match_count"] == 2
+    assert [match["content"] for match in explicit_zero["matches"]] == ["needle", "needle"]
+    assert all(match["content_omitted"] is False for match in explicit_zero["matches"])
+    assert no_match["status"] == "success"
+    assert no_match["match_count"] == 0
+    assert limited["truncated"] is True
+    assert limited["match_count"] == 1
+    assert limited["matches"][0]["content"] == "1: first needle"
+    assert limited["matches"][0]["content_omitted"] is False
+    assert failed["status"] == "failed"
+    for result in (complete, explicit_zero, no_match, limited, failed):
+        assert "instruction" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "snippet_kwargs", "expected_start", "expected_end", "expected_content"),
+    [
+        (
+            "前置甲\r\n乙后尾\r\n末行",
+            {"before_chars": 2, "after_chars": 3},
+            (1, 3),
+            (2, 1),
+            "前置甲\n乙后尾\n",
+        ),
+        (
+            "前置甲\r\n乙后尾\r\n末行",
+            {"before_chars": 0},
+            (1, 3),
+            (2, 1),
+            "甲\n乙",
+        ),
+        (
+            "前置甲\r\n乙后尾\r\n末行",
+            {"after_chars": 1},
+            (1, 3),
+            (2, 1),
+            "甲\n乙后",
+        ),
+        (
+            "甲\r\n乙",
+            {"before_chars": 100, "after_chars": 100},
+            (1, 1),
+            (2, 1),
+            "甲\n乙",
+        ),
+    ],
+    ids=["both-sides", "explicit-zero", "default-before-zero", "file-boundaries"],
+)
+async def test_file_tool_grep_returns_explicit_character_snippets(
+    tmp_path,
+    source,
+    snippet_kwargs,
+    expected_start,
+    expected_end,
+    expected_content,
+):
+    target = tmp_path / "snippet.txt"
+    target.write_bytes(source.encode("utf-8"))
+    executor = _executor(tmp_path)
+
+    raw_result = await executor.execute(
+        operation="grep",
+        path=str(target),
+        pattern=r"甲\n乙",
+        context_lines=20,
+        **snippet_kwargs,
+    )
+    result = json.loads(raw_result)
+    match = result["matches"][0]
+
+    assert result["status"] == "success"
+    assert result["match_count"] == 1
+    assert result["truncated"] is False
+    assert (match["start_line"], match["start_column"]) == expected_start
+    assert (match["end_line"], match["end_column"]) == expected_end
+    assert match["content"] == expected_content
+    assert match["content_omitted"] is False
+
+
+@pytest.mark.asyncio
+async def test_file_tool_grep_omits_explicit_char_content_when_escaped_json_exceeds_limit(tmp_path):
+    target = tmp_path / "large-snippet.txt"
+    control_chars = "\x01" * 15000
+    source = "needle" + control_chars + "\n"
+    target.write_text(source, encoding="utf-8")
+    executor = _executor(tmp_path)
+
+    raw_result = await executor.execute(
+        operation="grep",
+        path=str(target),
+        pattern="needle",
+        after_chars=15000,
+    )
+    result = json.loads(raw_result)
+
+    assert len(source.encode("utf-8")) < 64 * 1024
+    assert len(raw_result.encode("utf-8")) <= 65536
+    assert result["match_count"] == 1
+    assert result["matches"][0]["start_line"] == 1
+    assert result["matches"][0]["start_column"] == 1
+    assert result["matches"][0]["content"] == ""
+    assert result["matches"][0]["content_omitted"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [("before_chars", -1), ("after_chars", -1), ("before_chars", True), ("after_chars", False)],
+    ids=["negative-before", "negative-after", "boolean-before", "boolean-after"],
+)
+async def test_file_tool_grep_rejects_invalid_explicit_character_bounds(tmp_path, option, value):
+    target = tmp_path / "invalid-snippet.txt"
+    target.write_text("needle\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+
+    result = json.loads(
+        await executor.execute(
+            operation="grep",
+            path=str(target),
+            pattern="needle",
+            context_lines=0,
+            **{option: value},
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["operation"] == "grep"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "group_name",
+    ["0" * 100_000, "0" + "中" * 25_000],
+    ids=["long-ascii-group-name", "utf8-group-name"],
+)
+async def test_file_tool_grep_limits_invalid_regex_error_json(tmp_path, group_name):
+    target = tmp_path / "invalid-pattern.txt"
+    target.write_text("a\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+
+    raw_result = await executor.execute(
+        operation="grep",
+        path=str(target),
+        pattern=f"(?P<{group_name}>a)",
+    )
+    result = json.loads(raw_result)
+
+    assert len(raw_result.encode("utf-8")) <= 65536
+    assert result["status"] == "failed"
+    assert result["operation"] == "grep"
+    assert result["error_truncated"] is True
+    assert "group name" in result["error"].lower()
 
 
 @pytest.mark.asyncio

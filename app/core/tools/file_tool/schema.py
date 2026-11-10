@@ -1,4 +1,4 @@
-from app.core.constants import FILE_TOOL_NAME
+from app.core.constants import FILE_TOOL_GREP_MAX_OUTPUT_BYTES, FILE_TOOL_NAME
 
 FILE_TOOL_OPERATIONS = ("read", "write", "edit", "patch", "grep")
 
@@ -94,14 +94,29 @@ FILE_TOOL_SCHEMA = {
                     "minimum": 0,
                     "maximum": 20,
                     "default": 2,
-                    "description": "grep only. Number of surrounding lines returned around each match.",
+                    "description": "grep only. Number of surrounding lines returned around each match. Providing either before_chars or after_chars, including 0, switches to raw excerpts without line-number prefixes, ignores context_lines, and treats the omitted side as 0; omitting both keeps line-based output.",
+                },
+                "before_chars": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "grep only. Number of Unicode characters to return before each match; must be non-negative.",
+                },
+                "after_chars": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "grep only. Number of Unicode characters to return after each match; must be non-negative.",
                 },
                 "max_results": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 1000,
                     "default": 100,
-                    "description": "grep only. Maximum number of matches returned before truncated=true.",
+                    "description": (
+                        "grep only. Maximum number of matches returned before truncated=true. "
+                        f"The total result is limited to {FILE_TOOL_GREP_MAX_OUTPUT_BYTES} UTF-8 JSON bytes; "
+                        "content_omitted=true means the match location is retained but its content is not returned; "
+                        "truncated=true means the match limit was reached or no more matching locations fit."
+                    ),
                 },
             },
             "required": ["operation", "path"],
