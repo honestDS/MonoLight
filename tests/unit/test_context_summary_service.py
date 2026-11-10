@@ -85,6 +85,13 @@ async def test_complete_candidate_including_covered_user_block_must_reduce_repla
             cfg=_summary_cfg(50),
             before_id=5,
             current_message="",
+            summary_source_messages=[
+                InternalMessage(
+                    id=1,
+                    role=MessageRole.USER,
+                    content="必须逐字保留的当前目标与验收约束",
+                )
+            ],
             context_window_k=1,
             max_tokens=24,
             reserved_tokens=0,

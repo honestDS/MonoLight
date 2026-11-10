@@ -138,6 +138,14 @@ async def resolve_context_summary_boundary(
                 continue
             last_scanned_message_id = message.id
             if _is_real_user_message(message):
+                if trigger_mode == ContextSummaryTriggerMode.TOOL_RESULT and not message.is_processed:
+                    return ContextSummaryBoundary(
+                        trigger_mode=trigger_mode,
+                        fixed_upper_message_id=fixed_upper_message_id,
+                        target_message_id=None,
+                        covered_user_message_id=None,
+                        covered_user_message_content=None,
+                    )
                 covered_user_message = message
 
             pending_tool_call_ids.update(_parse_tool_call_ids(message))

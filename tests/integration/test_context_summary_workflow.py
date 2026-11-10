@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from importlib import import_module
@@ -35,13 +36,16 @@ from app.core.utils.context_summary import service as context_summary_service
 from app.core.utils.context_summary import stage as context_summary_stage
 from app.core.utils.context_summary.boundary import ContextSummaryTriggerMode
 from app.core.utils.context_summary.common import ContextSummaryOutputBudgetError
-from app.core.utils.context_summary.model_call import call_context_summary_model
+from app.core.utils.context_summary.model_call import call_context_summary_model, estimate_context_summary_prompt_tokens
 from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot, select_context_summary_model
 from app.core.utils.context_summary.snapshot import build_context_summary_snapshot
+from app.core.utils.context_summary.user_message_block import split_covered_user_message
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
 from app.core.utils.dispatcher.frozen_context import compact_frozen_context_messages
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
+from app.core.utils.dispatcher.session_todo_snapshot import parse_session_todo_snapshot
 from app.core.utils.llm_request_policy import build_upstream_rejection, serialize_llm_json_request
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage, ContextSummaryStageStatus
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
@@ -549,9 +553,9 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
         db.add(ChatSession(session_id="recovery-session", uid="recovery-user"))
         db.add_all(
             [
-                Message(id=1, session_id="recovery-session", uid="recovery-user", profile_id=1, role=MessageRole.USER, content="old question"),
+                Message(id=1, session_id="recovery-session", uid="recovery-user", profile_id=1, role=MessageRole.USER, content="old question", is_processed=True),
                 Message(id=2, session_id="recovery-session", uid="recovery-user", profile_id=1, role=MessageRole.ASSISTANT, content="old answer"),
-                Message(id=3, session_id="recovery-session", uid="recovery-user", profile_id=1, role=MessageRole.USER, content="current question"),
+                Message(id=3, session_id="recovery-session", uid="recovery-user", profile_id=1, role=MessageRole.USER, content="current question", is_processed=True),
                 Message(
                     id=4,
                     session_id="recovery-session",
@@ -583,7 +587,7 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
             raise LLMException("summary model unavailable")
         return context_summary_stage.GeneratedSummaryResult(
             content="overflow recovery summary",
-            message_count=2,
+            message_count=4,
             completed_stage=SimpleNamespace(content="overflow recovery summary", refinement_index=0),
         )
 
@@ -717,6 +721,38 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
             assert tool_call.arguments["operation"] == "recall"
             assert_recall_payload(tool_result_message.content)
 
+    def assert_summary_context(request: list[InternalMessage]) -> str:
+        summary_messages: list[str] = []
+        for message in request:
+            if message.role != MessageRole.USER or not isinstance(message.content, str):
+                continue
+            candidate = message.content
+            try:
+                materialized = json.loads(candidate)
+            except json.JSONDecodeError:
+                materialized = None
+            if isinstance(materialized, dict) and isinstance(materialized.get("user_message"), str):
+                candidate = materialized["user_message"]
+            if candidate.startswith("<conversation_summary"):
+                summary_messages.append(candidate)
+        assert len(summary_messages) == 1
+        summary_content = summary_messages[0]
+        template_prefix, template_suffix = CONTEXT_SUMMARY_WRAPPER.format(
+            through_message_id=5,
+            content="__SUMMARY_CONTENT__",
+        ).split("__SUMMARY_CONTENT__", 1)
+        assert summary_content.startswith(template_prefix)
+        assert summary_content.endswith(template_suffix)
+        summary_body = summary_content[len(template_prefix) : -len(template_suffix)]
+        model_summary, covered = split_covered_user_message(summary_body)
+        assert model_summary == "overflow recovery summary"
+        assert covered is not None
+        assert covered.message_id == 3
+        assert covered.content == "current question"
+        assert not any(message.role == MessageRole.TOOL for message in request)
+        assert not any(message.tool_calls for message in request)
+        return summary_content
+
     result = None
     state = None
     if first_summary_failure:
@@ -786,24 +822,31 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
         assert len(attempts) == (3 if first_summary_failure else 2)
         assert summary_calls == (2 if first_summary_failure else 1)
         assert fallback_calls == (1 if first_summary_failure else 0)
-    assert_tool_context(attempts)
+    assert_tool_context(attempts[:-1])
+    summary_request_content = assert_summary_context(attempts[-1])
     assert all(not any("overflow recovery summary" in (message.content or "") for message in request) for request in attempts[:-1])
     assert any("overflow recovery summary" in (message.content or "") for message in attempts[-1])
     assert state is not None
     assert state.checkpoint_state.upper_message_id == 3
-    assert state.messages[1].content == CONTEXT_SUMMARY_WRAPPER.format(
-        through_message_id=2,
-        content="overflow recovery summary",
-    )
-    assert [message.id for message in state.messages[2:]] == [3, 4, 5]
-    assert state.messages[3].tool_calls[0].id == tool_call_id
-    assert state.messages[4].tool_call_id == tool_call_id
-    assert session.context_summary == "overflow recovery summary"
-    assert session.context_summary_message_id == 2
+    assert state.messages[1].content == summary_request_content
+    assert [message.id for message in state.messages[2:]] == []
+    model_summary, covered = split_covered_user_message(session.context_summary)
+    assert model_summary == "overflow recovery summary"
+    assert covered is not None
+    assert covered.message_id == 3
+    assert covered.content == "current question"
+    assert session.context_summary_message_id == 5
 
     async with context_summary_database() as db:
         persisted_messages = list((await db.execute(select(Message).where(Message.session_id == "recovery-session").order_by(Message.id))).scalars())
-    assert [message.id for message in persisted_messages if message.id in {4, 5}] == [4, 5]
+    assert [message.id for message in persisted_messages] == [1, 2, 3, 4, 5]
+    assert [message.content for message in persisted_messages] == [
+        "old question",
+        "old answer",
+        "current question",
+        managed_tool_call.model_dump_json(),
+        managed_tool_result.model_dump_json(),
+    ]
     assert persisted_messages[3].type == MessageType.TOOL_CALL
     assert persisted_messages[4].type == MessageType.TOOL_RESULT
     persisted_tool_call = InternalMessage.model_validate_json(persisted_messages[3].content)
@@ -1871,3 +1914,484 @@ async def test_context_summary_checkpoint_refines_against_complete_request_budge
         assert session.context_summary_message_id == 2
         assert session.context_summary_revision == 3
     assert session.context_content_revision == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry_mode", ["threshold", "forced"], ids=["threshold", "forced"])
+async def test_context_summary_chunks_tool_results_and_preserves_continuation(
+    context_summary_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    entry_mode: str,
+) -> None:
+    uid = "continuation-user"
+    session_id = "continuation-session"
+    main_channel_id = 21
+    main_model_id = "main-model"
+    main_protocol = "openai"
+    summary_model = ContextSummaryModelSnapshot(
+        channel_id=11,
+        channel_name="small-summary-channel",
+        model_id="small-summary-model",
+        protocol="openai",
+        base_url="https://summary.invalid",
+        api_key="secret",
+        priority=1,
+        context_window_tokens=4_096,
+        max_output_tokens=512,
+        temperature=0.0,
+        top_p=None,
+        safety_margin_tokens=0,
+        input_budget_tokens=3_584,
+    )
+    evidence_markers = ["TOOL_EVIDENCE_ALPHA_2F", "TOOL_EVIDENCE_BETA_7C", "TOOL_EVIDENCE_GAMMA_9A"]
+    continuation_marker = "TOOL_EVIDENCE_DELTA_4D"
+    db_user_content = "Continue the verified task from the first objective."
+    full_user_content = f"{db_user_content}\n\nThe second objective must preserve every verified evidence marker."
+    guidance_prompt = "guidance-continuation-marker"
+    user_environment_prompt = json.dumps(
+        {
+            "environment": {"runtime_context": "runtime-continuation-marker"},
+            "response_settings": {"markdown": True, "max_output_tokens": 512},
+            "platform_constraints": "platform-continuation-marker",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    todo_v1 = [{"content": "preserve the verified tool evidence", "status": "in_progress"}]
+    todo_v2 = [
+        {"content": "preserve the verified tool evidence", "status": "in_progress"},
+        {"content": "continue with the next tool result", "status": "pending"},
+    ]
+    tool_calls = [
+        InternalToolCall(
+            id=f"continuation-call-{index}",
+            name="collect_evidence",
+            arguments={"evidence_index": index},
+        )
+        for index in range(1, 4)
+    ]
+    tool_call_message = InternalMessage(
+        id=2,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        tool_calls=tool_calls,
+    )
+    tool_results: list[InternalMessage] = []
+    tool_result_rows: list[Message] = []
+    for index, (tool_call, marker) in enumerate(zip(tool_calls, evidence_markers), start=3):
+        result_content = json.dumps(
+            {"result": ("x " * 3_200) + marker},
+            ensure_ascii=False,
+        )
+        result_message = InternalMessage(
+            id=index,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content=result_content,
+            tool_call_id=tool_call.id,
+            tool_execution_status="succeeded",
+        )
+        tool_results.append(result_message)
+        tool_result_rows.append(
+            Message(
+                id=index,
+                session_id=session_id,
+                uid=uid,
+                profile_id=1,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_RESULT,
+                content=result_message.model_dump_json(),
+                is_processed=True,
+            )
+        )
+
+    single_result_limit_tokens = 4_000
+    result_token_estimates = [estimate_tokens(result.content or "", model_id=main_model_id, protocol=main_protocol) for result in tool_results]
+    assert all(token_count < single_result_limit_tokens for token_count in result_token_estimates)
+    assert all((len(result.content or "") + 3) // 4 < single_result_limit_tokens for result in tool_results)
+    assert sum(result_token_estimates) > 8_000 - 512
+
+    provider_metadata = {
+        "input_tokens": 7_000,
+        "input_tokens_source": "provider",
+        "channel_id": main_channel_id,
+        "model_id": main_model_id,
+        "protocol": main_protocol,
+        "context_summary_revision": 0,
+        "context_content_revision": 0,
+    }
+    if entry_mode == "threshold":
+        assert provider_metadata["input_tokens"] >= calculate_context_summary_trigger_tokens(
+            context_window_k=8,
+            max_tokens=512,
+            threshold_percent=90,
+        )
+    async with context_summary_database() as db:
+        db.add(
+            ChatSession(
+                session_id=session_id,
+                uid=uid,
+                llm_request_metadata=provider_metadata if entry_mode == "threshold" else None,
+            )
+        )
+        db.add(
+            SessionTodoPlan(
+                session_id=session_id,
+                uid=uid,
+                revision=1,
+                todos=todo_v1,
+            )
+        )
+        db.add(
+            Message(
+                id=1,
+                session_id=session_id,
+                uid=uid,
+                profile_id=1,
+                role=MessageRole.USER,
+                content=db_user_content,
+                environment_prompt=user_environment_prompt,
+                guidance_prompt=guidance_prompt,
+                is_processed=True,
+            )
+        )
+        db.add(
+            Message(
+                id=2,
+                session_id=session_id,
+                uid=uid,
+                profile_id=1,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TOOL_CALL,
+                content=tool_call_message.model_dump_json(),
+                is_processed=True,
+            )
+        )
+        db.add_all(tool_result_rows)
+        await db.commit()
+
+    summary_prompts: list[str] = []
+    all_markers = [*evidence_markers, continuation_marker]
+
+    async def _select_model(*_args, **_kwargs) -> ContextSummaryModelSnapshot:
+        return summary_model
+
+    async def _call_model(*, model: ContextSummaryModelSnapshot, prompt: str) -> str:
+        assert model == summary_model
+        assert estimate_context_summary_prompt_tokens(model, prompt) <= model.input_budget_tokens
+        summary_prompts.append(prompt)
+        prompt_markers = [marker for marker in all_markers if marker in prompt]
+        if '"role":' in prompt or "<message_chunk" in prompt:
+            prefix = "raw evidence context"
+        else:
+            prefix = "merged"
+        return " ".join([prefix, *prompt_markers])
+
+    monkeypatch.setattr(context_summary_stage, "select_context_summary_model", _select_model)
+    monkeypatch.setattr(context_summary_reduction, "select_context_summary_model", _select_model)
+    monkeypatch.setattr(context_summary_service, "select_context_summary_model", _select_model)
+    monkeypatch.setattr(context_summary_stage, "call_context_summary_model", _call_model)
+
+    cfg = SimpleNamespace(
+        channel=SimpleNamespace(context_summary_channel=object()),
+        other=SimpleNamespace(context_summary_threshold_percent=90),
+    )
+    profile = SimpleNamespace(id=1)
+
+    async def _run_checkpoint(
+        messages: list[InternalMessage],
+        *,
+        force: bool,
+        previous_metadata: dict | None = None,
+    ) -> list[InternalMessage]:
+        async with context_summary_database() as db:
+            return await apply_context_summary_checkpoint(
+                db,
+                session_id=session_id,
+                uid=uid,
+                profile=profile,
+                cfg=cfg,
+                messages=messages,
+                trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+                fixed_upper_message_id=1,
+                context_window_k=8,
+                max_tokens=512,
+                tools=[],
+                channel_id=main_channel_id,
+                model_id=main_model_id,
+                protocol=main_protocol,
+                previous_llm_request_metadata=previous_metadata,
+                force=force,
+            )
+
+    def _summary_message(messages: list[InternalMessage]) -> InternalMessage:
+        summaries = [message for message in messages if message.role == MessageRole.USER and isinstance(message.content, str) and message.content.startswith("<conversation_summary")]
+        assert len(summaries) == 1
+        return summaries[0]
+
+    def _assert_summary_content(
+        content: str | None,
+        *,
+        expected_todo_revision: int,
+        expected_todos: list[dict[str, str]],
+        expected_markers: list[str],
+    ) -> None:
+        model_summary, covered = split_covered_user_message(content)
+        assert model_summary is not None
+        assert covered is not None
+        assert covered.message_id == 1
+        assert covered.content == full_user_content
+        assert all(marker in model_summary for marker in expected_markers)
+        todo_start = model_summary.rfind("<current_session_todo_snapshot>")
+        assert todo_start >= 0
+        assert parse_session_todo_snapshot(model_summary[todo_start:]) == {
+            "revision": expected_todo_revision,
+            "todos": expected_todos,
+        }
+
+    def _assert_summary_message(
+        message: InternalMessage,
+        *,
+        through_message_id: int,
+        expected_todo_revision: int,
+        expected_todos: list[dict[str, str]],
+        expected_markers: list[str],
+    ) -> None:
+        assert isinstance(message.content, str)
+        template_prefix, template_suffix = CONTEXT_SUMMARY_WRAPPER.format(
+            through_message_id=through_message_id,
+            content="__SUMMARY_CONTENT__",
+        ).split("__SUMMARY_CONTENT__", 1)
+        assert message.content.startswith(template_prefix)
+        assert message.content.endswith(template_suffix)
+        summary_content = message.content[len(template_prefix) : -len(template_suffix)]
+        _assert_summary_content(
+            summary_content,
+            expected_todo_revision=expected_todo_revision,
+            expected_todos=expected_todos,
+            expected_markers=expected_markers,
+        )
+        assert isinstance(message.environment_prompt, str)
+        environment = json.loads(message.environment_prompt)
+        assert environment["environment"]["runtime_context"] == "runtime-continuation-marker"
+        assert environment["platform_constraints"] == "platform-continuation-marker"
+
+    initial_messages = [
+        InternalMessage(
+            id=1,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content=full_user_content,
+            environment_prompt=user_environment_prompt,
+            guidance_prompt=guidance_prompt,
+        ),
+        tool_call_message,
+        *tool_results,
+    ]
+    first_checkpoint = await _run_checkpoint(
+        initial_messages,
+        force=entry_mode == "forced",
+        previous_metadata=provider_metadata if entry_mode == "threshold" else None,
+    )
+    first_prompt_count = len(summary_prompts)
+    first_prompts = summary_prompts[:first_prompt_count]
+    assert first_prompt_count > len(tool_results)
+    message_chunk_pattern = re.compile(
+        r'<message_chunk message_id="(?P<message_id>\d+)" role="tool" part="(?P<part>\d+)">\n'
+        r"(?P<payload>.*?)\n</message_chunk>",
+        re.DOTALL,
+    )
+    chunks_by_message_id: dict[int, list[tuple[int, str]]] = {}
+    for prompt in first_prompts:
+        for match in message_chunk_pattern.finditer(prompt):
+            message_id = int(match.group("message_id"))
+            chunks_by_message_id.setdefault(message_id, []).append((int(match.group("part")), match.group("payload")))
+
+    assert set(chunks_by_message_id) == {result.id for result in tool_results}
+    for result in tool_results:
+        assert result.id is not None
+        ordered_chunks = sorted(chunks_by_message_id[result.id])
+        parts = [part for part, _ in ordered_chunks]
+        assert len(parts) == len(set(parts))
+        assert parts == list(range(len(parts)))
+        parsed = json.loads("".join(payload for _, payload in ordered_chunks))
+        assert parsed["content"] == result.content
+        assert parsed["tool_call_id"] == result.tool_call_id
+    assert len(first_checkpoint) == 1
+    first_summary_message = _summary_message(first_checkpoint)
+    _assert_summary_message(
+        first_summary_message,
+        through_message_id=5,
+        expected_todo_revision=1,
+        expected_todos=todo_v1,
+        expected_markers=evidence_markers,
+    )
+
+    async with context_summary_database() as db:
+        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == session_id))).scalar_one()
+        first_rows = list((await db.execute(select(Message).where(Message.session_id == session_id).order_by(Message.id))).scalars())
+    assert session.context_summary_message_id == 5
+    assert session.context_summary_revision == 1
+    _assert_summary_content(
+        session.context_summary,
+        expected_todo_revision=1,
+        expected_todos=todo_v1,
+        expected_markers=evidence_markers,
+    )
+    assert [row.content for row in first_rows] == [
+        db_user_content,
+        tool_call_message.model_dump_json(),
+        *(result.model_dump_json() for result in tool_results),
+    ]
+    first_parsed = parse_db_messages_to_internal(first_rows)
+    assert [message.id for message in first_parsed] == [1, 2, 3, 4, 5]
+    assert first_parsed[0].content == db_user_content
+    assert [message.tool_call_id for message in first_parsed[2:]] == [tool_call.id for tool_call in tool_calls]
+    assert [message.content for message in first_parsed[2:]] == [result.content for result in tool_results]
+
+    async def _build_system_prompt(_db, _profile, **_kwargs):
+        return "stable system prompt"
+
+    monkeypatch.setattr(prepare_module, "build_system_prompt", _build_system_prompt)
+    async with context_summary_database() as db:
+        reloaded_messages = await prepare_module.prepare_messages(
+            db,
+            session_id,
+            uid,
+            profile,
+            cfg,
+            None,
+            "",
+            False,
+            context_window_k=8,
+            max_tokens=512,
+            processed_only=True,
+        )
+    assert len(reloaded_messages) == 2
+    assert reloaded_messages[0].role == MessageRole.SYSTEM
+    assert reloaded_messages[1].role == MessageRole.USER
+    assert [message.id for message in reloaded_messages if message.id is not None] == []
+    reloaded_summary = reloaded_messages[1:]
+    assert len(reloaded_summary) == 1
+    assert reloaded_summary[0].content == first_summary_message.content
+    materialized_reloaded_messages = materialize_user_environment_prompts(reloaded_messages)
+    assert isinstance(materialized_reloaded_messages[1].content, str)
+    reloaded_user_payload = json.loads(materialized_reloaded_messages[1].content)
+    assert reloaded_user_payload["environment"]["runtime_context"] == "runtime-continuation-marker"
+    assert reloaded_user_payload["platform_constraints"] == "platform-continuation-marker"
+    assert reloaded_user_payload["response_settings"] == {"markdown": True, "max_output_tokens": 512}
+    assert reloaded_user_payload["platform_guidance"] == guidance_prompt
+
+    new_tool_call = InternalToolCall(
+        id="continuation-call-delta",
+        name="collect_evidence",
+        arguments={"evidence_index": 4},
+    )
+    new_tool_call_message = InternalMessage(
+        id=6,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        tool_calls=[new_tool_call],
+    )
+    new_result = InternalMessage(
+        id=7,
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content=json.dumps(
+            {"result": f"continuation output with {continuation_marker}"},
+            ensure_ascii=False,
+        ),
+        tool_call_id=new_tool_call.id,
+        tool_execution_status="succeeded",
+    )
+    async with context_summary_database() as db:
+        plan = await db.get(SessionTodoPlan, session_id)
+        assert plan is not None
+        plan.revision = 2
+        plan.todos = todo_v2
+        db.add(
+            Message(
+                id=6,
+                session_id=session_id,
+                uid=uid,
+                profile_id=1,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TOOL_CALL,
+                content=new_tool_call_message.model_dump_json(),
+                is_processed=True,
+            )
+        )
+        db.add(
+            Message(
+                id=7,
+                session_id=session_id,
+                uid=uid,
+                profile_id=1,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_RESULT,
+                content=new_result.model_dump_json(),
+                is_processed=True,
+            )
+        )
+        await db.commit()
+
+    second_prompt_start = len(summary_prompts)
+    second_checkpoint = await _run_checkpoint(
+        [*reloaded_summary, new_tool_call_message, new_result],
+        force=True,
+    )
+    second_prompts = summary_prompts[second_prompt_start:]
+    assert second_prompts
+    assert any(continuation_marker in prompt for prompt in second_prompts)
+    assert len(second_checkpoint) == 1
+    second_summary_message = _summary_message(second_checkpoint)
+    _assert_summary_message(
+        second_summary_message,
+        through_message_id=7,
+        expected_todo_revision=2,
+        expected_todos=todo_v2,
+        expected_markers=[*evidence_markers, continuation_marker],
+    )
+    assert second_summary_message.environment_prompt == first_summary_message.environment_prompt
+
+    async with context_summary_database() as db:
+        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == session_id))).scalar_one()
+    assert session.context_summary_message_id == 7
+    assert session.context_summary_revision == 2
+    _assert_summary_content(
+        session.context_summary,
+        expected_todo_revision=2,
+        expected_todos=todo_v2,
+        expected_markers=[*evidence_markers, continuation_marker],
+    )
+
+    stable_prompt_count = len(summary_prompts)
+    stable_checkpoint = await _run_checkpoint(second_checkpoint, force=True)
+    assert len(summary_prompts) == stable_prompt_count
+    assert len(stable_checkpoint) == 1
+    assert stable_checkpoint[0].content == second_summary_message.content
+    assert stable_checkpoint[0].environment_prompt == second_summary_message.environment_prompt
+
+    async with context_summary_database() as db:
+        final_rows = list((await db.execute(select(Message).where(Message.session_id == session_id).order_by(Message.id))).scalars())
+        final_stages = list((await db.execute(select(ContextSummaryStage).where(ContextSummaryStage.session_id == session_id))).scalars())
+        final_fragments = list((await db.execute(select(ContextSummaryFragment).where(ContextSummaryFragment.session_id == session_id))).scalars())
+    assert final_stages == []
+    assert final_fragments == []
+    assert [row.id for row in final_rows] == [1, 2, 3, 4, 5, 6, 7]
+    assert [row.content for row in final_rows] == [
+        db_user_content,
+        tool_call_message.model_dump_json(),
+        *(result.model_dump_json() for result in tool_results),
+        new_tool_call_message.model_dump_json(),
+        new_result.model_dump_json(),
+    ]
+    final_parsed = parse_db_messages_to_internal(final_rows)
+    assert [message.id for message in final_parsed] == [1, 2, 3, 4, 5, 6, 7]
+    assert final_parsed[0].content == db_user_content
+    final_tool_call = next(message for message in final_parsed if message.id == 6)
+    assert [tool_call.id for tool_call in final_tool_call.tool_calls or []] == [new_tool_call.id]
+    final_tool_results = [message for message in final_parsed if message.role == MessageRole.TOOL]
+    assert [message.id for message in final_tool_results] == [3, 4, 5, 7]
+    assert [message.tool_call_id for message in final_tool_results] == [tool_call.id for tool_call in [*tool_calls, new_tool_call]]
+    assert [message.content for message in final_tool_results] == [result.content for result in [*tool_results, new_result]]

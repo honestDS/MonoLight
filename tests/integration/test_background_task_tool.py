@@ -297,7 +297,6 @@ async def test_enabled_manage_tool_is_exposed_prevalidated_and_dispatched(
         session_id="owner-main",
         turn=1,
         uid="owner",
-        tool_result_round_budget_tokens=4096,
     )
     list_payload = json.loads(list_result.content)
     assert list_result.role == MessageRole.TOOL
@@ -321,7 +320,6 @@ async def test_enabled_manage_tool_is_exposed_prevalidated_and_dispatched(
         session_id="owner-main",
         turn=2,
         uid="owner",
-        tool_result_round_budget_tokens=4096,
     )
     assert cancel_result.role == MessageRole.TOOL
     assert cancel_result.tool_execution_status == "succeeded"
@@ -346,7 +344,6 @@ async def test_enabled_manage_tool_is_exposed_prevalidated_and_dispatched(
         session_id="owner-main",
         turn=3,
         uid="owner",
-        tool_result_round_budget_tokens=4096,
     )
     assert missing_result.tool_execution_status == "failed"
     assert json.loads(missing_result.content)["missing_arguments"] == ["operation"]
@@ -368,7 +365,6 @@ async def test_enabled_manage_tool_is_exposed_prevalidated_and_dispatched(
         session_id="owner-main",
         turn=4,
         uid="owner",
-        tool_result_round_budget_tokens=4096,
     )
     assert unknown_result.tool_execution_status == "failed"
     assert json.loads(unknown_result.content)["status"] == "failed"
@@ -404,7 +400,6 @@ async def test_disabled_manage_tool_is_hidden_and_dispatch_is_rejected(
         session_id="owner-main",
         turn=1,
         uid="owner",
-        tool_result_round_budget_tokens=4096,
     )
 
     assert result.role == MessageRole.TOOL

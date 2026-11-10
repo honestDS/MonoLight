@@ -16,10 +16,8 @@ from app.core.tools.longterm_memory import (
     validate_longterm_memory_arguments,
 )
 from app.core.utils.dispatcher.helpers import process_single_tool_with_isolated_db
-from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
-from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
 from app.models.channel import resolve_model_protocol
 from app.models.message import (
     InternalMessage,
@@ -218,14 +216,6 @@ async def save_and_execute_recall(
     model_entry = context.model_entry or {}
     model_id = model_entry.get("model_id")
     protocol = resolve_model_protocol(model_entry) if isinstance(model_id, str) and model_id else None
-    tool_result_round_budget_tokens = calculate_tool_result_round_budget_tokens(
-        messages=materialize_user_environment_prompts(context.messages),
-        context_window_k=context.chat_params["context_window_k"],
-        max_tokens=context.chat_params["max_tokens"],
-        tools=context.main_tools,
-        model_id=model_id,
-        protocol=protocol,
-    )
     tool_result = await process_single_tool_with_isolated_db(
         tool_call,
         context.profile,
@@ -237,7 +227,6 @@ async def save_and_execute_recall(
         context.uid,
         allowed_knowledge_base_ids=context.allowed_knowledge_base_ids,
         context_window_k=context.chat_params["context_window_k"],
-        tool_result_round_budget_tokens=tool_result_round_budget_tokens,
         model_id=model_id,
         protocol=protocol,
         context_summary_boundary_message_id=context.upper_message_id,

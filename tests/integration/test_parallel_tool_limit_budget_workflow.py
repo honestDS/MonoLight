@@ -230,7 +230,7 @@ def _assert_tool_result_budget(tool_results: list[InternalMessage]) -> None:
         assert payload["operation"] == "read"
         assert isinstance(payload["content"], str)
         token_count = len(encoding.encode(tool_result.content or "", disallowed_special=()))
-        assert 1400 <= token_count <= 1600
+        assert 7000 <= token_count <= 8000
 
     for tool_result in tool_results[5:]:
         payload = json.loads(tool_result.content or "{}")
@@ -274,11 +274,6 @@ async def test_interactive_parallel_tool_limit_budget_uses_executable_call_count
         return None
 
     monkeypatch.setattr(interactive_tools, "audit_tool_round", audit_tool_round)
-    monkeypatch.setattr(
-        interactive_tools,
-        "calculate_tool_result_round_budget_tokens",
-        lambda **_kwargs: 8000,
-    )
 
     async with parallel_tool_limit_budget_session_factory() as db:
         state = _build_interactive_state(db, profile, cfg, assistant_message)
@@ -453,11 +448,6 @@ async def test_background_parallel_tool_limit_budget_uses_executable_call_count(
     monkeypatch.setattr(background_module, "get_tools_for_profile", get_tools_for_profile)
     monkeypatch.setattr(background_module, "audit_tool_round", audit_tool_round)
     monkeypatch.setattr(background_module, "generate_chat_with_fallback", generate_chat_with_fallback)
-    monkeypatch.setattr(
-        background_module,
-        "calculate_tool_result_round_budget_tokens",
-        lambda **_kwargs: 8000,
-    )
 
     async with parallel_tool_limit_budget_session_factory() as db:
         final_message, _turn_messages, files = await BackgroundDispatcherMixin._generate_reply_from_history(

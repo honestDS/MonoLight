@@ -62,17 +62,23 @@ class ContextSummaryState:
     message_id: int | None
     revision: int = field(default=0, compare=False, repr=False)
     content_revision: int = field(default=0, compare=False, repr=False)
+    covered_user_request: InternalMessage | None = field(default=None, compare=False, repr=False)
 
     def as_message(self) -> InternalMessage | None:
         if not self.content or self.message_id is None:
             return None
-        return InternalMessage(
+        message = InternalMessage(
             role=MessageRole.USER,
             content=CONTEXT_SUMMARY_WRAPPER.format(
                 through_message_id=self.message_id,
                 content=self.content,
             ),
         )
+        if self.covered_user_request is not None:
+            message.environment_prompt = self.covered_user_request.environment_prompt
+            message.guidance_prompt = self.covered_user_request.guidance_prompt
+            message.execution_guidance = self.covered_user_request.execution_guidance
+        return message
 
 
 def serialize_message(message: InternalMessage) -> str:

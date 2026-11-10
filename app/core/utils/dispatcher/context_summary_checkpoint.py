@@ -24,6 +24,48 @@ def _is_after_fixed_upper(
     return message.id > fixed_upper_message_id
 
 
+def _find_completed_tool_result_boundary(
+    messages: list[InternalMessage],
+    *,
+    fixed_upper_message_id: int,
+    protected_tool_call_ids: set[str] | None,
+) -> int | None:
+    pending_tool_call_ids: set[str] = set()
+    latest_completed_result_id: int | None = None
+    protected_ids = protected_tool_call_ids or set()
+
+    for message in messages:
+        if isinstance(message.id, int) and not isinstance(message.id, bool) and message.id < fixed_upper_message_id:
+            continue
+        if message.role == MessageRole.SYSTEM or is_context_summary_message(message):
+            continue
+        if message.role == MessageRole.USER:
+            if message.attachments or isinstance(message.content, list):
+                break
+            continue
+        if message.role == MessageRole.ASSISTANT and message.tool_calls:
+            tool_call_ids = {tool_call.id for tool_call in message.tool_calls if tool_call.id}
+            if not tool_call_ids:
+                continue
+            if pending_tool_call_ids:
+                break
+            if tool_call_ids & protected_ids:
+                break
+            pending_tool_call_ids = tool_call_ids
+            continue
+        if message.role != MessageRole.TOOL or not pending_tool_call_ids:
+            continue
+        if message.tool_call_id not in pending_tool_call_ids:
+            continue
+        if not isinstance(message.id, int) or isinstance(message.id, bool) or message.id <= 0:
+            break
+        pending_tool_call_ids.remove(message.tool_call_id)
+        if not pending_tool_call_ids:
+            latest_completed_result_id = message.id
+
+    return latest_completed_result_id
+
+
 async def apply_context_summary_checkpoint(
     db: AsyncSession,
     *,
@@ -45,7 +87,20 @@ async def apply_context_summary_checkpoint(
     previous_llm_request_metadata: dict | None = None,
     reserved_tokens: int = 0,
     force: bool = False,
+    protected_tool_call_ids: set[str] | None = None,
 ) -> list[InternalMessage]:
+    effective_trigger_mode = trigger_mode
+    effective_fixed_upper_message_id = fixed_upper_message_id
+    if trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE:
+        completed_tool_result_id = _find_completed_tool_result_boundary(
+            messages,
+            fixed_upper_message_id=fixed_upper_message_id,
+            protected_tool_call_ids=protected_tool_call_ids,
+        )
+        if completed_tool_result_id is not None:
+            effective_trigger_mode = ContextSummaryTriggerMode.TOOL_RESULT
+            effective_fixed_upper_message_id = completed_tool_result_id
+
     system_messages = [message.model_copy(deep=True) for message in messages if message.role == MessageRole.SYSTEM]
     uncovered_messages = [
         message.model_copy(deep=True)
@@ -54,8 +109,8 @@ async def apply_context_summary_checkpoint(
         and not is_context_summary_message(message)
         and _is_after_fixed_upper(
             message,
-            trigger_mode=trigger_mode,
-            fixed_upper_message_id=fixed_upper_message_id,
+            trigger_mode=effective_trigger_mode,
+            fixed_upper_message_id=effective_fixed_upper_message_id,
         )
     ]
     fixed_request_messages = [*system_messages, *uncovered_messages]
@@ -91,14 +146,15 @@ async def apply_context_summary_checkpoint(
         uid=uid,
         profile=profile,
         cfg=cfg,
-        before_id=(fixed_upper_message_id if trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE else fixed_upper_message_id + 1),
+        before_id=(effective_fixed_upper_message_id if effective_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE else effective_fixed_upper_message_id + 1),
         current_message="",
+        summary_source_messages=messages,
         context_window_k=context_window_k,
         max_tokens=max_tokens,
         reserved_tokens=max(reserved_tokens, 0),
         tools=tools,
-        trigger_mode=trigger_mode,
-        fixed_upper_message_id=fixed_upper_message_id,
+        trigger_mode=effective_trigger_mode,
+        fixed_upper_message_id=effective_fixed_upper_message_id,
         fixed_request_messages=fixed_request_messages,
         confirmed_input_tokens=confirmed_input_tokens,
         channel_id=channel_id,

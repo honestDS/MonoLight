@@ -1,5 +1,5 @@
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +9,7 @@ from app.core.constants import (
     ERR_CONTEXT_SUMMARY_TRIGGER_PAIR_REQUIRED,
     ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
 )
+from app.core.crud.session.message import message_crud
 from app.core.crud.session.session import session_crud
 from app.core.exceptions import LLMException, LLMRequestRejectedException, find_llm_request_rejection
 from app.core.i18n import t
@@ -55,7 +56,7 @@ from app.core.utils.context_summary.user_message_block import (
     split_covered_user_message,
 )
 from app.core.utils.dispatcher.helpers import format_exception_message
-from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
+from app.core.utils.dispatcher.markdown_instruction import inherit_user_request_context, materialize_user_environment_prompts
 from app.core.utils.dispatcher.session_todo_snapshot import (
     load_current_session_todo_snapshot,
     measure_session_todo_snapshot_tokens,
@@ -67,7 +68,7 @@ from app.core.utils.dispatcher.terminal_watch_snapshot import (
     strip_terminal_watch_snapshot,
 )
 from app.core.utils.tokenizer import estimate_tokens
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.providers.database import AsyncSessionLocal
 from app.providers.llm.client import estimate_request_context_tokens
@@ -133,6 +134,54 @@ async def persist_context_summary(
         return updated
 
 
+async def _load_covered_user_request(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    uid: str,
+    message_id: int,
+) -> InternalMessage | None:
+    page = await message_crud.get_history_forward_by_id(
+        db,
+        session_id=session_id,
+        uid=uid,
+        after_id=message_id - 1,
+        before_id=message_id + 1,
+        limit=1,
+    )
+    if not page or page[0].id != message_id:
+        return None
+    message = page[0]
+    if message.role != MessageRole.USER or message.type != MessageType.TEXT:
+        return None
+    return InternalMessage(
+        role=MessageRole.USER,
+        environment_prompt=message.environment_prompt,
+        guidance_prompt=message.guidance_prompt,
+    )
+
+
+def _find_live_covered_user_request(
+    messages: Sequence[InternalMessage],
+    *,
+    message_id: int,
+    previous_request: InternalMessage | None,
+) -> InternalMessage | None:
+    inherited_messages = [previous_request] if previous_request is not None else []
+    for message in messages:
+        if message.role != MessageRole.USER or message.type not in (MessageType.TEXT, None) or message.id is None:
+            continue
+        if message.id < message_id:
+            inherited_messages.append(message)
+            continue
+        if message.id != message_id or not isinstance(message.content, str):
+            continue
+        live_request = InternalMessage(role=MessageRole.USER, content=message.content)
+        inherit_user_request_context(live_request, [*inherited_messages, message])
+        return live_request
+    return None
+
+
 async def get_context_summary_state(
     db: AsyncSession,
     *,
@@ -142,11 +191,23 @@ async def get_context_summary_state(
     session = await session_crud.get_by_session_id(db, session_id)
     if session is None or session.uid != uid:
         return ContextSummaryState(content=None, message_id=None)
+    covered_user_request = None
+    summary_message_id = session.context_summary_message_id
+    if summary_message_id is not None:
+        _, covered_user_message = split_covered_user_message(session.context_summary)
+        if covered_user_message is not None and covered_user_message.message_id <= summary_message_id:
+            covered_user_request = await _load_covered_user_request(
+                db,
+                session_id=session_id,
+                uid=uid,
+                message_id=covered_user_message.message_id,
+            )
     return ContextSummaryState(
         content=session.context_summary,
         message_id=session.context_summary_message_id,
         revision=session.context_summary_revision,
         content_revision=session.context_content_revision,
+        covered_user_request=covered_user_request,
     )
 
 
@@ -245,6 +306,7 @@ async def _ensure_context_summary(
     trigger_mode: ContextSummaryTriggerMode | None = None,
     fixed_upper_message_id: int | None = None,
     fixed_request_messages: list[InternalMessage] | None = None,
+    summary_source_messages: Sequence[InternalMessage] = (),
     confirmed_input_tokens: int | None = None,
     model_id: str | None = None,
     protocol: str | None = None,
@@ -255,6 +317,14 @@ async def _ensure_context_summary(
 ) -> ContextSummaryState:
     await ensure_context_summary_work_valid(work_validity_checker)
     state = await get_context_summary_state(db, session_id=session_id, uid=uid)
+    summary_message = state.as_message()
+    if summary_message is not None:
+        live_summary = next(
+            (message for message in reversed(summary_source_messages) if message.id is None and message.role == MessageRole.USER and message.content == summary_message.content),
+            None,
+        )
+        if live_summary is not None:
+            state = replace(state, covered_user_request=live_summary)
 
     async def combined_work_validity_checker() -> bool:
         if work_validity_checker is not None and not await work_validity_checker():
@@ -296,6 +366,10 @@ async def _ensure_context_summary(
         await release_db_session(db)
         return state
 
+    if fixed_upper_message_id is not None and state.message_id is not None and fixed_upper_message_id <= state.message_id:
+        await release_db_session(db)
+        return state
+
     boundary = None
     if trigger_mode is not None and fixed_upper_message_id is not None:
         boundary = await resolve_context_summary_boundary(
@@ -313,6 +387,26 @@ async def _ensure_context_summary(
 
     existing_model_summary, existing_user_message = split_covered_user_message(state.content)
     existing_model_summary = strip_session_todo_snapshot(strip_terminal_watch_snapshot(existing_model_summary))
+    covered_user_message_id = existing_user_message.message_id if existing_user_message is not None else None
+    covered_user_message_content = existing_user_message.content if existing_user_message is not None else None
+    covered_user_request = state.covered_user_request
+    if boundary is not None and boundary.trigger_mode == ContextSummaryTriggerMode.TOOL_RESULT and boundary.covered_user_message_id is not None:
+        covered_user_message_id = boundary.covered_user_message_id
+        covered_user_message_content = boundary.covered_user_message_content
+        covered_user_request = _find_live_covered_user_request(
+            summary_source_messages,
+            message_id=covered_user_message_id,
+            previous_request=state.as_message(),
+        )
+        if covered_user_request is not None:
+            covered_user_message_content = covered_user_request.content
+        else:
+            covered_user_request = await _load_covered_user_request(
+                db,
+                session_id=session_id,
+                uid=uid,
+                message_id=covered_user_message_id,
+            )
     todo_snapshot = None
     watch_snapshot = None
     if isinstance(db, AsyncSession) and isinstance(profile.id, int) and not isinstance(profile.id, bool) and profile.id > 0:
@@ -505,16 +599,10 @@ async def _ensure_context_summary(
         summary_content: str | None = candidate
         if fixed_snapshot:
             summary_content = f"{summary_content}\n\n{fixed_snapshot}" if summary_content else fixed_snapshot
-        if boundary is not None and boundary.trigger_mode == ContextSummaryTriggerMode.TOOL_RESULT:
-            return append_covered_user_message(
-                summary_content,
-                message_id=boundary.covered_user_message_id,
-                content=boundary.covered_user_message_content,
-            )
         return append_covered_user_message(
             summary_content,
-            message_id=existing_user_message.message_id if existing_user_message is not None else None,
-            content=existing_user_message.content if existing_user_message is not None else None,
+            message_id=covered_user_message_id,
+            content=covered_user_message_content,
         )
 
     def measure_final_request_tokens(candidate: str) -> int:
@@ -524,6 +612,7 @@ async def _ensure_context_summary(
             candidate_summary_message = ContextSummaryState(
                 content=summary_content,
                 message_id=candidate_message_id,
+                covered_user_request=covered_user_request,
             ).as_message()
             fixed_system_messages = [message for message in fixed_request_messages if message.role == MessageRole.SYSTEM]
             fixed_non_system_messages = [message for message in fixed_request_messages if message.role != MessageRole.SYSTEM]
@@ -684,6 +773,7 @@ async def _ensure_context_summary(
         message_id=target_message_id,
         revision=state.revision + 1,
         content_revision=state.content_revision,
+        covered_user_request=covered_user_request,
     )
 
 
@@ -705,6 +795,7 @@ async def ensure_context_summary(
     trigger_mode: ContextSummaryTriggerMode | None = None,
     fixed_upper_message_id: int | None = None,
     fixed_request_messages: list[InternalMessage] | None = None,
+    summary_source_messages: Sequence[InternalMessage] = (),
     confirmed_input_tokens: int | None = None,
     model_id: str | None = None,
     protocol: str | None = None,
@@ -732,6 +823,7 @@ async def ensure_context_summary(
             trigger_mode=trigger_mode,
             fixed_upper_message_id=fixed_upper_message_id,
             fixed_request_messages=fixed_request_messages,
+            summary_source_messages=summary_source_messages,
             confirmed_input_tokens=confirmed_input_tokens,
             model_id=model_id,
             protocol=protocol,

@@ -413,10 +413,8 @@ async def process_single_tool(
     allowed_knowledge_base_ids: list[int] | None = None,
     active_tasks: set[asyncio.Task] | None = None,
     context_window_k: int = 4,
-    tool_call_count: int = 1,
     allow_background_submission: bool = True,
     *,
-    tool_result_round_budget_tokens: int | None = None,
     model_id: str | None = None,
     protocol: str | None = None,
     context_summary_boundary_message_id: int | None = None,
@@ -567,11 +565,7 @@ async def process_single_tool(
     tool_msg.tool_execution_status = get_tool_execution_status(tool_msg)
     is_recall_tool = tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME or (tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME and args.get("operation") == "recall")
     if not is_recall_tool and get_queued_background_task_id(tool_msg.content) is None and get_queued_child_work_id(tool_msg.content) is None:
-        if tool_result_round_budget_tokens is None:
-            tool_result_round_budget_tokens = max(1, (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2)
-        else:
-            tool_result_round_budget_tokens = max(1, tool_result_round_budget_tokens)
-        tool_result_budget_tokens = max(1, tool_result_round_budget_tokens // max(1, tool_call_count))
+        tool_result_budget_tokens = max(1, (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2)
 
         truncation_stats = await asyncio.to_thread(
             truncate_tool_messages_for_budget,

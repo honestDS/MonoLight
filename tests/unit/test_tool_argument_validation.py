@@ -6,12 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.constants import (
-    CONTEXT_WINDOW_TOKENS_PER_K,
-    ERR_TERMINAL_PTY_DIMENSIONS_INVALID,
-    ERR_TERMINAL_PTY_INPUT_INVALID,
-    ERR_TOOL_NOT_ENABLED,
-)
+from app.core.constants import ERR_TERMINAL_PTY_DIMENSIONS_INVALID, ERR_TERMINAL_PTY_INPUT_INVALID, ERR_TOOL_NOT_ENABLED
 from app.core.i18n import get_current_locale, set_current_locale, t
 from app.core.i18n.context import reset_current_locale
 from app.core.tools import (
@@ -23,6 +18,7 @@ from app.core.tools import (
     get_tool_required_parameters,
 )
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.profile import Profile, ProfileConfig
 
 
@@ -32,31 +28,32 @@ def test_get_tool_required_parameters_reads_registered_schema():
 
 
 @pytest.mark.asyncio
-async def test_process_single_tool_splits_explicit_round_result_budget_across_parallel_calls(monkeypatch):
+@pytest.mark.parametrize("context_window_k", [1, 8])
+async def test_process_single_tool_truncates_large_result_to_half_context_window(monkeypatch, tmp_path, context_window_k):
     cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
     profile = Profile(id=1, uid="user-1", name="profile", configs=cfg.model_dump(mode="json"))
     tool_call = SimpleNamespace(
-        id="call-1",
+        id="call-large-budget",
         name="execute_shell",
-        arguments={"command": "echo ok", "execution_mode": "interactive"},
+        arguments={"command": "echo large", "execution_mode": "interactive"},
     )
-    captured_budget_tokens: list[int] = []
+    full_result = json.dumps(
+        {"tool_call_id": tool_call.id, "output": "known tool output " * 20_000},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
     class FakeExecutor:
         def __init__(self, **_kwargs):
             pass
 
         async def execute(self, **_kwargs):
-            return "tool output"
-
-    def capture_truncation(*, budget_tokens, **_kwargs):
-        captured_budget_tokens.append(budget_tokens)
-        return SimpleNamespace(truncated_count=0)
+            return full_result
 
     monkeypatch.setitem(process_single_tool_module.TOOL_EXECUTOR_MAP, "execute_shell", FakeExecutor)
-    monkeypatch.setattr(process_single_tool_module, "truncate_tool_messages_for_budget", capture_truncation)
+    monkeypatch.setattr(process_single_tool_module, "get_user_temp_dir", lambda _root, _uid: tmp_path)
 
-    await process_single_tool_module.process_single_tool(
+    result = await process_single_tool_module.process_single_tool(
         tool_call,
         db=SimpleNamespace(),
         profile=profile,
@@ -66,54 +63,17 @@ async def test_process_single_tool_splits_explicit_round_result_budget_across_pa
         session_id="session-1",
         turn=1,
         uid="user-1",
-        context_window_k=8,
-        tool_call_count=4,
-        tool_result_round_budget_tokens=12_000,
+        context_window_k=context_window_k,
     )
 
-    assert captured_budget_tokens == [3_000]
-
-
-@pytest.mark.asyncio
-async def test_process_single_tool_keeps_half_context_fallback_when_round_budget_is_not_supplied(monkeypatch):
-    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
-    profile = Profile(id=1, uid="user-1", name="profile", configs=cfg.model_dump(mode="json"))
-    tool_call = SimpleNamespace(
-        id="call-1",
-        name="execute_shell",
-        arguments={"command": "echo ok", "execution_mode": "interactive"},
-    )
-    captured_budget_tokens: list[int] = []
-
-    class FakeExecutor:
-        def __init__(self, **_kwargs):
-            pass
-
-        async def execute(self, **_kwargs):
-            return "tool output"
-
-    def capture_truncation(*, budget_tokens, **_kwargs):
-        captured_budget_tokens.append(budget_tokens)
-        return SimpleNamespace(truncated_count=0)
-
-    monkeypatch.setitem(process_single_tool_module.TOOL_EXECUTOR_MAP, "execute_shell", FakeExecutor)
-    monkeypatch.setattr(process_single_tool_module, "truncate_tool_messages_for_budget", capture_truncation)
-
-    await process_single_tool_module.process_single_tool(
-        tool_call,
-        db=SimpleNamespace(),
-        profile=profile,
-        cfg=cfg,
-        messages=[],
-        username="user",
-        session_id="session-1",
-        turn=1,
-        uid="user-1",
-        context_window_k=8,
-        tool_call_count=4,
-    )
-
-    assert captured_budget_tokens == [(8 * CONTEXT_WINDOW_TOKENS_PER_K) // 2 // 4]
+    payload = json.loads(result.content)
+    full_result_path = Path(payload["full_result_path"])
+    assert result.tool_call_id == tool_call.id
+    assert payload["tool_call_id"] == tool_call.id
+    assert payload["full_result_saved"] is True
+    assert payload["original_chars"] == len(full_result)
+    assert full_result_path.read_text(encoding="utf-8") == full_result
+    assert estimate_tokens(result.content) <= context_window_k * 1000 // 2
 
 
 @pytest.mark.asyncio
@@ -149,8 +109,6 @@ async def test_process_single_tool_spills_large_result_and_returns_absolute_path
         turn=1,
         uid="user-1",
         context_window_k=1,
-        tool_call_count=1,
-        tool_result_round_budget_tokens=100,
     )
 
     payload = json.loads(result.content)

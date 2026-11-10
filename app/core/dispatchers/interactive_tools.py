@@ -29,7 +29,6 @@ from app.core.utils.dispatcher.append_new_user_messages import append_new_user_m
 from app.core.utils.dispatcher.external_work import build_terminal_wait_response
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
 from app.core.utils.dispatcher.helpers import dump_output_history, extract_files_to_user
-from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.dispatcher.process_single_tool import (
     get_handed_off_terminal_session_id,
     get_queued_background_task_id,
@@ -42,11 +41,9 @@ from app.core.utils.dispatcher.session_todo_snapshot import (
     parse_session_todo_snapshot,
     persist_session_todo_snapshot_on_tool_results,
 )
-from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
-from app.providers.llm.client import LLMClient
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 from .interactive_helpers import (
@@ -63,34 +60,6 @@ __all__ = [
     "AuditExecutionStatePersistenceError",
     "handle_interactive_tool_round",
 ]
-
-
-def _resolve_tool_result_required_input_tokens(
-    state: InteractiveDispatchState,
-    ai_msg: InternalMessage,
-) -> int | None:
-    metadata = state.latest_llm_request_metadata
-    model_id = state.model_entry["model_id"]
-    protocol = resolve_model_protocol(state.model_entry)
-    if isinstance(metadata, dict) and metadata.get("input_tokens_source") == "provider":
-        input_tokens = metadata.get("input_tokens")
-        if isinstance(input_tokens, int) and not isinstance(input_tokens, bool) and input_tokens > 0:
-            incremental_tokens = LLMClient.estimate_request_input_tokens_locally(
-                model_id=model_id,
-                messages=[ai_msg],
-                tools=None,
-                protocol=protocol,
-                channel_id=getattr(state.chat_channel_obj, "id", None),
-            )
-            return input_tokens + max(0, incremental_tokens)
-
-    return LLMClient.estimate_request_input_tokens_locally(
-        model_id=model_id,
-        messages=materialize_user_environment_prompts(state.messages),
-        tools=state.tools,
-        protocol=protocol,
-        channel_id=getattr(state.chat_channel_obj, "id", None),
-    )
 
 
 class AuditExecutionStatePersistenceError(ServerException):
@@ -603,15 +572,6 @@ async def handle_interactive_tool_round(
     # 执行状态未知并交给模型核实，而不会重新执行原工具。
     await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
 
-    tool_result_round_budget_tokens = calculate_tool_result_round_budget_tokens(
-        messages=materialize_user_environment_prompts(state.messages),
-        context_window_k=state.chat_params["context_window_k"],
-        max_tokens=state.chat_params["max_tokens"],
-        tools=state.tools,
-        required_input_tokens_override=_resolve_tool_result_required_input_tokens(state, ai_msg),
-        model_id=state.model_entry["model_id"],
-        protocol=resolve_model_protocol(state.model_entry),
-    )
     parallel_tool_context = _ParallelToolExecutionContext(
         semaphore=asyncio.Semaphore(state.cfg.tool.executor_max_workers),
         active_tasks=state.active_tasks,
@@ -624,8 +584,6 @@ async def handle_interactive_tool_round(
         uid=state.uid,
         allowed_knowledge_base_ids=state.allowed_knowledge_base_ids,
         context_window_k=state.chat_params["context_window_k"],
-        tool_call_count=len(executable_tool_calls),
-        tool_result_round_budget_tokens=tool_result_round_budget_tokens,
         model_id=state.model_entry["model_id"],
         protocol=resolve_model_protocol(state.model_entry),
         tool_schemas=state.tools,

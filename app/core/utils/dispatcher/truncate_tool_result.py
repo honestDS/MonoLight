@@ -13,7 +13,6 @@ from app.core.constants import (
 )
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.utils.context_budget import build_context_request_budget, measure_context_request_usage
 from app.core.utils.tokenizer import resolve_token_encoding_name
 from app.models.message import InternalMessage
 
@@ -418,42 +417,6 @@ def _build_spilled_tool_result_content(
         else:
             high = preview_chars - 1
     return best_content, best_tokens, best_preview_chars
-
-
-def calculate_tool_result_round_budget_tokens(
-    *,
-    messages: list[InternalMessage],
-    context_window_k: int,
-    max_tokens: int,
-    tools: list[dict] | None,
-    required_input_tokens_override: int | None = None,
-    model_id: str | None = None,
-    protocol: str | None = None,
-) -> int:
-    if isinstance(required_input_tokens_override, int) and not isinstance(required_input_tokens_override, bool) and required_input_tokens_override >= 0:
-        budget = build_context_request_budget(
-            context_window_k=context_window_k,
-            max_tokens=max_tokens,
-            model_id=model_id,
-            protocol=protocol,
-        )
-        required_input_tokens = required_input_tokens_override
-    else:
-        usage = measure_context_request_usage(
-            messages=messages,
-            context_window_k=context_window_k,
-            max_tokens=max_tokens,
-            tools=tools,
-            model_id=model_id,
-            protocol=protocol,
-        )
-        budget = usage.budget
-        required_input_tokens = usage.required_input_tokens
-
-    hard_input_limit = budget.context_window_tokens - budget.output_tokens - budget.safety_margin_tokens
-    remaining_input_tokens = max(hard_input_limit - required_input_tokens, 0)
-    # 工具结果最多使用当前剩余上下文的一半，给模型下一轮继续分析、缩小查询范围或再次调用工具预留空间。
-    return max(1, remaining_input_tokens // 2)
 
 
 def _estimate_tokens_by_chars(text: str) -> int:

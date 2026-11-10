@@ -44,7 +44,6 @@ from app.core.session_reply_queue.manager_common import resolve_work_tool_workfl
 from app.core.tools import get_tools_for_profile
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.background_task_result import serialize_execution_summary
-from app.core.utils.context_messages import message_token_text
 from app.core.utils.dispatcher.external_work import build_terminal_wait_response
 from app.core.utils.dispatcher.frozen_context import load_frozen_context_messages, serialize_frozen_context_messages
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history
@@ -58,9 +57,7 @@ from app.core.utils.dispatcher.process_single_tool import (
 )
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
-from app.core.utils.dispatcher.truncate_tool_result import calculate_tool_result_round_budget_tokens
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
-from app.core.utils.tokenizer import estimate_tokens
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.provider_usage import ProviderUsageType
@@ -86,41 +83,6 @@ def _resolve_confirmed_tool_model_scope(session) -> tuple[str | None, str | None
     return (
         model_id if isinstance(model_id, str) and model_id else None,
         protocol if isinstance(protocol, str) and protocol else None,
-    )
-
-
-def _resolve_confirmed_tool_result_round_budget_tokens(
-    session,
-    confirmed_message: InternalMessage,
-    *,
-    tools: list[dict],
-) -> int | None:
-    metadata = getattr(session, "llm_request_metadata", None)
-    if not isinstance(metadata, dict) or metadata.get("input_tokens_source") != "provider":
-        return None
-
-    input_tokens = metadata.get("input_tokens")
-    max_output_tokens = metadata.get("max_output_tokens")
-    if not isinstance(input_tokens, int) or isinstance(input_tokens, bool) or input_tokens <= 0:
-        return None
-    if not isinstance(max_output_tokens, int) or isinstance(max_output_tokens, bool) or max_output_tokens < 0:
-        return None
-
-    normalized_model_id, normalized_protocol = _resolve_confirmed_tool_model_scope(session)
-    incremental_tokens = estimate_tokens(
-        message_token_text(confirmed_message),
-        model_id=normalized_model_id,
-        protocol=normalized_protocol,
-    )
-    required_input_tokens = input_tokens + max(0, incremental_tokens)
-    return calculate_tool_result_round_budget_tokens(
-        messages=[confirmed_message],
-        context_window_k=_resolve_confirmed_tool_context_window_k(session),
-        max_tokens=max_output_tokens,
-        tools=tools,
-        required_input_tokens_override=required_input_tokens,
-        model_id=normalized_model_id,
-        protocol=normalized_protocol,
     )
 
 
@@ -512,11 +474,6 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
     detail_by_original_id = {detail.original_tool_call_id: detail for detail in details}
     confirmed_calls = [InternalToolCall(id=f"call_{uuid.uuid4().hex}", name=item.name, arguments=dict(item.arguments or {})) for item in source_tool_calls]
     confirmed_message = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=confirmed_calls)
-    confirmed_tool_result_round_budget_tokens = _resolve_confirmed_tool_result_round_budget_tokens(
-        session,
-        confirmed_message,
-        tools=_tools,
-    )
     messages = [confirmed_message]
     turn_messages = [confirmed_message]
     replacement_state = _ConfirmedToolResultReplacementState(
@@ -616,9 +573,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     work.uid,
                     allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                     context_window_k=confirmed_tool_context_window_k,
-                    tool_call_count=len(confirmed_calls),
                     allow_background_submission=allow_background_submission,
-                    tool_result_round_budget_tokens=confirmed_tool_result_round_budget_tokens,
                     model_id=confirmed_tool_model_id,
                     protocol=confirmed_tool_protocol,
                     execution_scope=record.execution_scope,
