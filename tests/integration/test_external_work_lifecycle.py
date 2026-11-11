@@ -1031,6 +1031,7 @@ async def test_parallel_external_resume_is_idempotent_and_persists_protocol_even
     assert len(tool_end_events) == 1
     assert tool_end_events[0].event["tool_call_id"] == "call-1"
     assert tool_end_events[0].event["result"] == "completed-once"
+    assert tool_end_events[0].event["work_sequence_no"] == case.initial_sequence_no
 
     ready_events = [event for event in snapshot["session_events"] if event.event.get("type") == "work_ready"]
     assert len(ready_events) == 1

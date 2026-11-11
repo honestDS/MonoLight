@@ -457,6 +457,7 @@ async def prepare_terminal_auto_watch_resume(
                         event={
                             "type": "tool_end",
                             "work_id": work.id,
+                            "work_sequence_no": work.sequence_no,
                             "session_id": work.session_id,
                             "event_sequence_no": sequence_no,
                             "tool_call_id": slot.get("tool_call_id"),

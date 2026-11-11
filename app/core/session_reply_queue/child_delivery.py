@@ -25,7 +25,7 @@ from app.core.session_reply_queue.child_result import (
 )
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
-from app.models.session_reply_work_item import SessionReplyWorkStatus
+from app.models.session_reply_work_item import SessionReplyWorkCategory, SessionReplyWorkStatus
 from app.models.subagent import SubagentBoardPost
 
 __all__ = [
@@ -668,6 +668,7 @@ async def resume_child_work_for_parent(
         else:
             state.pop("subagent_board_cursors", None)
 
+        was_board_review_pending = state.get("subagent_board_review_pending") is True
         state["subagent_board_review_pending"] = True
         checkpoint.pop("reply_skipped", None)
 
@@ -679,6 +680,8 @@ async def resume_child_work_for_parent(
             ):
                 await db.rollback()
                 return False
+            if not was_board_review_pending and work.work_category == SessionReplyWorkCategory.FOREGROUND:
+                await reply_work_crud.defer_ready_board_reviews(db, uid=parent.uid, session_id=parent.session_id)
             await reply_work_crud.save_checkpoint(db, parent_work_id, checkpoint)
             await db.commit()
             return False

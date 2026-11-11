@@ -545,7 +545,7 @@ async def _resume_waiting(work_id: int, uid: str, session_id: str, identity: str
                         db,
                         work_id=work.id,
                         sequence_no=sequence_no,
-                        event={"type": "tool_end", "work_id": work.id, "session_id": session_id, "event_sequence_no": sequence_no, "tool_call_id": original_call_id, "name": slot[2], "result": result_text, "response_id": slot[4]},
+                        event={"type": "tool_end", "work_id": work.id, "work_sequence_no": work.sequence_no, "session_id": session_id, "event_sequence_no": sequence_no, "tool_call_id": original_call_id, "name": slot[2], "result": result_text, "response_id": slot[4]},
                         commit=False,
                     )
 

@@ -82,6 +82,7 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
         first_parent_reply = "first parent resumed"
         second_parent_reply = "second parent resumed"
         new_user_message = "回答我就好，不用等待 third-parent-user-unique-marker"
+        new_user_reply = "new user independent reply"
         parent_tool_call_ids: dict[int, str] = {}
 
         runtime.outputs.append(
@@ -418,10 +419,15 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
                 )
                 assert third_parent_accepted.status_code == 200
                 third_parent_data = third_parent_accepted.json()["data"]
-                assert third_parent_data["submission_status"] == "queued"
+                assert third_parent_data["submission_status"] == "accepted"
                 third_parent_work_id = third_parent_data["work_id"]
                 assert isinstance(third_parent_work_id, int)
                 assert third_parent_work_id not in {first_parent_work_id, second_parent_work_id}
+
+                runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=new_user_reply))
+                third_parent_done = await asyncio.wait_for(runtime.run_next(), timeout=10)
+                assert third_parent_done is not None and third_parent_done.id == third_parent_work_id
+                assert third_parent_done.status == SessionReplyWorkStatus.SUCCEEDED, third_parent_done.error
 
             runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=second_parent_reply))
             second_parent_done = await asyncio.wait_for(runtime.run_next(), timeout=10)
@@ -429,8 +435,11 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
             assert second_parent_done.status == SessionReplyWorkStatus.SUCCEEDED, second_parent_done.error
 
             parent_provider_payloads = runtime.provider_payloads[parent_provider_start:]
-            assert len(parent_provider_payloads) == 2
-            first_parent_payload, second_parent_payload = parent_provider_payloads
+            assert len(parent_provider_payloads) == 2 + int(with_new_user_message)
+            if with_new_user_message:
+                first_parent_payload, new_user_payload, second_parent_payload = parent_provider_payloads
+            else:
+                first_parent_payload, second_parent_payload = parent_provider_payloads
 
             def provider_items(payload: dict) -> list[dict]:
                 items = payload.get("messages") or payload.get("input")
@@ -460,6 +469,10 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
             assert first_parent_reply not in first_parent_dump
             assert first_parent_reply in second_parent_dump
             assert new_user_message not in first_parent_dump
+            if with_new_user_message:
+                new_user_dump = json.dumps(new_user_payload, ensure_ascii=False)
+                assert new_user_message in new_user_dump
+                assert new_user_reply in second_parent_dump
             assert second_parent_dump.count(new_user_message) == (1 if with_new_user_message else 0)
 
             second_parent_call_id = parent_tool_call_ids[second_parent_work_id]
@@ -492,8 +505,13 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
                     assert third_parent_work_id is not None
                     third_parent = await db.get(SessionReplyWorkItem, third_parent_work_id)
                     assert third_parent is not None
-                    assert third_parent.status == SessionReplyWorkStatus.MERGED
-                    assert third_parent.merged_into_id == second_parent_work_id
+                    assert third_parent.status == SessionReplyWorkStatus.SUCCEEDED
+                    assert third_parent.merged_into_id is None
+                    assert third_parent.result_message_id is not None
+                    third_result_message = await db.get(Message, third_parent.result_message_id)
+                    assert third_result_message is not None
+                    assert third_result_message.type == MessageType.TEXT
+                    assert third_result_message.content == new_user_reply
                     third_message = await db.get(Message, int(third_parent.source_id))
                     assert third_message is not None
                     assert third_message.content == new_user_message

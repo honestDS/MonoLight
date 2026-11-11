@@ -29,6 +29,7 @@ from app.core.constants import (
     TERMINAL_WATCH_TOOL_NAME,
 )
 from app.core.crud.session.external_work import external_work_crud
+from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.dispatchers.context import DispatchContext
@@ -3437,6 +3438,8 @@ async def test_terminal_closing_subscription_creates_auto_watch_and_delivers_pro
 
     async with terminal_auto_watch_database() as db:
         work = await _create_claimed_reply_work(db, worker_id=worker_id)
+        work.execution_state = {**work.execution_state, "show_tool_calls": True}
+        original_sequence_no = work.sequence_no
         terminal_session = await db.get(TerminalSession, TERMINAL_SESSION_ID)
         assert terminal_session is not None
         terminal_session.status = TerminalSessionStatus.CLOSING
@@ -3532,6 +3535,17 @@ async def test_terminal_closing_subscription_creates_auto_watch_and_delivers_pro
         assert claimed_work.id == work_id
         db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, resume_worker_id)
         assert await prepare_terminal_auto_watch_resume(db, claimed_work, resume_worker_id)
+        stream_events = await session_reply_stream_event_crud.list_after_sequence(
+            db,
+            work_id=work_id,
+            after_sequence_no=0,
+        )
+        tool_end_events = [event for event in stream_events if event.event.get("type") == "tool_end"]
+        assert len(tool_end_events) == 1
+        tool_end = tool_end_events[0]
+        assert tool_end.event["tool_call_id"] == tool_call.id
+        assert tool_end.event["work_sequence_no"] == claimed_work.sequence_no
+        assert claimed_work.sequence_no > original_sequence_no
         checkpoint = dict(await session_reply_work_item_crud.get_checkpoint(db, claimed_work.id) or {})
         pending_resume_ids = checkpoint.get("pending_resume_message_ids")
         assert isinstance(pending_resume_ids, list) and len(pending_resume_ids) == 1

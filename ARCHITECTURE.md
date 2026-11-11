@@ -227,7 +227,7 @@ app/core/background_tasks/
 ├── policy.py               # 图像生成、终端观察与非交互 Shell 后台策略
 ├── recovery.py             # 后台任务恢复支持与启动检查
 ├── reply_trigger.py        # 任务回复协调
-├── result_delivery.py      # 外部与后台执行结果交付
+├── result_delivery.py      # 外部与后台结果交付、看板复核的结果归属
 ├── runner.py               # 后台任务执行组件
 ├── scheduler.py            # 间隔/Cron 调度、会话配置解析与独立任务入队
 ├── schemas.py              # 后台任务内部数据结构
@@ -373,24 +373,32 @@ app/core/session_reply_queue/
 ├── executor_audit.py       # 审计执行绑定、未知终态与文件快照校验
 ├── executor_common.py      # 工作身份、去重键与响应事件辅助
 ├── executor_confirmed.py   # 已确认工具执行与原工作上下文继承
-├── executor_interactive.py # 交互回复、独立工作隔离与流事件持久化
-├── executor_lifecycle.py   # 工作执行、失败、重试与租约生命周期
+├── executor_interactive.py # 交互回复执行、主/独立工作隔离与检查点/流事件持久化
+├── executor_lifecycle.py   # 工作执行、失败、重试、租约生命周期与复核静默等待协调
 ├── executor_metadata.py    # 请求用量记录、跨工作汇总与主对话信息隔离
 ├── executor_replies.py     # 前台回复与冻结上下文的后台续接
 ├── executor_resume.py      # 交互工作 checkpoint 工具结果恢复
-├── child_checkpoint.py     # 父工具中断后的子代理等待恢复
-├── child_delivery.py       # 子代理结果向父工作交付
-├── child_lifecycle.py      # 子代理轮次完成、确认与晚到消息协调
+├── child_checkpoint.py     # 父工作中断后的子代理工具结果与执行检查点恢复
+├── child_delivery.py       # 子代理阶段通知、结束结果向父工作交付与原回复唤起
+├── child_lifecycle.py      # 子代理轮次完成、等待确认、晚到消息协调与阶段结束记录持久化
 ├── child_recovery.py       # 未交付子代理结果的补偿
 ├── child_result.py         # 子代理状态结果投影
-├── child_work.py           # 子代理创建、查询、消息与取消协调
+├── child_work.py           # 子代理派发、续接/纠偏、列表/定向查询、取消与看板读写协调
 ├── manager.py              # 回复工作管理组合入口
 ├── manager_common.py       # 请求标识、事件与失败处理辅助
 ├── manager_enqueue.py      # 回复工作入队
 ├── manager_freeze.py       # 用户输入冻结与工作边界确定
-├── manager_result.py       # 工作结果等待与读取
+├── manager_result.py       # 工作状态/结果读取、流恢复与队列顺序交付
 └── manager_submission.py   # 用户消息提交、确认判定与工作上下文继承
 ```
+
+#### 子代理协作边界
+
+- 工具层提供子代理派发、续接/纠偏与取消、阶段上报及按子代理读取，以及任务列表与定向查询；队列层负责工作编排和交付。
+- 父回复的派发结果与恢复检查点由队列持久化，等待态不占用前台执行；阶段更新或任务结束唤起原回复。
+- 失败、取消和正常结束由框架补写结果；进行中的复核可静默返回等待。
+- 同会话中未开始的复核让位于新用户消息；已开始的复核与排队用户输入分开，流按队列顺序交付。
+- 看板原始记录由 `SubagentBoardPost` 独立持久化，不随主对话总结改写；阶段更新通知只携带阶段标记，按需读取的看板正文可作为普通工具结果进入主对话。
 
 ### 交互终端：`app/core/terminal/`
 
@@ -486,12 +494,12 @@ app/core/crud/
 ├── session/
 │   ├── message.py              # 主会话与独立工作消息读写、历史隔离与专属消息清理
 │   ├── session.py              # 会话设置、上下文状态与累计用量访问
-│   ├── subagent.py             # 子代理身份、轮次、工具关联、交付状态与空闲数据清理
+│   ├── subagent.py             # 子代理身份、轮次、工具关联、看板阶段记录、交付状态与空闲数据清理
 │   ├── event.py                # 会话事件数据访问
 │   ├── external_work.py        # 外部异步操作关联数据访问
 │   ├── todo.py                 # 会话 Todo 计划数据访问
 │   ├── reply_stream_event.py   # 回复流事件数据访问
-│   ├── reply_work_item.py      # 工作认领、原任务分类和数据库两层并发限制持久化、独立消息归属与恢复状态访问
+│   ├── reply_work_item.py      # 回复工作认领、父子任务分类、队列序号与并发限制、检查点/恢复状态持久化及复核排序
 │   └── terminal_watch.py       # 终端观察通知数据访问
 ├── system/
 │   ├── log.py                  # 系统日志数据访问
@@ -576,7 +584,7 @@ app/core/tools/
 ├── image_generation.py     # 图像生成工具
 ├── knowledge_base_query.py # 知识库查询与托管知识可信元数据
 ├── longterm_memory.py      # 统一记忆工具：个人记忆与托管知识维护
-├── agent_work.py           # AgentWork 与子代理工作工具
+├── agent_work.py           # AgentWork 与子代理派发、纠偏、查询和共享看板工具
 ├── read_text_file.py       # 审计取证用文本读取
 ├── read_multimodal_file.py # 多模态文件读取工具
 ├── scheduled_tasks.py      # 间隔与 Cron 定时任务管理工具
@@ -700,7 +708,7 @@ app/models/
 ├── message_platform.py     # 消息平台模型
 ├── message_platform_outbox.py # 消息发件箱模型
 ├── agent_work.py           # 独立 AgentWork 执行契约与结果目标
-├── subagent.py              # Subagent、SubagentWork 与 SubagentToolCall 持久化模型
+├── subagent.py              # Subagent、SubagentWork、SubagentToolCall 与 SubagentBoardPost 持久化模型
 ├── profile.py              # Profile 模型及独立的对话、总结与辅助渠道配置
 ├── prompt.py               # Prompt 模型
 ├── provider_usage.py       # 短期请求明细与长期每日汇总

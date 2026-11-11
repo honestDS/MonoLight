@@ -166,6 +166,7 @@ class _WebSocketChatState:
     stream_wakeup: asyncio.Event = field(default_factory=asyncio.Event)
     history_message_id: int = 0
     after_work_sequence_no: int = 0
+    delivered_event_sequence_by_work_id: dict[int, int] = field(default_factory=dict)
     current_session_id: str | None = None
     current_owner_uid: str | None = None
     notifier_queue: asyncio.Queue[dict] = field(default_factory=asyncio.Queue)
@@ -210,6 +211,7 @@ async def _run_websocket_resume(
                 history_message_id=state.history_message_id,
                 after_work_sequence_no=state.after_work_sequence_no,
                 interactive_only=True,
+                delivered_event_sequence_by_work_id=state.delivered_event_sequence_by_work_id,
             ):
                 if session_id != state.current_session_id:
                     continue
@@ -987,6 +989,7 @@ async def chat_websocket(
                 old_session_id = state.current_session_id
                 old_owner_uid = state.current_owner_uid
                 await _cancel_websocket_stream_task(state)
+                state.delivered_event_sequence_by_work_id.clear()
                 if old_session_id and old_owner_uid:
                     await session_notifier.unregister(old_owner_uid, old_session_id, state.notifier_queue)
 
@@ -1118,6 +1121,7 @@ async def chat_websocket(
                     await session_notifier.unregister(old_owner_uid, old_session_id, state.notifier_queue)
                 state.history_message_id = history_message_id
                 state.after_work_sequence_no = 0
+                state.delivered_event_sequence_by_work_id.clear()
                 state.stream_wakeup.clear()
                 if old_session_id is not None:
                     logger.bind(uid=uid, old_session=old_session_id, new_session=session_id).info(t("LOG_CHAT_WS_SESSION_SWITCHED"))

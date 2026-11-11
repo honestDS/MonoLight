@@ -62,6 +62,10 @@ def _work_category_expression(table: Any) -> Any:
     )
 
 
+def _is_subagent_board_review() -> Any:
+    return SessionReplyWorkItem.execution_state["subagent_board_review_pending"].as_boolean().is_(True)
+
+
 @dataclass(frozen=True)
 class SessionReplyCleanupResult:
     work_items: int = 0
@@ -407,6 +411,45 @@ class CRUDSessionReplyWorkItem:
         result = await db.execute(statement)
         return int(result.scalar_one()) - 1
 
+    async def defer_ready_board_reviews(self, db: AsyncSession, *, uid: str, session_id: str) -> None:
+        pending_user_input = SessionReplyWorkItem.__table__.alias("pending_user_input")
+        pending_user_input_category = _work_category_expression(pending_user_input)
+        max_pending_user_input_sequence = (
+            select(func.max(pending_user_input.c.sequence_no))
+            .where(
+                pending_user_input.c.uid == uid,
+                pending_user_input.c.session_id == session_id,
+                pending_user_input.c.work_type == SessionReplyWorkType.FOREGROUND_REPLY,
+                pending_user_input.c.source_type == SessionReplySourceType.USER_MESSAGE,
+                pending_user_input.c.status == SessionReplyWorkStatus.READY_FOR_LLM,
+                pending_user_input.c.input_message_ids.is_(None),
+                pending_user_input_category == SessionReplyWorkCategory.FOREGROUND.value,
+            )
+            .scalar_subquery()
+        )
+        result = await db.execute(
+            select(SessionReplyWorkItem.id)
+            .where(
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.session_id == session_id,
+                SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
+                _work_category_expression(SessionReplyWorkItem.__table__) == SessionReplyWorkCategory.FOREGROUND.value,
+                _is_subagent_board_review(),
+                SessionReplyWorkItem.sequence_no < max_pending_user_input_sequence,
+            )
+            .order_by(SessionReplyWorkItem.sequence_no)
+        )
+        for work_id in result.scalars().all():
+            sequence_no = await self.allocate_sequence_no(db, session_id)
+            await db.execute(
+                update(SessionReplyWorkItem)
+                .where(
+                    SessionReplyWorkItem.id == work_id,
+                    SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
+                )
+                .values(sequence_no=sequence_no, updated_at=get_local_time())
+            )
+
     async def enqueue(
         self,
         db: AsyncSession,
@@ -459,6 +502,8 @@ class CRUDSessionReplyWorkItem:
             )
             result = await db.execute(statement)
             work = result.scalars().first()
+            if work is not None and work_type == SessionReplyWorkType.FOREGROUND_REPLY and source_type == SessionReplySourceType.USER_MESSAGE:
+                await self.defer_ready_board_reviews(db, uid=uid, session_id=session_id)
             if work is None:
                 await savepoint.rollback()
         if work is None:
@@ -1181,6 +1226,7 @@ class CRUDSessionReplyWorkItem:
                 or_(
                     SessionReplyWorkItem.work_type != SessionReplyWorkType.FOREGROUND_REPLY,
                     SessionReplyWorkItem.profile_id != work.profile_id,
+                    _is_subagent_board_review(),
                 ),
             )
             .order_by(SessionReplyWorkItem.sequence_no)

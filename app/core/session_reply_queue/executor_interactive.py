@@ -444,6 +444,7 @@ async def _dispatch_interactive_work(
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
     await ensure_session_reply_work_claim(db, commit=True)
     execution_state = work.execution_state or {}
+    is_subagent_board_review = execution_state.get("subagent_board_review_pending") is True
     scheduled_task_work = await is_scheduled_task_work(db, work)
     if scheduled_task_work:
         request_purpose = ProviderUsageType.SCHEDULED_TASK
@@ -503,7 +504,7 @@ async def _dispatch_interactive_work(
             work=work,
             worker_id=worker_id,
         )
-    elif allow_additional_user_messages:
+    elif allow_additional_user_messages and not is_subagent_board_review:
         additional_user_messages_fetcher = partial(
             _fetch_additional_foreground_user_messages,
             db,
@@ -565,7 +566,7 @@ async def _dispatch_interactive_work(
             additional_system_prompt = SUBAGENT_EXECUTION_GUIDANCE_PROMPT
         dispatch_kwargs["additional_system_prompt"] = additional_system_prompt
     else:
-        if execution_state.get("subagent_board_review_pending") is True:
+        if is_subagent_board_review:
             if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
                 additional_system_prompt = f"{additional_system_prompt.strip()}\n\n{SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT}"
             else:

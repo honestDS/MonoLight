@@ -239,6 +239,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
 
         latest_execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
         state = {**latest_execution_state, "response": identified_response}
+        state.pop("subagent_board_review_pending", None)
         updated = await session_reply_work_item_crud.update_claimed(
             db,
             work_id=work_id,

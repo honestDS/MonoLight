@@ -52,6 +52,10 @@ def _active(status: Any) -> bool:
     }
 
 
+def _is_other_active_board_review(work: Any, current: Any) -> bool:
+    return work.id != current.id and _active(work.status) and _state(work).get("subagent_board_review_pending") is True
+
+
 async def _same_scope(db: AsyncSession, work: Any, current: Any) -> bool:
     if work.uid != current.uid or work.session_id != current.session_id or work.profile_id != current.profile_id or _state(work).get("actor_uid", work.uid) != _state(current).get("actor_uid", current.uid):
         return False
@@ -298,27 +302,36 @@ async def receive_pending_external_results(
         delivery_contexts: set[int] = set()
         terminal_session_id: str | None = None
         if auto_terminal:
+            blocked_by_board_review = False
+            valid_deliveries: list[tuple[Any, dict[str, Any], Any]] = []
             for raw_work_id, delivery in deliveries.items():
                 if not isinstance(delivery, dict):
                     continue
                 origin = await valid_origin(int(raw_work_id), delivery.get("identity"), True)
                 if origin is not None:
-                    if origin.id not in by_work_id:
-                        origin_checkpoint = await session_reply_work_item_crud.get_checkpoint_metadata(db, origin.id)
-                        origin_context = {
-                            "work": origin,
-                            "state": _state(origin),
-                            "checkpoint": origin_checkpoint,
-                            "received": set(),
-                            "auto_sessions": set(),
-                        }
-                        contexts.append(origin_context)
-                        by_work_id[origin.id] = origin_context
-                    delivery_contexts.add(origin.id)
-                    if delivery.get("consumed") is not True:
-                        valid_delivery_ids.append(str(raw_work_id))
-                    if source is None:
-                        source, context = origin, by_work_id.get(origin.id)
+                    if _is_other_active_board_review(origin, current) and delivery.get("consumed") is not True:
+                        blocked_by_board_review = True
+                        break
+                    valid_deliveries.append((raw_work_id, delivery, origin))
+            if blocked_by_board_review:
+                continue
+            for raw_work_id, delivery, origin in valid_deliveries:
+                if origin.id not in by_work_id:
+                    origin_checkpoint = await session_reply_work_item_crud.get_checkpoint_metadata(db, origin.id)
+                    origin_context = {
+                        "work": origin,
+                        "state": _state(origin),
+                        "checkpoint": origin_checkpoint,
+                        "received": set(),
+                        "auto_sessions": set(),
+                    }
+                    contexts.append(origin_context)
+                    by_work_id[origin.id] = origin_context
+                delivery_contexts.add(origin.id)
+                if delivery.get("consumed") is not True:
+                    valid_delivery_ids.append(str(raw_work_id))
+                if source is None:
+                    source, context = origin, by_work_id.get(origin.id)
             if not valid_delivery_ids and marker_id is None:
                 continue
         elif source is None and extra.get("origin_work_id") is not None:
@@ -334,6 +347,10 @@ async def receive_pending_external_results(
                 source = origin
                 context = by_work_id.get(origin.id)
         if source is None and task.auto_reply is not True and marker_id is None:
+            continue
+
+        # Board review results stay with their own wake/retry chain.
+        if not auto_terminal and source is not None and _is_other_active_board_review(source, current):
             continue
 
         if marker_id is not None and (not isinstance(payload, dict) or task.id not in _payload_ids(payload)):

@@ -1,22 +1,27 @@
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
 
+import app.core.background_tasks.runner as background_runner_module
 import app.core.session_reply_queue.child_work as child_work_module
+from app.api.v1 import chat as chat_api
 from app.core.constants import AGENT_WORK_TOOL_NAME, END_SESSION_TOOL_NAME
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.prompts import SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.child_delivery import deliver_child_work_results
 from app.core.session_reply_queue.child_recovery import reconcile_child_work
+from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.dispatcher.process_single_tool import get_tool_execution_status
 from app.core.utils.dispatcher.save_message import save_message
+from app.models.background_task import BackgroundTask, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
+from app.models.session import ChatSession
 from app.models.session_event import SessionEvent
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
@@ -131,7 +136,7 @@ async def _enable_agent_work(runtime) -> None:
         await db.commit()
 
 
-async def _submit(runtime, *, request_id: str, message: str) -> int:
+async def _submit(runtime, *, request_id: str, message: str, expected_status: str = "accepted") -> int:
     response = await runtime.client.post(
         "/api/v1/chat/completions",
         json={
@@ -142,12 +147,32 @@ async def _submit(runtime, *, request_id: str, message: str) -> int:
     )
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["submission_status"] in {"accepted", "queued"}
+    assert data["submission_status"] == expected_status
     return data["work_id"]
 
 
+async def _next_done_event(stream, *, work_id: int, content: str, events: list[dict] | None = None) -> None:
+    async with asyncio.timeout(5):
+        while True:
+            event = await anext(stream)
+            if events is not None:
+                events.append(event)
+            if event.get("type") != "done":
+                continue
+            assert event["work_id"] == work_id
+            assert event["response"]["choices"][0]["message"]["content"] == content
+            return
+
+
 @asynccontextmanager
-async def _create_case(image_chat_runtime, *, protocol: str, child_count: int = 1):
+async def _create_case(
+    image_chat_runtime,
+    *,
+    protocol: str,
+    child_count: int = 1,
+    stream_delivery: bool = False,
+    show_tool_calls: bool = False,
+):
     async with image_chat_runtime(protocol, goal_mode=False) as runtime:
         await _enable_agent_work(runtime)
         create_calls = [
@@ -163,11 +188,25 @@ async def _create_case(image_chat_runtime, *, protocol: str, child_count: int = 
             for index in range(child_count)
         ]
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=create_calls))
+        if show_tool_calls:
+            async with runtime.factory() as db:
+                session = await db.get(ChatSession, runtime.session_id)
+                assert session is not None
+                session.show_tool_calls = True
+                await db.commit()
         origin_work_id = await _submit(
             runtime,
             request_id="inspection-origin-request",
             message="Create independent child tasks, then wait for their results before answering the parent.",
         )
+        if stream_delivery:
+            async with runtime.factory() as db:
+                origin = await db.get(SessionReplyWorkItem, origin_work_id)
+                assert origin is not None
+                execution_state = deepcopy(origin.execution_state)
+                execution_state["stream_requested"] = True
+                origin.execution_state = execution_state
+                await db.commit()
         provider_start = len(runtime.provider_payloads)
         origin_done = await runtime.run_next(independent_only=False)
         assert origin_done is not None
@@ -229,6 +268,171 @@ async def _create_case(image_chat_runtime, *, protocol: str, child_count: int = 
             origin_work_id=origin_work_id,
             children=child_data,
         )
+
+
+@pytest.mark.asyncio
+async def test_websocket_subagent_resume_does_not_replay_delivered_parent_stream_events(image_chat_runtime) -> None:
+    child_final = "inspection-child-final-for-websocket-resume"
+    parent_final = "inspection-parent-final-for-websocket-resume"
+
+    class _Socket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+            self.resume_completes: asyncio.Queue[dict] = asyncio.Queue()
+
+        async def send_json(self, event: dict) -> None:
+            self.sent.append(dict(event))
+            if event.get("type") == "resume_complete":
+                await self.resume_completes.put(dict(event))
+
+    async with _create_case(image_chat_runtime, protocol="OPENAI_RESPONSES", stream_delivery=True, show_tool_calls=True) as case:
+        runtime = case.runtime
+        child = case.children[0]
+        socket = _Socket()
+        state = chat_api._WebSocketChatState(
+            current_session_id=runtime.session_id,
+            current_owner_uid=runtime.uid,
+        )
+        try:
+            chat_api._wake_websocket_stream(socket, state)
+            await asyncio.wait_for(socket.resume_completes.get(), timeout=5)
+
+            first_events = list(socket.sent)
+            first_parent_events = [event for event in first_events if event.get("work_id") == case.origin_work_id]
+            assert any(event.get("type") == "turn_end" for event in first_parent_events)
+            assert any(event.get("type") == "work_suspended" for event in first_parent_events)
+            first_parent_sequences = [event["event_sequence_no"] for event in first_parent_events if "event_sequence_no" in event]
+            assert first_parent_sequences
+            assert first_parent_sequences == sorted(first_parent_sequences)
+
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=child_final))
+            child_done = await asyncio.wait_for(runtime.run_next(independent_only=True), timeout=5)
+            assert child_done is not None
+            assert child_done.id == child["work_id"]
+            assert child_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_final))
+            parent_done = await asyncio.wait_for(runtime.run_next(independent_only=False), timeout=5)
+            assert parent_done is not None
+            assert parent_done.id == case.origin_work_id
+            assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+            second_start = len(socket.sent)
+            chat_api._wake_websocket_stream(socket, state)
+            await asyncio.wait_for(socket.resume_completes.get(), timeout=5)
+            second_events = socket.sent[second_start:]
+            second_parent_events = [event for event in second_events if event.get("work_id") == case.origin_work_id]
+            second_parent_sequences = [event["event_sequence_no"] for event in second_parent_events if "event_sequence_no" in event]
+
+            second_turn_end = next(event for event in second_parent_events if event.get("type") == "turn_end")
+            second_done = next(event for event in second_parent_events if event.get("type") == "done")
+            assert second_turn_end["content"] == parent_final
+            assert second_done["response"]["choices"][0]["message"]["content"] == parent_final
+            assert second_parent_sequences == sorted(second_parent_sequences)
+            assert min(second_parent_sequences) > max(first_parent_sequences)
+        finally:
+            await asyncio.wait_for(chat_api._cancel_websocket_stream_task(state), timeout=5)
+
+
+@pytest.mark.parametrize("board_ready", [False, True], ids=["parent-waiting", "board-ready-unclaimed"])
+@pytest.mark.asyncio
+async def test_user_message_preempts_waiting_or_ready_subagent_parent_reply(
+    image_chat_runtime,
+    board_ready: bool,
+) -> None:
+    user_final = "inspection-user-reply-priority"
+    parent_final = "inspection-parent-reply-after-user-priority"
+    child_final = "inspection-child-reply-priority"
+
+    async with _create_case(image_chat_runtime, protocol="OPENAI_RESPONSES", child_count=1, stream_delivery=board_ready) as case:
+        runtime = case.runtime
+        child = case.children[0]
+        consumed_events: list[dict] = []
+        async with runtime.factory() as db:
+            parent = await db.get(SessionReplyWorkItem, case.origin_work_id)
+            assert parent is not None
+            assert parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+            suspended_sequence_no = parent.sequence_no
+
+        assert suspended_sequence_no is not None
+
+        async def _finish_child() -> None:
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=child_final))
+            async with asyncio.timeout(5):
+                child_done = await runtime.run_next(independent_only=True)
+            assert child_done is not None
+            assert child_done.id == child["work_id"]
+            assert child_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        async with aclosing(
+            session_reply_queue_manager.wait_for_session_stream(
+                uid=runtime.uid,
+                session_id=runtime.session_id,
+                after_work_sequence_no=suspended_sequence_no,
+                interactive_only=True,
+            )
+        ) as session_stream:
+            if board_ready:
+                await _finish_child()
+
+                async with asyncio.timeout(5):
+                    while True:
+                        event = await anext(session_stream)
+                        consumed_events.append(event)
+                        if event.get("type") != "work_suspended":
+                            continue
+                        assert event["work_id"] == case.origin_work_id
+                        assert event["work_sequence_no"] == suspended_sequence_no
+                        break
+
+            async with asyncio.timeout(5):
+                user_work_id = await _submit(
+                    runtime,
+                    request_id=f"subagent-user-priority-{board_ready}",
+                    message="Answer this new user message independently and immediately.",
+                    expected_status="accepted",
+                )
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=user_final))
+            async with asyncio.timeout(5):
+                user_done = await runtime.run_next(independent_only=False)
+            assert user_done is not None
+            assert user_done.id == user_work_id
+            assert user_done.status == SessionReplyWorkStatus.SUCCEEDED
+            await _next_done_event(session_stream, work_id=user_work_id, content=user_final, events=consumed_events)
+
+            if not board_ready:
+                await _finish_child()
+
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_final))
+            async with asyncio.timeout(5):
+                parent_done = await runtime.run_next(independent_only=False)
+            assert parent_done is not None
+            assert parent_done.id == case.origin_work_id
+            assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+            await _next_done_event(session_stream, work_id=case.origin_work_id, content=parent_final, events=consumed_events)
+            async with asyncio.timeout(5):
+                with pytest.raises(StopAsyncIteration):
+                    await anext(session_stream)
+            assert not runtime.outputs
+
+            if board_ready:
+                parent_stream_events = [event for event in consumed_events if event.get("work_id") == case.origin_work_id]
+                parent_event_sequences = [event["event_sequence_no"] for event in parent_stream_events if "event_sequence_no" in event]
+                assert parent_event_sequences == sorted(parent_event_sequences)
+                assert len(parent_event_sequences) == len(set(parent_event_sequences))
+
+                parent_turn_end_indices = [index for index, event in enumerate(consumed_events) if event.get("work_id") == case.origin_work_id and event.get("type") == "turn_end"]
+                assert parent_turn_end_indices
+                assert any(event.get("work_id") == case.origin_work_id and event.get("type") == "turn_end" and event.get("content") == parent_final for event in consumed_events)
+
+                done_events = [event for event in consumed_events if event.get("type") == "done"]
+                assert [event.get("work_id") for event in done_events] == [user_work_id, case.origin_work_id]
+                user_done, parent_done_event = done_events
+                assert user_done["request_ids"] == [f"subagent-user-priority-{board_ready}"]
+                assert parent_done_event["request_ids"] == ["inspection-origin-request"]
+                assert user_done["request_ids"] != parent_done_event["request_ids"]
+                user_done_index = consumed_events.index(user_done)
+                assert user_done_index < parent_turn_end_indices[-1] < consumed_events.index(parent_done_event)
 
 
 @pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"], ids=["openai", "openai-responses"])
@@ -438,10 +642,22 @@ async def test_inspection_operations_do_not_suspend_an_unrelated_foreground_repl
                 if result.tool_call_id == actual_inspection_call_id:
                     inspection_results.append(payload)
             assert len(inspection_results) == 1
-            if operation == "board_read":
-                assert inspection_results[0]["status"] == "success"
-                assert inspection_results[0]["operation"] == "board_read"
-                assert inspection_results[0]["posts"] == []
+            inspection_result = inspection_results[0]
+            assert inspection_result["status"] == "success"
+            assert inspection_result["operation"] == operation
+            if operation == "query":
+                assert inspection_result["subagent_id"] == child["subagent_id"]
+                assert inspection_result["work"]["work_id"] == child["work_id"]
+                assert inspection_result["work"]["completed"] is False
+            elif operation == "list":
+                assert len(inspection_result["subagents"]) == 1
+                listed_subagent = inspection_result["subagents"][0]
+                assert listed_subagent["subagent_id"] == child["subagent_id"]
+                assert listed_subagent["work"]["work_id"] == child["work_id"]
+                assert listed_subagent["work"]["completed"] is False
+            else:
+                assert inspection_result["subagent_id"] == child["subagent_id"]
+                assert inspection_result["posts"] == []
         assert await runtime.run_next(independent_only=False) is None
         assert len(runtime.provider_payloads) == provider_start + 2
 
@@ -724,6 +940,9 @@ async def test_board_post_during_parent_review_is_reconciled_without_duplicate_d
     second_content = "The child recorded a second progress update while the parent was reviewing the first one."
     child_final = "inspection-child-finished-after-concurrent-review"
     parent_final = "inspection-parent-final-after-concurrent-review"
+    user_message = "inspection-unique-user-message-during-parent-review"
+    user_final = "inspection-user-final-before-next-board-wake"
+    user_request_id = "inspection-user-request-during-parent-review"
     image_prompt = "inspection-concurrent-review-image"
     first_posted = asyncio.Event()
     release_first_post = asyncio.Event()
@@ -805,9 +1024,27 @@ async def test_board_post_during_parent_review_is_reconciled_without_duplicate_d
                     ],
                 )
             )
+            parent_provider_start = len(runtime.provider_payloads)
             hold_parent_requests = True
             parent_task = asyncio.create_task(runtime.run_next(independent_only=False))
             await asyncio.wait_for(parent_request_started.wait(), timeout=5)
+
+            user_work_id = await _submit(
+                runtime,
+                request_id=user_request_id,
+                message=user_message,
+                expected_status="queued",
+            )
+            assert user_work_id != case.origin_work_id
+            assert await runtime.run_next(independent_only=False) is None
+
+            async with runtime.factory() as db:
+                origin = await db.get(SessionReplyWorkItem, case.origin_work_id)
+                user_work = await db.get(SessionReplyWorkItem, user_work_id)
+                assert origin is not None and user_work is not None
+                assert origin.status == SessionReplyWorkStatus.RUNNING
+                assert origin.locked_by is not None
+                assert user_work.status == SessionReplyWorkStatus.READY_FOR_LLM
 
             runtime.outputs.append(
                 InternalMessage(
@@ -886,6 +1123,50 @@ async def test_board_post_during_parent_review_is_reconciled_without_duplicate_d
                 assert await deliver_child_work_results(db, child_work_id=child["work_id"]) == 0
                 after_duplicate_delivery = await _notification_snapshot(db, session_id=runtime.session_id)
                 assert after_duplicate_delivery == before_duplicate_delivery
+
+            parent_review_payloads = runtime.provider_payloads[parent_provider_start:]
+            review_input = runtime.provider_payloads[-1].get("input")
+            assert isinstance(review_input, list)
+            board_read_outputs = []
+            for item in review_input:
+                if not isinstance(item, dict) or item.get("type") != "function_call_output":
+                    continue
+                output = item.get("output")
+                if not isinstance(output, str):
+                    continue
+                output_payload = json.loads(output)
+                if output_payload.get("operation") == "board_read":
+                    board_read_outputs.append(output_payload)
+            assert len(board_read_outputs) == 1
+            assert [(post["stage"], post["content"]) for post in board_read_outputs[0]["posts"]] == [
+                (first_stage, first_content),
+                (second_stage, second_content),
+            ]
+            assert user_message not in json.dumps(parent_review_payloads, ensure_ascii=False)
+
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=user_final))
+            user_provider_start = len(runtime.provider_payloads)
+            user_done = await runtime.run_next(independent_only=False)
+            assert user_done is not None
+            assert user_done.id == user_work_id
+            assert user_done.id != case.origin_work_id
+            assert user_done.status == SessionReplyWorkStatus.SUCCEEDED
+            user_provider_payloads = runtime.provider_payloads[user_provider_start:]
+            assert user_provider_payloads
+            assert user_message in json.dumps(user_provider_payloads, ensure_ascii=False)
+
+            async with runtime.factory() as db:
+                origin = await db.get(SessionReplyWorkItem, case.origin_work_id)
+                user_work = await db.get(SessionReplyWorkItem, user_work_id)
+                assert origin is not None and user_work is not None
+                assert origin.status == SessionReplyWorkStatus.READY_FOR_LLM
+                assert origin.result_message_id is None
+                assert user_work.status == SessionReplyWorkStatus.SUCCEEDED
+                assert user_work.result_message_id is not None
+                user_result_message = await db.get(Message, user_work.result_message_id)
+                assert user_result_message is not None
+                assert user_result_message.type == MessageType.TEXT
+                assert user_result_message.content == user_final
 
             runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=child_final))
             release_second_post.set()
@@ -1254,3 +1535,127 @@ async def test_legacy_explicit_wait_record_is_delivered_after_release(
         assert history_response.status_code == 200
         history = history_response.json()["data"]
         assert sum(item.get("content") == parent_final for item in history) == 1
+
+
+@pytest.mark.asyncio
+async def test_user_reply_runs_while_parent_image_resume_is_pending(
+    image_chat_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child_final = "inspection-child-final-before-image-review"
+    image_prompt = "inspection-parent-review-image"
+    user_message = "inspection-user-message-during-image-resume"
+    user_final = "inspection-user-final-during-image-resume"
+    parent_final = "inspection-parent-final-after-image-resume"
+    resume_reached = asyncio.Event()
+    release_resume = asyncio.Event()
+    image_completion_task: asyncio.Task | None = None
+
+    original_resume = background_runner_module._resume_external_task_if_bound
+
+    async def hold_external_resume(task) -> None:
+        if task.tool_name == "generate_image":
+            resume_reached.set()
+            await release_resume.wait()
+        await original_resume(task)
+
+    monkeypatch.setattr(background_runner_module, "_resume_external_task_if_bound", hold_external_resume)
+
+    async with _create_case(image_chat_runtime, protocol="OPENAI_RESPONSES", child_count=1) as case:
+        runtime = case.runtime
+        child = case.children[0]
+        try:
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=child_final))
+            child_done = await asyncio.wait_for(runtime.run_next(independent_only=True), timeout=5)
+            assert child_done is not None
+            assert child_done.id == child["work_id"]
+            assert child_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+            runtime.outputs.append(
+                InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[
+                        InternalToolCall(
+                            id="inspection-parent-review-image",
+                            name="generate_image",
+                            arguments={"prompt": image_prompt},
+                        )
+                    ],
+                )
+            )
+            parent_waiting = await asyncio.wait_for(runtime.run_next(independent_only=False), timeout=5)
+            assert parent_waiting is not None
+            assert parent_waiting.id == case.origin_work_id
+            assert parent_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+
+            image_completion_task = asyncio.create_task(runtime.complete_images())
+            await asyncio.wait_for(resume_reached.wait(), timeout=5)
+
+            async with runtime.factory() as db:
+                parent = await db.get(SessionReplyWorkItem, case.origin_work_id)
+                image_task = (
+                    (
+                        await db.execute(
+                            select(BackgroundTask).where(
+                                BackgroundTask.session_id == runtime.session_id,
+                                BackgroundTask.tool_name == "generate_image",
+                            )
+                        )
+                    )
+                    .scalars()
+                    .one()
+                )
+                assert parent is not None and image_task is not None
+                assert parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+                assert image_task.status == BackgroundTaskStatus.SUCCEEDED
+                assert image_task.result is not None
+                image_display_name = image_task.result["content"]["send_file_to_user"]["files"][0]["display_name"]
+
+            user_work_id = await asyncio.wait_for(
+                _submit(
+                    runtime,
+                    request_id="inspection-user-during-image-resume",
+                    message=user_message,
+                    expected_status="accepted",
+                ),
+                timeout=5,
+            )
+            assert user_work_id != case.origin_work_id
+            user_provider_start = len(runtime.provider_payloads)
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=user_final))
+            user_done = await asyncio.wait_for(runtime.run_next(independent_only=False), timeout=5)
+            assert user_done is not None
+            assert user_done.id == user_work_id
+            assert user_done.status == SessionReplyWorkStatus.SUCCEEDED
+            assert image_display_name not in json.dumps(runtime.provider_payloads[user_provider_start:], ensure_ascii=False)
+            user_status = await runtime.client.get(f"/api/v1/chat/reply-works/{user_work_id}")
+            assert user_status.status_code == 200
+            user_data = user_status.json()["data"]
+            assert user_data["status"] == SessionReplyWorkStatus.SUCCEEDED.value
+            assert user_data["request_ids"] == ["inspection-user-during-image-resume"]
+            assert user_data["response"]["choices"][0]["message"]["content"] == user_final
+
+            async with runtime.factory() as db:
+                parent = await db.get(SessionReplyWorkItem, case.origin_work_id)
+                assert parent is not None
+                assert parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+
+            release_resume.set()
+            await asyncio.wait_for(image_completion_task, timeout=5)
+            image_completion_task = None
+
+            parent_provider_start = len(runtime.provider_payloads)
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_final))
+            parent_done = await asyncio.wait_for(runtime.run_next(independent_only=False), timeout=5)
+            assert parent_done is not None
+            assert parent_done.id == case.origin_work_id
+            assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+            parent_request_dump = json.dumps(runtime.provider_payloads[parent_provider_start:], ensure_ascii=False)
+            assert image_display_name in parent_request_dump
+            assert child_final in parent_request_dump
+        finally:
+            release_resume.set()
+            if image_completion_task is not None:
+                if not image_completion_task.done():
+                    image_completion_task.cancel()
+                await asyncio.gather(image_completion_task, return_exceptions=True)

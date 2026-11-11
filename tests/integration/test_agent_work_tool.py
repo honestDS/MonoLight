@@ -832,6 +832,10 @@ async def test_agent_work_and_image_completion_resumes_parent_per_batch_and_keep
         assert child_content in parent_request_dump
         for image_file in image_files.values():
             assert image_file["display_name"] in parent_request_dump
+        if completion_steps[-1][0] == "image":
+            assert "[Subagent board review guidance]" not in parent_request_dump
+        else:
+            assert "[Subagent board review guidance]" in parent_request_dump
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
             assert parent is not None and parent.status == SessionReplyWorkStatus.SUCCEEDED
@@ -858,6 +862,112 @@ async def test_agent_work_and_image_completion_resumes_parent_per_batch_and_keep
                 assert image_task.attempt_count == 1
                 assert image_task.result == image_results[image_task.id]
         assert Counter(request["prompt"] for request in runtime.image_requests) == Counter(image_prompts)
+
+
+@pytest.mark.asyncio
+async def test_agent_work_image_wakeup_queues_user_before_child_completion(image_chat_runtime) -> None:
+    child_instruction = "Independently finish the child task and return its final result marker."
+    child_content = "image-wakeup-child-result"
+    user_message = "queued-user-message-after-image"
+    user_reply = "queued-user-independent-reply"
+    parent_reply = "parent-board-review-reply"
+    parent_request_id = "image-wakeup-queue-parent-request"
+    user_request_id = "image-wakeup-queue-user-request"
+
+    async with image_chat_runtime(goal_mode=False) as runtime:
+
+        async def _submit(request_id: str, message: str, expected_status: str) -> int:
+            response = await runtime.client.post(
+                "/api/v1/chat/completions",
+                json={
+                    "session_id": runtime.session_id,
+                    "request_id": request_id,
+                    "message": message,
+                },
+            )
+            assert response.status_code == 200
+            data = response.json()["data"]
+            assert data["request_id"] == request_id
+            assert data["submission_status"] == expected_status
+            return data["work_id"]
+
+        async with runtime.factory() as db:
+            profile = await db.get(Profile, runtime.profile.id)
+            assert profile is not None
+            configs = deepcopy(profile.configs)
+            configs["tool"]["enabled_tools"] = list(dict.fromkeys([*configs["tool"]["enabled_tools"], AGENT_WORK_TOOL_NAME]))
+            profile.configs = configs
+            await db.commit()
+
+        create_call = InternalToolCall(
+            id="image-wakeup-queue-create-call",
+            name=AGENT_WORK_TOOL_NAME,
+            arguments={"operation": "create", "name": "图片唤醒后的子任务", "message": child_instruction},
+        )
+        image_call = InternalToolCall(
+            id="image-wakeup-queue-image-call",
+            name="generate_image",
+            arguments={"prompt": "image-wakeup-queue-prompt"},
+        )
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[create_call, image_call]))
+        parent_work_id = await _submit(parent_request_id, "Create the child task and generate the image.", "accepted")
+
+        waiting = await runtime.run_next()
+        assert waiting is not None and waiting.id == parent_work_id
+        assert waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+
+        await runtime.complete_images()
+        async with runtime.factory() as db:
+            image_tasks = (
+                (
+                    await db.execute(
+                        select(BackgroundTask).where(
+                            BackgroundTask.session_id == runtime.session_id,
+                            BackgroundTask.tool_name == "generate_image",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(image_tasks) == 1
+            image_task = image_tasks[0]
+            assert image_task.status == BackgroundTaskStatus.SUCCEEDED
+            assert image_task.result is not None
+            image_display_name = image_task.result["content"]["send_file_to_user"]["files"][0]["display_name"]
+
+        user_work_id = await _submit(user_request_id, user_message, "queued")
+        assert user_work_id != parent_work_id
+
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=child_content))
+        child_done = await runtime.run_next(independent_only=True)
+        assert child_done is not None
+        assert child_done.source_id == str(parent_work_id)
+        assert child_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        user_provider_start = len(runtime.provider_payloads)
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=user_reply))
+        user_done = await runtime.run_next()
+        assert user_done is not None and user_done.id == user_work_id
+        assert user_done.status == SessionReplyWorkStatus.SUCCEEDED
+        user_status = await runtime.client.get(f"/api/v1/chat/reply-works/{user_work_id}")
+        assert user_status.status_code == 200
+        user_data = user_status.json()["data"]
+        assert user_data["status"] == SessionReplyWorkStatus.SUCCEEDED.value
+        assert user_data["request_ids"] == [user_request_id]
+        assert user_data["response"]["choices"][0]["message"]["content"] == user_reply
+        user_provider_payloads = runtime.provider_payloads[user_provider_start:]
+        assert image_display_name not in json.dumps(user_provider_payloads, ensure_ascii=False)
+
+        parent_provider_start = len(runtime.provider_payloads)
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_reply))
+        parent_done = await runtime.run_next()
+        assert parent_done is not None and parent_done.id == parent_work_id
+        assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+        parent_provider_payloads = runtime.provider_payloads[parent_provider_start:]
+        parent_request_dump = json.dumps(parent_provider_payloads, ensure_ascii=False)
+        assert image_display_name in parent_request_dump
+        assert child_content in parent_request_dump
 
 
 @pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"])

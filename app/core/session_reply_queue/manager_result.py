@@ -138,9 +138,12 @@ class SessionReplyResult:
         history_message_id: int = 0,
         after_work_sequence_no: int = 0,
         interactive_only: bool = False,
+        delivered_event_sequence_by_work_id: dict[int, int] | None = None,
     ):
         from app.providers.database import AsyncSessionLocal
 
+        if delivered_event_sequence_by_work_id is None:
+            delivered_event_sequence_by_work_id = {}
         while True:
             async with AsyncSessionLocal() as db:
                 work = await session_reply_work_item_crud.get_next_for_session_resume(
@@ -163,14 +166,28 @@ class SessionReplyResult:
             if work is None or work.id is None:
                 return
 
+            resume_after_sequence_no = max(
+                resume_after_sequence_no,
+                delivered_event_sequence_by_work_id.get(work.id, 0),
+            )
             after_work_sequence_no = work.sequence_no
             async for event in self.wait_for_stream(
                 work.id,
                 after_sequence_no=resume_after_sequence_no,
                 resume_mode=True,
                 history_message_id=history_message_id,
+                through_work_sequence_no=work.sequence_no,
             ):
                 response_event = dict(event)
+                event_sequence_no = response_event.get("event_sequence_no")
+                if type(event_sequence_no) is int:
+                    event_work_id = response_event.get("work_id", work.id)
+                    if type(event_work_id) is not int:
+                        event_work_id = work.id
+                    delivered_sequence_no = delivered_event_sequence_by_work_id.get(event_work_id, 0)
+                    if event_sequence_no <= delivered_sequence_no:
+                        continue
+                    delivered_event_sequence_by_work_id[event_work_id] = event_sequence_no
                 response_event.setdefault("work_sequence_no", work.sequence_no)
                 if "request_ids" not in response_event:
                     response_event["request_ids"] = get_work_request_ids(work)
@@ -205,6 +222,7 @@ class SessionReplyResult:
         after_sequence_no: int = 0,
         resume_mode: bool = False,
         history_message_id: int = 0,
+        through_work_sequence_no: int | None = None,
     ):
         from app.providers.database import AsyncSessionLocal
 
@@ -244,11 +262,18 @@ class SessionReplyResult:
                         after_sequence_no=after_sequence_no,
                     )
                 for item in events:
+                    event_work_sequence_no = item.event.get("work_sequence_no")
+                    if through_work_sequence_no is not None and type(event_work_sequence_no) is int and event_work_sequence_no > through_work_sequence_no:
+                        return
                     after_sequence_no = item.sequence_no
                     yield item.event
 
                 if events:
                     continue
+
+                # 先读完旧轮事件，再让位给新工作。
+                if through_work_sequence_no is not None and work.sequence_no > through_work_sequence_no:
+                    return
 
                 if work.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK:
                     yield {
