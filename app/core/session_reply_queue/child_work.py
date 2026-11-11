@@ -13,6 +13,7 @@ from app.core.constants import (
     ERR_SUBAGENT_CANCELLED,
     ERR_SUBAGENT_CONTEXT_INVALID,
     ERR_SUBAGENT_NOT_FOUND,
+    ERR_SUBAGENT_RESULT_NOT_READY,
     ERR_SUBAGENT_WORK_NOT_FOUND,
     GOAL_EXECUTION_PHASE_RUNNING,
     LOG_DISPATCHER_MAIN_AGENT_MESSAGE,
@@ -33,7 +34,7 @@ from app.core.crud.terminal.session import terminal_session_crud
 from app.core.exceptions import ParameterException
 from app.core.i18n import t
 from app.core.log import agent_log_context, get_logger
-from app.core.session_reply_queue.child_delivery import deliver_child_work_results
+from app.core.session_reply_queue.child_delivery import deliver_child_work_results, supersede_child_reports
 from app.core.session_reply_queue.child_lifecycle import finish_child_work
 from app.core.session_reply_queue.child_result import (
     _parse_audit_record_id,
@@ -67,7 +68,7 @@ __all__ = [
     "create_subagent",
     "list_subagents",
     "post_subagent_board",
-    "query_subagent",
+    "query_subagent_result",
     "read_subagent_board",
     "send_subagent_message",
 ]
@@ -658,21 +659,24 @@ async def send_subagent_message(
             parent_state["has_child_work"] = True
             parent.execution_state = parent_state
             db.add(parent)
-            await db.commit()
-            _log_subagent_message(subagent, call, message)
-            return build_subagent_queued_result(call)
+        else:
+            call = await _start_subagent_round(
+                db,
+                parent=parent,
+                subagent=subagent,
+                uid=uid,
+                session_id=session_id,
+                profile_id=profile_id,
+                tool_call_id=tool_call_id,
+                message=message,
+                arguments=arguments,
+                previous_work=work,
+            )
 
-        call = await _start_subagent_round(
+        await supersede_child_reports(
             db,
             parent=parent,
-            subagent=subagent,
-            uid=uid,
-            session_id=session_id,
-            profile_id=profile_id,
-            tool_call_id=tool_call_id,
-            message=message,
-            arguments=arguments,
-            previous_work=work,
+            child_work_id=child_work_id,
         )
         await db.commit()
         _log_subagent_message(subagent, call, message)
@@ -914,7 +918,7 @@ async def list_subagents(
     }
 
 
-async def query_subagent(
+async def query_subagent_result(
     db: AsyncSession,
     *,
     uid: str,
@@ -937,7 +941,7 @@ async def query_subagent(
         profile_id=profile_id,
         touch=True,
     )
-    child_work_id = work_id or subagent.latest_child_work_id
+    child_work_id = work_id if work_id is not None else subagent.latest_child_work_id
     round_row = await subagent_crud.get_round(
         db,
         child_work_id=child_work_id,
@@ -946,13 +950,13 @@ async def query_subagent(
     if round_row is None:
         raise ParameterException(ERR_SUBAGENT_WORK_NOT_FOUND)
 
-    from app.core.session_reply_queue.child_result import get_child_snapshot
-
     snapshot = await get_child_snapshot(db, subagent=subagent, round_row=round_row)
+    if snapshot.get("completed") is not True:
+        raise ParameterException(ERR_SUBAGENT_RESULT_NOT_READY)
     await db.commit()
     return {
         "status": "success",
-        "operation": "query",
+        "operation": "query_result",
         "subagent_id": subagent.id,
         "work": snapshot,
     }

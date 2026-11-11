@@ -943,7 +943,7 @@ async def test_query_subagent_refreshes_retention_until_strictly_after_24_hours(
 
     async with subagent_database() as db:
         db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (parent.id, "cleanup-query-worker")
-        response = await child_work.query_subagent(
+        response = await child_work.query_subagent_result(
             db,
             uid="user-1",
             session_id="session-1",
@@ -988,7 +988,7 @@ async def test_query_subagent_refreshes_retention_until_strictly_after_24_hours(
         assert (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == parent.id))).scalars().one().id == parent.id
 
 
-@pytest.mark.parametrize("operation", ["query", "send_message"])
+@pytest.mark.parametrize("operation", ["query_result", "send_message"])
 @pytest.mark.asyncio
 async def test_idle_cleanup_rechecks_activity_after_candidate_scan(subagent_database, monkeypatch, operation):
     idle_at = get_local_time() - timedelta(hours=25)
@@ -1028,8 +1028,8 @@ async def test_idle_cleanup_rechecks_activity_after_candidate_scan(subagent_data
                 await asyncio.wait_for(scanned.wait(), timeout=5)
 
                 tool_db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (parent.id, "cleanup-race-worker")
-                if operation == "query":
-                    response = await child_work.query_subagent(
+                if operation == "query_result":
+                    response = await child_work.query_subagent_result(
                         tool_db,
                         uid="user-1",
                         session_id="session-1",
@@ -1037,7 +1037,7 @@ async def test_idle_cleanup_rechecks_activity_after_candidate_scan(subagent_data
                         subagent_id=subagent.id,
                     )
                     assert response["status"] == "success"
-                    assert response["operation"] == "query"
+                    assert response["operation"] == "query_result"
                     new_work_id = None
                 else:
                     response = await child_work.send_subagent_message(
@@ -1067,7 +1067,7 @@ async def test_idle_cleanup_rechecks_activity_after_candidate_scan(subagent_data
                     old_call_row = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.id == tool_call.id))).scalars().one()
                     assert old_call_row.id == tool_call.id
 
-                    if operation == "query":
+                    if operation == "query_result":
                         assert old_round_row.result == saved_round_result
                     else:
                         new_child_row = (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == new_work_id))).scalars().one()

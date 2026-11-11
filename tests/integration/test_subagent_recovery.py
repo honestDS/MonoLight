@@ -40,6 +40,43 @@ def _result_payload(row: Message) -> tuple[InternalMessage, dict]:
     return message, json.loads(message.content or "{}")
 
 
+async def _queue_fixed_context_background_resume(runtime, monkeypatch: pytest.MonkeyPatch, fixed_context_marker: str) -> int:
+    import app.core.background_tasks.reply_trigger as reply_trigger_module
+
+    async with runtime.factory() as db:
+        profile = await db.get(Profile, runtime.profile.id)
+        assert profile is not None
+        configs = deepcopy(profile.configs)
+        configs["tool"]["enabled_tools"] = list(dict.fromkeys([*configs["tool"]["enabled_tools"], AGENT_WORK_TOOL_NAME]))
+        profile.configs = configs
+        task = BackgroundTask(
+            uid=runtime.uid,
+            session_id=runtime.session_id,
+            profile_id=runtime.profile.id,
+            tool_call_id="background-resume-terminal-watch-call",
+            tool_name=TERMINAL_WATCH_TOOL_NAME,
+            status=BackgroundTaskStatus.SUCCEEDED,
+            arguments={"terminal_session_id": "background-resume-terminal", "after_offset": 0, "condition": "process_exit"},
+            result={"status": "succeeded", "tool_name": TERMINAL_WATCH_TOOL_NAME, "content": {"event": "process_exit", "eof": True}},
+            auto_reply=True,
+            reply_status=BackgroundTaskReplyStatus.PENDING,
+            extra={
+                "auto_terminal_watch": True,
+                "reply_mode": BackgroundTaskReplyMode.RESUME_AGENT.value,
+                "terminal_session_id": "background-resume-terminal",
+                "frozen_context_messages": [InternalMessage(role=MessageRole.USER, content=fixed_context_marker).model_dump(mode="json", exclude_none=True)],
+            },
+        )
+        db.add(task)
+        await db.commit()
+        assert task.id is not None
+        task_id = task.id
+
+    monkeypatch.setattr(reply_trigger_module, "AsyncSessionLocal", runtime.factory)
+    await reply_trigger_module.trigger_background_task_reply(task_id)
+    return task_id
+
+
 @pytest.mark.parametrize("saved_result", [False, True], ids=["before-save", "after-save"])
 @pytest.mark.asyncio
 async def test_interrupted_subagent_round_recovers_saved_progress_without_replaying_file_write(image_chat_runtime, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, saved_result: bool) -> None:
@@ -171,8 +208,8 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
         assert old_parent_done is not None and old_parent_done.id == parent_work_id
         assert old_parent_done.status == SessionReplyWorkStatus.SUCCEEDED
         assert old_error in json.dumps(runtime.provider_payloads[old_parent_provider_start:], ensure_ascii=False)
-        query_latest = InternalToolCall(id="recovery-query-latest", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "query", "subagent_id": subagent_id})
-        query_old = InternalToolCall(id="recovery-query-old", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "query", "subagent_id": subagent_id, "work_id": child_work_id})
+        query_latest = InternalToolCall(id="recovery-query-latest", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "query_result", "subagent_id": subagent_id})
+        query_old = InternalToolCall(id="recovery-query-old", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "query_result", "subagent_id": subagent_id, "work_id": child_work_id})
         send_call = InternalToolCall(id="recovery-send-message", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "send_message", "subagent_id": subagent_id, "message": "继续上次任务并报告恢复结果。"})
         runtime.outputs.extend([InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[query_latest, query_old]), InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[send_call])])
         new_accepted = await runtime.client.post(
@@ -189,7 +226,7 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
             result_rows = (await db.execute(select(Message).where(Message.role == MessageRole.TOOL, Message.type == MessageType.TOOL_RESULT))).scalars().all()
             query_call_ids = set()
             for row in (await db.execute(select(Message).where(Message.role == MessageRole.ASSISTANT, Message.type == MessageType.TOOL_CALL))).scalars().all():
-                query_call_ids.update(call.id for call in InternalMessage.model_validate_json(row.content or "{}").tool_calls or [] if call.name == AGENT_WORK_TOOL_NAME and call.arguments.get("operation") == "query" and call.arguments.get("subagent_id") == subagent_id)
+                query_call_ids.update(call.id for call in InternalMessage.model_validate_json(row.content or "{}").tool_calls or [] if call.name == AGENT_WORK_TOOL_NAME and call.arguments.get("operation") == "query_result" and call.arguments.get("subagent_id") == subagent_id)
             assert len(query_call_ids) == 2
             query_results = {}
             for row in result_rows:
@@ -198,7 +235,7 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
                     query_results[message.tool_call_id] = payload
             assert set(query_results) == query_call_ids
             for payload in query_results.values():
-                assert payload["operation"] == "query"
+                assert payload["operation"] == "query_result"
                 assert payload["status"] == "success"
                 assert payload["work"]["status"] == "execution_unknown"
                 assert payload["work"]["completed"] is True
@@ -1164,45 +1201,13 @@ async def test_interrupted_parent_create_preserves_registered_child_delivery_wit
 
 @pytest.mark.asyncio
 async def test_background_resume_fixed_context_reviews_first_child_before_resuspending(image_chat_runtime, monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.core.background_tasks.reply_trigger as reply_trigger_module
-
     first_summary = "background-resume-first-child-summary"
     second_summary = "background-resume-second-child-summary"
     parent_final = "background-resume-parent-final"
     fixed_context_marker = "background-resume-fixed-context"
 
     async with image_chat_runtime("OPENAI_RESPONSES", goal_mode=False) as runtime:
-        async with runtime.factory() as db:
-            profile = await db.get(Profile, runtime.profile.id)
-            assert profile is not None
-            configs = deepcopy(profile.configs)
-            configs["tool"]["enabled_tools"] = list(dict.fromkeys([*configs["tool"]["enabled_tools"], AGENT_WORK_TOOL_NAME]))
-            profile.configs = configs
-            task = BackgroundTask(
-                uid=runtime.uid,
-                session_id=runtime.session_id,
-                profile_id=runtime.profile.id,
-                tool_call_id="background-resume-terminal-watch-call",
-                tool_name=TERMINAL_WATCH_TOOL_NAME,
-                status=BackgroundTaskStatus.SUCCEEDED,
-                arguments={"terminal_session_id": "background-resume-terminal", "after_offset": 0, "condition": "process_exit"},
-                result={"status": "succeeded", "tool_name": TERMINAL_WATCH_TOOL_NAME, "content": {"event": "process_exit", "eof": True}},
-                auto_reply=True,
-                reply_status=BackgroundTaskReplyStatus.PENDING,
-                extra={
-                    "auto_terminal_watch": True,
-                    "reply_mode": BackgroundTaskReplyMode.RESUME_AGENT.value,
-                    "terminal_session_id": "background-resume-terminal",
-                    "frozen_context_messages": [InternalMessage(role=MessageRole.USER, content=fixed_context_marker).model_dump(mode="json", exclude_none=True)],
-                },
-            )
-            db.add(task)
-            await db.commit()
-            assert task.id is not None
-            task_id = task.id
-
-        monkeypatch.setattr(reply_trigger_module, "AsyncSessionLocal", runtime.factory)
-        await reply_trigger_module.trigger_background_task_reply(task_id)
+        task_id = await _queue_fixed_context_background_resume(runtime, monkeypatch, fixed_context_marker)
 
         async with runtime.factory() as db:
             queued_work = (
@@ -1317,3 +1322,147 @@ async def test_background_resume_fixed_context_reviews_first_child_before_resusp
         final_request_dump = json.dumps(runtime.provider_payloads[final_provider_start], ensure_ascii=False)
         assert first_summary in final_request_dump
         assert second_summary in final_request_dump
+
+
+@pytest.mark.parametrize("case", ["none", "waiting", "ready"], ids=["none", "waiting", "ready"])
+@pytest.mark.asyncio
+async def test_send_message_takes_over_fixed_context_child_report(image_chat_runtime, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    first_summary = "fixed-context-takeover-first-summary"
+    sibling_summary = "fixed-context-takeover-sibling-summary"
+    new_summary = "fixed-context-takeover-new-summary"
+    new_parent_final = "fixed-context-takeover-new-parent-final"
+    old_parent_final = "fixed-context-takeover-old-parent-final"
+    fixed_context_marker = "fixed-context-takeover-marker"
+    followup_message = "Continue the same subagent task with the new instruction."
+
+    async with image_chat_runtime("OPENAI_RESPONSES", goal_mode=False) as runtime:
+        task_id = await _queue_fixed_context_background_resume(runtime, monkeypatch, fixed_context_marker)
+        first_create_call = InternalToolCall(
+            id="fixed-context-takeover-first-create",
+            name=AGENT_WORK_TOOL_NAME,
+            arguments={"operation": "create", "name": "fixed context first child", "message": "Complete the first child and report its result."},
+        )
+        initial_calls = [first_create_call]
+        if case != "none":
+            initial_calls.append(
+                InternalToolCall(
+                    id="fixed-context-takeover-sibling-create",
+                    name=AGENT_WORK_TOOL_NAME,
+                    arguments={"operation": "create", "name": "fixed context sibling child", "message": "Complete the sibling child and report its result."},
+                )
+            )
+
+        parent_provider_start = len(runtime.provider_payloads)
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=initial_calls))
+        initial_parent = await runtime.run_next(independent_only=False)
+        assert initial_parent is not None and initial_parent.id is not None
+        assert initial_parent.work_type == SessionReplyWorkType.BACKGROUND_TASK_RESUME
+        assert initial_parent.source_id == str(task_id)
+        assert initial_parent.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+        background_work_id = initial_parent.id
+        assert fixed_context_marker in json.dumps(runtime.provider_payloads[parent_provider_start:], ensure_ascii=False)
+
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=first_summary))
+        first_child = await runtime.run_next(independent_only=True)
+        assert first_child is not None and first_child.id is not None and first_child.status == SessionReplyWorkStatus.SUCCEEDED
+        first_child_work_id = first_child.id
+        first_subagent_id = first_child.subagent_id
+        assert isinstance(first_subagent_id, str) and first_subagent_id
+        if case == "ready":
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=sibling_summary))
+            sibling_done = await runtime.run_next(independent_only=True)
+            assert sibling_done is not None and sibling_done.id != first_child_work_id and sibling_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        send_call = InternalToolCall(
+            id="fixed-context-takeover-send-message",
+            name=AGENT_WORK_TOOL_NAME,
+            arguments={"operation": "send_message", "subagent_id": first_subagent_id, "message": followup_message},
+        )
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[send_call]))
+        accepted = await runtime.client.post(
+            "/api/v1/chat/completions",
+            json={"session_id": runtime.session_id, "request_id": "fixed-context-takeover-followup-request", "message": "Follow up on the completed background child."},
+        )
+        assert accepted.status_code == 200
+        new_parent_work_id = accepted.json()["data"]["work_id"]
+        new_parent_waiting = await runtime.run_next(independent_only=False)
+        assert new_parent_waiting is not None and new_parent_waiting.id == new_parent_work_id
+        assert new_parent_waiting.status == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+
+        async with runtime.factory() as db:
+            old_parent = await db.get(SessionReplyWorkItem, background_work_id)
+            assert old_parent is not None
+            expected_status = {"none": SessionReplyWorkStatus.SUCCEEDED, "waiting": SessionReplyWorkStatus.WAITING_EXTERNAL_WORK, "ready": SessionReplyWorkStatus.READY_FOR_LLM}[case]
+            assert old_parent.status == expected_status
+            if case == "none":
+                assert old_parent.result_message_id is None
+                response = old_parent.execution_state.get("response")
+                assert isinstance(response, dict) and response.get("skip_reply") is True
+            old_call = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == background_work_id, SubagentToolCall.child_work_id == first_child_work_id))).scalars().one()
+            assert old_call.arguments.get("operation") == "create" and old_call.child_work_id == first_child_work_id and old_call.delivered is True
+            old_create_result_message_id = old_call.tool_result_message_id
+            assert old_create_result_message_id is not None
+
+        if case == "none":
+            before_silent = len(runtime.provider_payloads)
+            assert await runtime.run_next(independent_only=False) is None
+            assert len(runtime.provider_payloads) == before_silent
+        else:
+            if case == "waiting":
+                before_waiting = len(runtime.provider_payloads)
+                assert await runtime.run_next(independent_only=False) is None
+                assert len(runtime.provider_payloads) == before_waiting
+                runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=sibling_summary))
+                sibling_done = await runtime.run_next(independent_only=True)
+                assert sibling_done is not None and sibling_done.id != first_child_work_id and sibling_done.status == SessionReplyWorkStatus.SUCCEEDED
+            old_provider_start = len(runtime.provider_payloads)
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=old_parent_final))
+            old_done = await runtime.run_next(independent_only=False)
+            assert old_done is not None and old_done.id == background_work_id and old_done.status == SessionReplyWorkStatus.SUCCEEDED
+            assert len(runtime.provider_payloads[old_provider_start:]) == 1
+            old_request = json.dumps(runtime.provider_payloads[old_provider_start:], ensure_ascii=False)
+            assert fixed_context_marker in old_request and sibling_summary in old_request
+
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=new_summary))
+        new_child = await runtime.run_next(independent_only=True)
+        assert new_child is not None and new_child.id is not None and new_child.subagent_id == first_subagent_id
+        assert new_child.status == SessionReplyWorkStatus.SUCCEEDED
+        new_child_work_id = new_child.id
+        assert followup_message in json.dumps(runtime.provider_payloads, ensure_ascii=False)
+
+        new_parent_start = len(runtime.provider_payloads)
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=new_parent_final))
+        new_parent_done = await runtime.run_next(independent_only=False)
+        assert new_parent_done is not None and new_parent_done.id == new_parent_work_id and new_parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+        assert new_summary in json.dumps(runtime.provider_payloads[new_parent_start:], ensure_ascii=False)
+
+        async with runtime.factory() as db:
+            old_parent = await db.get(SessionReplyWorkItem, background_work_id)
+            new_parent = await db.get(SessionReplyWorkItem, new_parent_work_id)
+            background_task = await db.get(BackgroundTask, task_id)
+            assert old_parent is not None and old_parent.status == SessionReplyWorkStatus.SUCCEEDED
+            assert new_parent is not None and new_parent.status == SessionReplyWorkStatus.SUCCEEDED
+            assert background_task is not None and background_task.reply_status == BackgroundTaskReplyStatus.SUCCEEDED
+            reply_owner = background_task.extra.get("reply_owner") if isinstance(background_task.extra, dict) else None
+            assert isinstance(reply_owner, dict) and reply_owner.get("status") == "handled"
+            active = (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.status.in_((SessionReplyWorkStatus.READY_FOR_LLM, SessionReplyWorkStatus.RUNNING, SessionReplyWorkStatus.WAITING_EXTERNAL_WORK))))).scalars().all()
+            assert active == []
+
+            old_calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == background_work_id))).scalars().all()
+            assert old_calls and all(call.arguments["operation"] == "create" and call.delivered is True and call.tool_result_message_id is not None for call in old_calls)
+            old_result = await db.get(Message, old_create_result_message_id)
+            assert old_result is not None
+            _, old_payload = _result_payload(old_result)
+            assert old_payload["work"]["result"]["content"] == first_summary
+
+            new_call = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == new_parent_work_id, SubagentToolCall.child_work_id == new_child_work_id))).scalars().one()
+            assert new_call.arguments == send_call.arguments and new_call.delivered is True and new_call.tool_result_message_id is not None
+            new_result = await db.get(Message, new_call.tool_result_message_id)
+            assert new_result is not None
+            _, new_payload = _result_payload(new_result)
+            assert new_payload["work"]["result"]["content"] == new_summary
+
+            assistant_rows = (await db.execute(select(Message).where(Message.role == MessageRole.ASSISTANT))).scalars().all()
+            assert sum(new_parent_final in (row.content or "") for row in assistant_rows) == 1
+            if case != "none":
+                assert sum(old_parent_final in (row.content or "") for row in assistant_rows) == 1

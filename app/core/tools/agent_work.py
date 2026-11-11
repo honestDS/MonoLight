@@ -36,9 +36,10 @@ AGENT_WORK_TOOL_SCHEMA = {
             "cancellation wake the parent for review. If no stage adjustment is needed and the task is still "
             "unfinished, call end_session(skip_reply=true) to wait silently again; once all tasks are complete, "
             "verify and summarize the results. "
-            "Use list for a lightweight directory of unfinished subagents in the current user, session, and Profile scope; completed subagents are omitted. "
-            "Use query for a targeted lookup of one subagent's status, saved result, or interruption reason. "
-            "Use board_read to inspect all persisted stage-history posts for one scoped subagent. "
+            "Use list to view system status for unfinished tasks in the current user, session, and Profile scope; completed subagents are omitted. "
+            "Use board_read to read stage progress for one scoped subagent, check direction, and correct course; it does not replace the complete delivered result. "
+            "Use query_result to retrieve only the complete result saved for one finished work round, or its failure or cancellation reason. Do not use it to view progress or poll. "
+            "With an explicit work_id, query that work round; without one, query the latest work round. "
             "Use board_post from the currently executing subagent task to record its own progress; it returns immediately so execution can continue, and its identity comes from the current execution context rather than user-supplied identifiers. "
             "Use cancel to stop work that is no longer needed. Summarize the returned results for the user.\n\n"
             "Important boundaries\n"
@@ -50,12 +51,13 @@ AGENT_WORK_TOOL_SCHEMA = {
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["create", "list", "query", "send_message", "cancel", "board_post", "board_read"],
+                    "enum": ["create", "list", "query_result", "send_message", "cancel", "board_post", "board_read"],
                     "description": (
-                        "create: delegate a new task; list: immediately list unfinished subagents in the current scope; "
-                        "send_message: add instructions or continue work with an existing subagent; query: inspect one subagent's status and saved result immediately; "
+                        "create: delegate a new task; list: view system status for unfinished tasks in the current scope; "
+                        "query_result: retrieve only the complete result saved for one finished work round, or its failure or cancellation reason; do not use it to view progress or poll; "
+                        "send_message: add instructions or continue work with an existing subagent; "
                         "cancel: stop unneeded work; board_post: record progress for the currently executing subagent task and return immediately; "
-                        "board_read: read all persisted stage-history posts for one subagent."
+                        "board_read: read stage progress for one subagent to check direction and correct course; it does not replace the complete delivered result."
                     ),
                 },
                 "name": {
@@ -78,12 +80,12 @@ AGENT_WORK_TOOL_SCHEMA = {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 32,
-                    "description": "Required for query, send_message, cancel, and board_read. Copy the subagent_id actually returned by create or list and reuse it for work with that subagent.",
+                    "description": "Required for query_result, send_message, cancel, and board_read. Copy the subagent_id actually returned by create or list and reuse it for work with that subagent.",
                 },
                 "work_id": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": ("For query and cancel only. Copy a returned work_id to inspect or cancel that particular task run; omit it to use the latest or current work."),
+                    "description": "For query_result and cancel only. Copy a returned work_id to target a specific work round; omit it to query the latest round or cancel the current round.",
                 },
                 "stage": {
                     "type": "string",
@@ -101,7 +103,7 @@ AGENT_WORK_TOOL_SCHEMA = {
             "anyOf": [
                 {"properties": {"operation": {"const": "create"}}, "required": ["name", "message"]},
                 {"properties": {"operation": {"const": "list"}}, "additionalProperties": False},
-                {"properties": {"operation": {"const": "query"}}, "required": ["subagent_id"]},
+                {"properties": {"operation": {"const": "query_result"}}, "required": ["subagent_id"]},
                 {"properties": {"operation": {"const": "send_message"}}, "required": ["subagent_id", "message"]},
                 {"properties": {"operation": {"const": "cancel"}}, "required": ["subagent_id"]},
                 {
@@ -251,7 +253,7 @@ class AgentWorkExecutor(BaseExecutor):
             argument_model = ListArguments
         if operation == "send_message":
             argument_model = SendArguments
-        if operation in {"query", "cancel"}:
+        if operation in {"query_result", "cancel"}:
             argument_model = LookupArguments
         if operation == "board_post":
             argument_model = BoardPostArguments
@@ -289,7 +291,7 @@ class AgentWorkExecutor(BaseExecutor):
             create_subagent,
             list_subagents,
             post_subagent_board,
-            query_subagent,
+            query_subagent_result,
             read_subagent_board,
             send_subagent_message,
         )
@@ -312,8 +314,8 @@ class AgentWorkExecutor(BaseExecutor):
                     session_id=session_id,
                     profile_id=profile_id,
                 )
-            if operation == "query":
-                result = await query_subagent(
+            if operation == "query_result":
+                result = await query_subagent_result(
                     db,
                     uid=uid,
                     session_id=session_id,

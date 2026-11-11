@@ -146,7 +146,7 @@ async def finish_child_work(db: AsyncSession, *, work: SessionReplyWorkItem) -> 
                 "current_work_id": snapshot["current_work_id"],
                 "completed": snapshot["completed"],
                 "status": snapshot["status"],
-                "full_result_operation": "query",
+                "full_result_operation": "query_result",
             },
             ensure_ascii=False,
             sort_keys=True,

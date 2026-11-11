@@ -272,7 +272,7 @@ async def test_subagent_shell_companions_follow_profile_policy_and_prevalidate(w
     [
         pytest.param(
             C.TOOL_WORKFLOW_FOREGROUND,
-            {"create", "list", "query", "send_message", "cancel", "board_read"},
+            {"create", "list", "query_result", "send_message", "cancel", "board_read"},
             id="foreground",
         ),
         pytest.param(C.TOOL_WORKFLOW_SCHEDULED_TASK, set(), id="scheduled"),
@@ -300,7 +300,7 @@ async def test_agent_work_workflow_exposure(workflow_db, tmp_path: Path, workflo
     [
         pytest.param("create", {"operation": "create", "name": "child-task", "message": "inspect independently"}, id="create"),
         pytest.param("list", {"operation": "list"}, id="list"),
-        pytest.param("query", {"operation": "query", "subagent_id": "child-1", "work_id": 1}, id="query"),
+        pytest.param("query_result", {"operation": "query_result", "subagent_id": "child-1", "work_id": 1}, id="query-result"),
         pytest.param("send_message", {"operation": "send_message", "subagent_id": "child-1", "message": "continue"}, id="send-message"),
         pytest.param("cancel", {"operation": "cancel", "subagent_id": "child-1", "work_id": 1}, id="cancel"),
         pytest.param("board_read", {"operation": "board_read", "subagent_id": "child-1"}, id="board-read"),
@@ -319,7 +319,7 @@ async def test_main_agent_work_operations_pass_prevalidation(workflow_db, tmp_pa
     [
         pytest.param("create", {"operation": "create", "name": "nested-task", "message": "must be rejected"}, id="create"),
         pytest.param("list", {"operation": "list"}, id="list"),
-        pytest.param("query", {"operation": "query", "subagent_id": "parent-child", "work_id": 1}, id="query"),
+        pytest.param("query_result", {"operation": "query_result", "subagent_id": "parent-child", "work_id": 1}, id="query-result"),
         pytest.param("send_message", {"operation": "send_message", "subagent_id": "parent-child", "message": "must be rejected"}, id="send-message"),
         pytest.param("cancel", {"operation": "cancel", "subagent_id": "parent-child", "work_id": 1}, id="cancel"),
         pytest.param("board_read", {"operation": "board_read", "subagent_id": "parent-child"}, id="board-read"),

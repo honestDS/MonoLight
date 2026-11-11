@@ -433,20 +433,20 @@ When {AGENT_WORK_TOOL_NAME} is available and permitted, prioritize delegating in
 
   After a create or send_message dispatch is accepted, the primary reply is automatically suspended after the current tool-batch results and checkpoint have been saved. Submit independent tasks in the same tool batch so they run in parallel; for dependent work, wait for the preceding result and then use send_message. Do not call an explicit wait, poll, or sleep. Give each subagent a self-contained goal, relevant background, constraints, authorization, expected deliverable, and evidence requirements: it has isolated context and does not inherit parent history. A subagent may use {SHELL_TOOL_NAME} or the interactive {TERMINAL_TOOL_NAME} only when the current Profile enables it and the tool is actually provided in that execution; when available, it remains subject to the current directory policy, audit/confirmation requirements, and other execution restrictions. Do not expand authorization, have agents write the same file concurrently, or ask a subagent to create nested agents.
 
-  Use list as a lightweight directory of incomplete tasks. Use query for targeted inspection of a task's status or saved result. Use board_read(subagent_id) for targeted inspection of that subagent's complete persisted phase history. These operations return immediately and do not wait. Do not poll or use Shell sleep. The main agent must verify and synthesize subagent results; never claim unverified work was performed.
+  Use list for the system status of unfinished tasks. Use board_read(subagent_id) for phase progress and correction. Use query_result only for the full saved result or end reason of a finished work round; use the returned work_id for an exact round. Do not query a result already available. These operations return immediately. Do not poll or use Shell sleep. The main agent must verify and synthesize subagent results; never claim unverified work was performed.
 
 Examples:
 - Parallel: create separate agents in one round to compare options and independently verify key claims.
 - Direct or sequential: read one named file yourself; if a follow-up depends on an agent's finding, send_message after that result instead of launching it prematurely.
-- Progress or result: use list for a lightweight directory of incomplete tasks, query for targeted status or saved results, and board_read(subagent_id) for the complete persisted phase history.
+- Progress or result: use list for system status of unfinished tasks, board_read(subagent_id) for phase progress and correction direction, and query_result with the relevant work_id only for a finished work round's complete result or failure/cancellation reason.
   [End subagent delegation guidance]"""
 
 SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT = f"""[Subagent board review guidance]
-This instruction is activated when a subagent board update or subagent completion event wakes the primary agent. Use {AGENT_WORK_TOOL_NAME} with operation=board_read and the subagent_id to read that subagent's persisted phase history, then verify the direction and current status against the user's latest request.
+This instruction is activated when a subagent board update or subagent completion event wakes the primary agent. Use {AGENT_WORK_TOOL_NAME} with operation=board_read and the subagent_id to inspect that subagent's persisted phase progress, then verify the direction and current status against the user's latest request. When system status for unfinished tasks is needed, use {AGENT_WORK_TOOL_NAME} with operation=list.
 
 If correction is necessary, use {AGENT_WORK_TOOL_NAME} to send_message the required correction or cancel the affected task. If no adjustment is needed and any child task remains incomplete, do not output any text to the user. Instead, make exactly one {END_SESSION_TOOL_NAME} call with {{"skip_reply":true}} as the sole call, and silently return to waiting.
 
-When all child tasks are complete, verify their results and reply to the user using only the verified outcome. A newer user stop, cancellation, or changed instruction takes priority over this review; do not replay actions that have already been executed.
+When all child tasks are complete, verify their results. Use query_result with the relevant work_id only if a full result or end reason is missing, then reply using only the verified outcome. A newer user stop, cancellation, or changed instruction takes priority over this review; do not replay actions that have already been executed.
 [End subagent board review guidance]"""
 
 SUBAGENT_EXECUTION_GUIDANCE_PROMPT = f"""You are an independent subagent executing work to deliver a result to a parent task. Only self-contained instructions, your own history, and later messages addressed to you are available; do not treat content invisible from the parent session as evidence.

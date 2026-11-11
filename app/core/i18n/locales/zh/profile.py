@@ -52,6 +52,7 @@ MESSAGES = {
     "ERR_SUBAGENT_ARGUMENTS_INVALID": "子代理操作参数无效",
     "ERR_SUBAGENT_NOT_FOUND": "当前会话和配置下未找到该子代理",
     "ERR_SUBAGENT_WORK_NOT_FOUND": "未找到该子代理的指定工作",
+    "ERR_SUBAGENT_RESULT_NOT_READY": "该轮子任务尚未结束，暂无结果。请查看看板了解进度。",
     "ERR_SUBAGENT_CONTEXT_INVALID": "子代理工作记录不完整，无法继续执行",
     "ERR_SUBAGENT_CALL_CONFLICT": "同一工具调用不能重复提交不同的子代理操作",
     "ERR_SUBAGENT_CANCELLED": "子代理工作已取消，已开始的操作可能已产生影响",

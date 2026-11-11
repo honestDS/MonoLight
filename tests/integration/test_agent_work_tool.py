@@ -2092,7 +2092,7 @@ async def test_agent_work_child_finishes_before_parent_reply_is_delivered_once(
 
 
 @pytest.mark.parametrize("scope", ["uid", "session", "profile"])
-@pytest.mark.parametrize("operation", ["query", "send_message", "cancel", "board_read"])
+@pytest.mark.parametrize("operation", ["query_result", "send_message", "cancel", "board_read"])
 @pytest.mark.asyncio
 async def test_agent_work_cross_scope_operations_fail_without_side_effects(
     image_chat_runtime,

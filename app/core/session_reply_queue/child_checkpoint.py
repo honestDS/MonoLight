@@ -166,13 +166,14 @@ async def recover_child_work_wait(db: AsyncSession, *, work: SessionReplyWorkIte
     if not calls:
         return None
     execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
-    child_work_waits = execution_state.get("child_work_waits")
     registered_call_keys: set[tuple[object, object, object]] = set()
-    if isinstance(child_work_waits, list):
-        for slot in child_work_waits:
-            if isinstance(slot, dict):
-                key = (slot.get("child_work_id"), slot.get("tool_call_id"), slot.get("tool_result_message_id"))
-                registered_call_keys.add(key)
+    for slot_list_name in ("child_work_waits", "child_work_receipts"):
+        slots = execution_state.get(slot_list_name)
+        if isinstance(slots, list):
+            for slot in slots:
+                if isinstance(slot, dict):
+                    key = (slot.get("child_work_id"), slot.get("tool_call_id"), slot.get("tool_result_message_id"))
+                    registered_call_keys.add(key)
 
     await ensure_session_reply_work_claim(db)
     checkpoint = await session_reply_work_item_crud.get_checkpoint(db, work.id)

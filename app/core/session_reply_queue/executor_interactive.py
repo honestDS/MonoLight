@@ -329,15 +329,16 @@ async def _save_interactive_work_execution_checkpoint(
             child_tool_slots: list[dict[str, Any]] = []
             registered_child_tool_keys: set[tuple[Any, Any, Any, Any]] = set()
             registered_response_ids: dict[tuple[Any, Any, Any], Any] = {}
-            previous_child_work_waits = state.get("child_work_waits")
-            if isinstance(previous_child_work_waits, list):
-                for slot in previous_child_work_waits:
-                    if not isinstance(slot, dict):
-                        continue
-                    child_tool_key = (slot.get("child_work_id"), slot.get("subagent_id"), slot.get("tool_call_id"))
-                    registered_child_tool_keys.add((*child_tool_key, slot.get("tool_result_message_id")))
-                    if slot.get("response_id") is not None:
-                        registered_response_ids[child_tool_key] = slot.get("response_id")
+            for slot_list_name in ("child_work_waits", "child_work_receipts"):
+                previous_child_work_slots = state.get(slot_list_name)
+                if isinstance(previous_child_work_slots, list):
+                    for slot in previous_child_work_slots:
+                        if not isinstance(slot, dict):
+                            continue
+                        child_tool_key = (slot.get("child_work_id"), slot.get("subagent_id"), slot.get("tool_call_id"))
+                        registered_child_tool_keys.add((*child_tool_key, slot.get("tool_result_message_id")))
+                        if slot.get("response_id") is not None:
+                            registered_response_ids[child_tool_key] = slot.get("response_id")
             for message in checkpoint.get("messages", []):
                 if not isinstance(message, dict) or message.get("role") != MessageRole.TOOL:
                     continue

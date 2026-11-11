@@ -474,16 +474,11 @@ class CRUDSubagent:
         )
         return list(result.scalars().all())
 
-    async def list_parent_ids_for_child(self, db: AsyncSession, *, child_work_id: int) -> list[int]:
-        result = await db.execute(
-            select(SubagentToolCall.parent_work_id)
-            .where(
-                SubagentToolCall.child_work_id == child_work_id,
-                SubagentToolCall.delivered.is_(False),
-            )
-            .distinct()
-            .order_by(SubagentToolCall.parent_work_id.asc())
-        )
+    async def list_parent_ids_for_child(self, db: AsyncSession, *, child_work_id: int, undelivered_only: bool = True) -> list[int]:
+        conditions = [SubagentToolCall.child_work_id == child_work_id]
+        if undelivered_only:
+            conditions.append(SubagentToolCall.delivered.is_(False))
+        result = await db.execute(select(SubagentToolCall.parent_work_id).where(*conditions).distinct().order_by(SubagentToolCall.parent_work_id.asc()))
         return list(result.scalars().all())
 
     async def list_pending_parent_ids(self, db: AsyncSession, *, after_id: int = 0, limit: int = 100) -> list[int]:

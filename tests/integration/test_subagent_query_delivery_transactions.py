@@ -165,7 +165,7 @@ async def _query_transaction_case(image_chat_runtime):
             id="query-transaction-query-b",
             name=AGENT_WORK_TOOL_NAME,
             arguments={
-                "operation": "query",
+                "operation": "query_result",
                 "subagent_id": b_subagent_id,
                 "work_id": child_b_work_id,
             },
@@ -219,7 +219,7 @@ async def _query_transaction_case(image_chat_runtime):
                 worker_id=worker_id,
             )
 
-            query_result_payload = await child_work_module.query_subagent(
+            query_result_payload = await child_work_module.query_subagent_result(
                 db,
                 uid=runtime.uid,
                 session_id=runtime.session_id,
@@ -228,7 +228,7 @@ async def _query_transaction_case(image_chat_runtime):
                 work_id=child_b_work_id,
             )
             assert query_result_payload["status"] == "success"
-            assert query_result_payload["operation"] == "query"
+            assert query_result_payload["operation"] == "query_result"
             query_result = InternalMessage(
                 role=MessageRole.TOOL,
                 type=MessageType.TOOL_RESULT,
@@ -492,7 +492,17 @@ async def test_query_delivery_checkpoint_survives_database_reopen(image_chat_run
 
 @pytest.mark.parametrize(
     "query_variant",
-    ["truncated", "running", "failed", "not-persisted", "wrong-child", "user-json"],
+    [
+        "truncated",
+        "running",
+        "failed",
+        "not-persisted",
+        "wrong-child",
+        "user-json",
+        "unverified-suffix",
+        "history-only",
+        "mismatched-context",
+    ],
 )
 @pytest.mark.asyncio
 async def test_query_delivery_requires_a_complete_current_persisted_result(image_chat_runtime, query_variant: str) -> None:
@@ -540,6 +550,15 @@ async def test_query_delivery_requires_a_complete_current_persisted_result(image
                 wrong_work["work_id"] = case["child_b_work_id"] + 10_000_000
                 query_payload["work"] = wrong_work
                 modified_query_message = source_query_message.model_copy(update={"content": json.dumps(query_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))})
+            elif query_variant == "unverified-suffix":
+                modified_query_message = source_query_message.model_copy(update={"content": f"{source_query_message.content}\n\nunverified-model-suffix"})
+            elif query_variant == "history-only":
+                turn_messages = query_messages_by_key["turn_messages"][0]
+                turn_messages[:] = [message for message in turn_messages if not ((message.role == MessageRole.ASSISTANT and any(tool_call.id == case["query_call_id"] for tool_call in message.tool_calls or [])) or (message.role == MessageRole.TOOL and message.tool_call_id == case["query_call_id"]))]
+                checkpoint["turn_messages"] = [message.model_dump(mode="json", exclude_none=True) for message in turn_messages]
+                modified_query_message = source_query_message.model_copy(deep=True)
+            elif query_variant == "mismatched-context":
+                modified_query_message = source_query_message.model_copy(update={"content": "mismatched-context"})
             else:
                 modified_query_message = source_query_message.model_copy(
                     update={
@@ -560,6 +579,8 @@ async def test_query_delivery_requires_a_complete_current_persisted_result(image
                 await db.commit()
 
             for key, (messages, _source) in query_messages_by_key.items():
+                if query_variant in {"history-only", "mismatched-context"} and key == "turn_messages":
+                    continue
                 replacement = modified_query_message.model_copy(deep=True)
                 query_index = next(index for index, message in enumerate(messages) if message.role == MessageRole.TOOL and message.tool_call_id == case["query_call_id"])
                 messages[query_index] = replacement

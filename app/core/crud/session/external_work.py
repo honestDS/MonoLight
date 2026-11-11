@@ -220,6 +220,7 @@ class CRUDExternalWork:
         *,
         work: SessionReplyWorkItem,
         commit: bool = False,
+        allow_prior_sequence: bool = False,
     ) -> None:
         execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
         received_task_ids = {task_id for task_id in execution_state.get("received_external_task_ids", []) if isinstance(task_id, int) and not isinstance(task_id, bool) and task_id > 0}
@@ -243,12 +244,17 @@ class CRUDExternalWork:
         for task in tasks:
             extra = task.extra if isinstance(task.extra, dict) else {}
             reply_owner = extra.get("reply_owner")
-            if not isinstance(reply_owner, dict) or (reply_owner.get("work_id") != work.id or reply_owner.get("identity") != work.dedupe_key or reply_owner.get("sequence_no") != work.sequence_no or reply_owner.get("status") != "received"):
+            if not isinstance(reply_owner, dict) or reply_owner.get("work_id") != work.id or reply_owner.get("identity") != work.dedupe_key or reply_owner.get("status") != "received":
+                continue
+
+            owner_sequence_no = reply_owner.get("sequence_no")
+            if owner_sequence_no != work.sequence_no and not (allow_prior_sequence and isinstance(owner_sequence_no, int) and not isinstance(owner_sequence_no, bool) and 0 < owner_sequence_no < work.sequence_no):
                 continue
 
             updated_extra = dict(extra)
             updated_reply_owner = dict(reply_owner)
             updated_reply_owner["status"] = "handled"
+            updated_reply_owner["sequence_no"] = work.sequence_no
             updated_extra["reply_owner"] = updated_reply_owner
             task.extra = updated_extra
             if task.auto_reply is True:

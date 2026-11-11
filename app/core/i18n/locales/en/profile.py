@@ -46,6 +46,7 @@ MESSAGES = {
     "ERR_SUBAGENT_ARGUMENTS_INVALID": "Invalid subagent operation arguments",
     "ERR_SUBAGENT_NOT_FOUND": "Subagent not found in the current session and profile",
     "ERR_SUBAGENT_WORK_NOT_FOUND": "The requested subagent work was not found",
+    "ERR_SUBAGENT_RESULT_NOT_READY": "This subagent task has not finished. Read the board to check its progress.",
     "ERR_SUBAGENT_CONTEXT_INVALID": "The subagent work record is incomplete and cannot be resumed",
     "ERR_SUBAGENT_CALL_CONFLICT": "A tool call cannot submit different subagent operations more than once",
     "ERR_SUBAGENT_CANCELLED": "Subagent work was cancelled. Operations already started may have taken effect",
