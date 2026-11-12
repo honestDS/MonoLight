@@ -269,18 +269,17 @@ async def test_list_projects_real_active_child_state_read_only_and_stable(db_ses
     first = json.loads(await executor.execute("list"))
     second = json.loads(await executor.execute("list"))
 
-    assert first["status"] == "success"
-    assert first["operation"] == "list"
     assert first == second
+    assert set(first) == {"subagents"}
     entries = first["subagents"]
     assert len(entries) == len(expected)
     for entry, (work_id, name, _status, snapshot_status) in zip(entries, expected, strict=True):
-        assert entry["name"] == name
-        assert entry["subagent_id"] == f"{work_id:032x}"
-        assert entry["work"]["work_id"] == work_id
-        assert entry["work"]["current_work_id"] == work_id
-        assert entry["work"]["completed"] is False
-        assert entry["work"]["status"] == snapshot_status
+        assert entry == {
+            "subagent_id": f"{work_id:032x}",
+            "name": name,
+            "work_id": work_id,
+            "status": snapshot_status,
+        }
 
     after = await _child_state_dump(db_session)
     assert after == before
@@ -315,8 +314,7 @@ async def test_list_filters_terminal_child_work_without_archiving_or_clearing_po
 
     result = json.loads(await _executor(db_session, profile).execute("list"))
 
-    assert result["status"] == "success"
-    assert result["subagents"] == []
+    assert result == {"subagents": []}
     await db_session.refresh(subagent)
     await db_session.refresh(round_row)
     await db_session.refresh(work)
@@ -381,13 +379,16 @@ async def test_list_keeps_pending_confirmation_unfinished_and_filters_rejected_r
     executor = _executor(db_session, profile)
     pending = json.loads(await executor.execute("list"))
 
-    assert pending["status"] == "success"
-    assert len(pending["subagents"]) == 1
-    pending_work = pending["subagents"][0]["work"]
-    assert pending_work["work_id"] == 2
-    assert pending_work["current_work_id"] == work.id
-    assert pending_work["status"] == "waiting_confirmation"
-    assert pending_work["completed"] is False
+    assert pending == {
+        "subagents": [
+            {
+                "subagent_id": subagent.id,
+                "name": "needs confirmation",
+                "work_id": 2,
+                "status": "waiting_confirmation",
+            }
+        ]
+    }
 
     record.status = AuditRecordStatus.REJECTED
     await db_session.commit()
@@ -398,8 +399,7 @@ async def test_list_keeps_pending_confirmation_unfinished_and_filters_rejected_r
     await db_session.refresh(record)
     await db_session.refresh(round_row)
     await db_session.refresh(subagent)
-    assert rejected["status"] == "success"
-    assert rejected["subagents"] == []
+    assert rejected == {"subagents": []}
     assert record.model_dump(mode="json") == rejected_record_state
     assert round_row.model_dump(mode="json") == confirmation_round_state
     assert round_row.waiting_confirmation is True
@@ -440,15 +440,16 @@ async def test_list_projects_confirmed_continuation_work_as_current_snapshot(db_
     assert profile is not None
     result = json.loads(await _executor(db_session, profile).execute("list"))
 
-    assert result["status"] == "success"
-    assert len(result["subagents"]) == 1
-    entry = result["subagents"][0]
-    assert entry["subagent_id"] == subagent.id
-    assert entry["name"] == "confirmed continuation"
-    assert entry["work"]["work_id"] == old_work.id
-    assert entry["work"]["current_work_id"] == continued_work.id
-    assert entry["work"]["status"] == "running"
-    assert entry["work"]["completed"] is False
+    assert result == {
+        "subagents": [
+            {
+                "subagent_id": subagent.id,
+                "name": "confirmed continuation",
+                "work_id": old_work.id,
+                "status": "running",
+            }
+        ]
+    }
 
 
 @pytest.mark.asyncio
@@ -554,11 +555,16 @@ async def test_list_isolated_to_user_session_and_profile_scope(db_session: Async
     result = json.loads(await _executor(db_session, profile).execute("list"))
     serialized_result = json.dumps(result, ensure_ascii=False)
 
-    assert result["status"] == "success"
-    assert result["operation"] == "list"
-    assert len(result["subagents"]) == 1
-    assert result["subagents"][0]["subagent_id"] == visible.id
-    assert result["subagents"][0]["name"] == "visible"
+    assert result == {
+        "subagents": [
+            {
+                "subagent_id": visible.id,
+                "name": "visible",
+                "work_id": visible.active_child_work_id,
+                "status": "ready_for_llm",
+            }
+        ]
+    }
     private_values = [
         other_session_name,
         other_session_id,
@@ -618,7 +624,7 @@ async def test_list_during_parent_child_conversation_reports_only_unfinished_sub
         for row in rows:
             message = InternalMessage.model_validate_json(row.content or "{}")
             payload = json.loads(message.content or "{}")
-            if payload.get("operation") == "list":
+            if set(payload) == {"subagents"}:
                 results.append((message, payload))
         return results
 
@@ -713,13 +719,16 @@ async def test_list_during_parent_child_conversation_reports_only_unfinished_sub
             assert len(list_results) == 1
             list_result_message, first_list_result = list_results[0]
             assert list_result_message.tool_execution_status == "succeeded"
-            assert first_list_result["status"] == "success"
-            assert first_list_result["operation"] == "list"
-            assert len(first_list_result["subagents"]) == 1
-            assert first_list_result["subagents"][0]["subagent_id"] == pending_subagent_id
-            assert first_list_result["subagents"][0]["name"] == pending_name
-            assert first_list_result["subagents"][0]["work"]["work_id"] == pending_child_work_id
-            assert first_list_result["subagents"][0]["work"]["status"] == "ready_for_llm"
+            assert first_list_result == {
+                "subagents": [
+                    {
+                        "subagent_id": pending_subagent_id,
+                        "name": pending_name,
+                        "work_id": pending_child_work_id,
+                        "status": "ready_for_llm",
+                    }
+                ]
+            }
 
         second_summary = "second-independent-task-result"
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=second_summary))
@@ -754,17 +763,19 @@ async def test_list_during_parent_child_conversation_reports_only_unfinished_sub
             child_result_message = InternalMessage.model_validate_json(child_result_row.content or "{}")
             child_result_payload = json.loads(child_result_message.content or "{}")
             assert child_result_message.tool_execution_status == "succeeded"
-            assert child_result_payload["status"] == "success"
-            assert child_result_payload["work"]["result"]["content"] == second_summary
+            assert child_result_payload == {
+                "status": "succeeded",
+                "subagent_id": pending_subagent_id,
+                "work_id": pending_child_work_id,
+                "content": second_summary,
+            }
             final_list_results = await persisted_list_results(db, uid=runtime.uid, session_id=runtime.session_id, profile_id=runtime.profile.id)
             assert len(final_list_results) == 2
             assert final_list_results[0][0].tool_execution_status == "succeeded"
             assert final_list_results[0][1] == first_list_result
             final_list_result_message, final_list_result = final_list_results[-1]
             assert final_list_result_message.tool_execution_status == "succeeded"
-            assert final_list_result["status"] == "success"
-            assert final_list_result["operation"] == "list"
-            assert final_list_result["subagents"] == []
+            assert final_list_result == {"subagents": []}
 
 
 @pytest.mark.parametrize(
@@ -779,11 +790,10 @@ async def test_list_rejects_unexpected_arguments(db_session: AsyncSession, field
 
     result = json.loads(await _executor(db_session, profile).execute("list", **{field: value}))
 
-    assert result["status"] == "failed"
-    assert result["operation"] == "list"
-    assert result["error"] == t(ERR_SUBAGENT_ARGUMENTS_INVALID)
-    assert result["details"] == [{"field": field, "type": "extra_forbidden"}]
-    assert "subagents" not in result
+    assert result == {
+        "error": t(ERR_SUBAGENT_ARGUMENTS_INVALID),
+        "details": [{"field": field, "type": "extra_forbidden"}],
+    }
 
 
 @pytest.mark.asyncio
@@ -804,10 +814,7 @@ async def test_list_requires_a_valid_foreground_parent_claim(db_session: AsyncSe
     result = json.loads(await _executor(db_session, profile).execute("list"))
     serialized_result = json.dumps(result, ensure_ascii=False)
 
-    assert result["status"] == "failed"
-    assert result["operation"] == "list"
-    assert result["error"] == t(ERR_SUBAGENT_CONTEXT_INVALID)
-    assert "subagents" not in result
+    assert result == {"error": t(ERR_SUBAGENT_CONTEXT_INVALID)}
     assert subagent_id not in serialized_result
     after = await _child_state_dump(db_session)
     assert after == before

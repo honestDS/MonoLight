@@ -120,7 +120,6 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
             child_key = build_session_cache_key(uid=runtime.uid, session_id=runtime.session_id, subagent_id=subagent_id)
             assert parent_key != child_key
             parent_call = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id))).scalars().one()
-            parent_tool_call_id = parent_call.tool_call_id
 
         child_provider_start = len(runtime.provider_payloads)
         write_call_id = "recovery-child-write-call"
@@ -188,9 +187,7 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
             board_posts = (await db.execute(select(SubagentBoardPost).where(SubagentBoardPost.child_work_id == child_work_id))).scalars().all()
             assert len(board_posts) == 1
             assert board_posts[0].stage == "execution_unknown"
-            board_payload = json.loads(board_posts[0].content)
-            assert board_payload["status"] == old_round.result["status"]
-            assert board_payload["error"] == old_round.result["error"] == old_error
+            assert board_posts[0].content == old_error
             assert parent is not None and parent.status == SessionReplyWorkStatus.READY_FOR_LLM
             ready_events = (await db.execute(select(SessionEvent).where(SessionEvent.session_id == runtime.session_id, SessionEvent.uid == runtime.uid))).scalars().all()
             ready_events = [event for event in ready_events if event.event.get("type") == "work_ready" and event.event.get("work_id") == parent_work_id]
@@ -200,8 +197,13 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
             result_row = await db.get(Message, result_call.tool_result_message_id)
             assert result_row is not None
             result_message, result_payload = _result_payload(result_row)
-            assert result_message.tool_call_id == parent_tool_call_id and result_payload["status"] == "execution_unknown"
-            assert result_payload["work_id"] == child_work_id
+            assert result_message.tool_call_id == result_call.tool_call_id
+            assert result_payload == {
+                "subagent_id": result_call.subagent_id,
+                "work_id": child_work_id,
+                "status": "execution_unknown",
+                "reason": old_error,
+            }
         old_parent_provider_start = len(runtime.provider_payloads)
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="原父已收到未知结果"))
         old_parent_done = await runtime.run_next()
@@ -232,14 +234,16 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
             for row in result_rows:
                 message, payload = _result_payload(row)
                 if message.tool_call_id in query_call_ids:
+                    assert message.tool_execution_status == "succeeded"
                     query_results[message.tool_call_id] = payload
             assert set(query_results) == query_call_ids
             for payload in query_results.values():
-                assert payload["operation"] == "query_result"
-                assert payload["status"] == "success"
-                assert payload["work"]["status"] == "execution_unknown"
-                assert payload["work"]["completed"] is True
-                assert payload["work"]["work_id"] == child_work_id and payload["work"]["error"] == old_error
+                assert payload == {
+                    "subagent_id": subagent_id,
+                    "work_id": child_work_id,
+                    "status": "execution_unknown",
+                    "reason": old_error,
+                }
             new_child = await _child_for_parent(db, new_parent_work_id)
             assert new_child.id is not None and new_child.id != child_work_id and new_child.subagent_id == subagent_id
             new_child_work_id = new_child.id
@@ -289,8 +293,20 @@ async def test_interrupted_subagent_round_recovers_saved_progress_without_replay
                 assert result_row is not None
                 result_message, result_payload = _result_payload(result_row)
                 assert result_message.tool_call_id == call.tool_call_id
-                assert result_payload["child_work_id"] == call.child_work_id
-                assert result_payload["status"] == ("execution_unknown" if call.arguments["operation"] == "create" else "success")
+                if call.arguments["operation"] == "create":
+                    assert result_payload == {
+                        "subagent_id": call.subagent_id,
+                        "work_id": call.child_work_id,
+                        "status": "execution_unknown",
+                        "reason": old_error,
+                    }
+                else:
+                    assert result_payload == {
+                        "subagent_id": call.subagent_id,
+                        "work_id": call.child_work_id,
+                        "status": "succeeded",
+                        "content": new_summary,
+                    }
         assert target.read_text(encoding="utf-8") == sentinel_content
 
 
@@ -441,8 +457,11 @@ async def test_interrupted_mixed_child_and_image_wait_recovers_without_losing_im
                 queued_results[result_message.tool_call_id] = result_payload
                 queued_result_rows[result_message.tool_call_id] = row
             assert set(queued_results) == {actual_create_call_id, actual_image_call_id}
-            assert queued_results[actual_create_call_id]["status"] == "queued"
-            assert queued_results[actual_create_call_id]["child_work_id"] == child_work_id
+            assert queued_results[actual_create_call_id] == {
+                "subagent_id": child.subagent_id,
+                "work_id": child_work_id,
+                "status": "queued",
+            }
             assert queued_results[actual_image_call_id]["status"] == "queued"
             assert queued_results[actual_image_call_id]["task_id"] == image_task_id
             queued_child_result_row = queued_result_rows[actual_create_call_id]
@@ -551,9 +570,12 @@ async def test_interrupted_mixed_child_and_image_wait_recovers_without_losing_im
             result_message, result_payload = _result_payload(result_row)
             assert result_message.tool_call_id == parent_call.tool_call_id
             assert result_message.tool_execution_status == "succeeded"
-            assert result_payload["status"] == "success"
-            assert result_payload["child_work_id"] == child_work_id
-            assert result_payload["work"]["result"]["content"] == child_summary
+            assert result_payload == {
+                "subagent_id": parent_call.subagent_id,
+                "work_id": child_work_id,
+                "status": "succeeded",
+                "content": child_summary,
+            }
 
             image_tasks = (
                 (
@@ -684,7 +706,30 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
                 payload = None
             claim = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
             claimed_work_id = claim[0] if isinstance(claim, (tuple, list)) and len(claim) == 2 else None
-            target_result = not interrupted and claimed_work_id == parent_work_id and isinstance(payload, dict) and payload.get("status") == "queued" and payload.get("operation") == operation and payload.get("child_work_id") is not None
+            persisted_calls = []
+            if claimed_work_id == parent_work_id:
+                persisted_calls = (
+                    (
+                        await db.execute(
+                            select(SubagentToolCall).where(
+                                SubagentToolCall.parent_work_id == claimed_work_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            matching_calls = [call for call in persisted_calls if call.arguments == second_arguments and call.delivered is False]
+            target_result = (
+                not interrupted
+                and claimed_work_id == parent_work_id
+                and isinstance(payload, dict)
+                and set(payload) == {"subagent_id", "work_id", "status"}
+                and payload.get("status") == "queued"
+                and len(matching_calls) == 1
+                and payload.get("work_id") == matching_calls[0].child_work_id
+                and payload.get("subagent_id") == matching_calls[0].subagent_id
+            )
             if target_result:
                 if interruption_point == "after-result-save":
                     saved_result = await original_save_tool_response(*args, **kwargs)
@@ -779,8 +824,11 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
             assert len(matching_second_results) == 1
             second_result_row, _, second_result_payload = matching_second_results[0]
             assert second_result_row.id == calls[1].tool_result_message_id
-            assert second_result_payload["status"] == "queued"
-            assert second_result_payload["child_work_id"] == second_child_work_id
+            assert second_result_payload == {
+                "subagent_id": calls[1].subagent_id,
+                "work_id": second_child_work_id,
+                "status": "queued",
+            }
             assert (saved_second_result_id is not None) is (interruption_point == "after-result-save")
             if saved_second_result_id is not None:
                 assert second_result_row.id == saved_second_result_id
@@ -848,9 +896,12 @@ async def test_interrupted_second_subagent_round_after_external_resume_recovers_
                 result_row, result_message, result_payload = matching_results[0]
                 assert result_row.id == call.tool_result_message_id
                 assert result_message.tool_execution_status == "succeeded"
-                assert result_payload["status"] == "success"
-                assert result_payload["child_work_id"] == call.child_work_id
-                assert result_payload["work"]["result"]["content"] == expected_summary
+                assert result_payload == {
+                    "subagent_id": call.subagent_id,
+                    "work_id": call.child_work_id,
+                    "status": "succeeded",
+                    "content": expected_summary,
+                }
 
 
 @pytest.mark.parametrize("interruption_point", ["before-result-save", "after-result-save"], ids=["before-c-result-save", "after-c-result-save"])
@@ -975,6 +1026,7 @@ async def test_interrupted_parent_create_preserves_registered_child_delivery_wit
 
         async def interrupt_c_queued_result(*args, **kwargs):
             nonlocal interrupted, saved_c_result_id
+            db = args[0] if args else kwargs["db"]
             tool_result = kwargs.get("tool_res")
             if tool_result is None and len(args) > 4:
                 tool_result = args[4]
@@ -982,7 +1034,32 @@ async def test_interrupted_parent_create_preserves_registered_child_delivery_wit
                 payload = json.loads(tool_result.content or "{}")
             except (AttributeError, TypeError, ValueError):
                 payload = None
-            target_result = isinstance(payload, dict) and payload.get("status") == "queued" and payload.get("operation") == "create" and payload.get("child_work_id") is not None
+            claim = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+            claimed_work_id = claim[0] if isinstance(claim, (tuple, list)) and len(claim) == 2 else None
+            persisted_calls = []
+            if claimed_work_id == parent_work_id:
+                persisted_calls = (
+                    (
+                        await db.execute(
+                            select(SubagentToolCall).where(
+                                SubagentToolCall.parent_work_id == claimed_work_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            matching_calls = [call for call in persisted_calls if call.arguments == third_create_call.arguments and call.delivered is False]
+            target_result = (
+                not interrupted
+                and claimed_work_id == parent_work_id
+                and isinstance(payload, dict)
+                and set(payload) == {"subagent_id", "work_id", "status"}
+                and payload.get("status") == "queued"
+                and len(matching_calls) == 1
+                and payload.get("work_id") == matching_calls[0].child_work_id
+                and payload.get("subagent_id") == matching_calls[0].subagent_id
+            )
             if target_result:
                 if interruption_point == "after-result-save":
                     saved_result = await original_save_tool_response(*args, **kwargs)
@@ -1194,9 +1271,12 @@ async def test_interrupted_parent_create_preserves_registered_child_delivery_wit
                 result_row, result_message, result_payload = result_rows_by_call_id[call.tool_call_id]
                 assert call.tool_result_message_id == result_row.id
                 assert result_message.tool_execution_status == "succeeded"
-                assert result_payload["status"] == "success"
-                assert result_payload["child_work_id"] == child_work_id
-                assert result_payload["work"]["result"]["content"] == expected_summary
+                assert result_payload == {
+                    "subagent_id": call.subagent_id,
+                    "work_id": child_work_id,
+                    "status": "succeeded",
+                    "content": expected_summary,
+                }
 
 
 @pytest.mark.asyncio
@@ -1452,15 +1532,28 @@ async def test_send_message_takes_over_fixed_context_child_report(image_chat_run
             assert old_calls and all(call.arguments["operation"] == "create" and call.delivered is True and call.tool_result_message_id is not None for call in old_calls)
             old_result = await db.get(Message, old_create_result_message_id)
             assert old_result is not None
-            _, old_payload = _result_payload(old_result)
-            assert old_payload["work"]["result"]["content"] == first_summary
+            old_result_message, old_payload = _result_payload(old_result)
+            old_call = next(call for call in old_calls if call.tool_result_message_id == old_create_result_message_id)
+            assert old_result_message.tool_call_id == old_call.tool_call_id
+            assert old_payload == {
+                "subagent_id": old_call.subagent_id,
+                "work_id": old_call.child_work_id,
+                "status": "succeeded",
+                "content": first_summary,
+            }
 
             new_call = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == new_parent_work_id, SubagentToolCall.child_work_id == new_child_work_id))).scalars().one()
             assert new_call.arguments == send_call.arguments and new_call.delivered is True and new_call.tool_result_message_id is not None
             new_result = await db.get(Message, new_call.tool_result_message_id)
             assert new_result is not None
-            _, new_payload = _result_payload(new_result)
-            assert new_payload["work"]["result"]["content"] == new_summary
+            new_result_message, new_payload = _result_payload(new_result)
+            assert new_result_message.tool_call_id == new_call.tool_call_id
+            assert new_payload == {
+                "subagent_id": new_call.subagent_id,
+                "work_id": new_call.child_work_id,
+                "status": "succeeded",
+                "content": new_summary,
+            }
 
             assistant_rows = (await db.execute(select(Message).where(Message.role == MessageRole.ASSISTANT))).scalars().all()
             assert sum(new_parent_final in (row.content or "") for row in assistant_rows) == 1

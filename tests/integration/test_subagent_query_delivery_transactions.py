@@ -227,8 +227,7 @@ async def _query_transaction_case(image_chat_runtime):
                 subagent_id=b_subagent_id,
                 work_id=child_b_work_id,
             )
-            assert query_result_payload["status"] == "success"
-            assert query_result_payload["operation"] == "query_result"
+            assert query_result_payload["status"] == "succeeded"
             query_result = InternalMessage(
                 role=MessageRole.TOOL,
                 type=MessageType.TOOL_RESULT,
@@ -363,7 +362,7 @@ async def test_query_delivery_checkpoint_save_failure_rolls_back(
             assert parent.status == SessionReplyWorkStatus.RUNNING
             assert b_call.delivered is True
             assert "child_work_waits" not in parent.execution_state
-            assert _message_payload(b_result)["status"] == "success"
+            assert _message_payload(b_result)["status"] == "succeeded"
             persisted = await reply_work_crud.get_checkpoint(db, parent_work_id)
             assert isinstance(persisted, dict)
             assert _checkpoint_query_result(persisted, case["query_call_id"]).id == case["query_result_message_id"]
@@ -484,7 +483,7 @@ async def test_query_delivery_checkpoint_survives_database_reopen(image_chat_run
             assert parent.locked_by == worker_id
             assert b_call.delivered is True
             assert "child_work_waits" not in parent.execution_state
-            assert _message_payload(b_result)["status"] == "success"
+            assert _message_payload(b_result)["status"] == "succeeded"
             assert _message_payload(query_result) == case["query_result_payload"]
             assert _checkpoint_query_result(persisted, case["query_call_id"]).id == case["query_result_message_id"]
             assert await _notification_snapshot(db, runtime.session_id) == case["notification_snapshot"]
@@ -525,18 +524,12 @@ async def test_query_delivery_requires_a_complete_current_persisted_result(image
             source_query_message = query_messages_by_key["messages"][1]
             if query_variant == "truncated":
                 query_payload = json.loads(source_query_message.content or "{}")
-                truncated_work = deepcopy(query_payload["work"])
-                truncated_result = deepcopy(truncated_work["result"])
-                assert isinstance(truncated_result.get("content"), str)
-                truncated_result["content"] = truncated_result["content"][:-1]
-                truncated_work["result"] = truncated_result
-                query_payload["work"] = truncated_work
+                assert isinstance(query_payload.get("content"), str)
+                query_payload["content"] = query_payload["content"][:-1]
                 modified_query_message = source_query_message.model_copy(update={"content": json.dumps(query_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))})
             elif query_variant == "running":
                 query_payload = json.loads(source_query_message.content or "{}")
-                running_work = deepcopy(query_payload["work"])
-                running_work["completed"] = False
-                query_payload["work"] = running_work
+                query_payload["status"] = "running"
                 modified_query_message = source_query_message.model_copy(update={"content": json.dumps(query_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))})
             elif query_variant == "failed":
                 query_payload = json.loads(source_query_message.content or "{}")
@@ -546,9 +539,7 @@ async def test_query_delivery_requires_a_complete_current_persisted_result(image
                 modified_query_message = source_query_message.model_copy(update={"id": None})
             elif query_variant == "wrong-child":
                 query_payload = json.loads(source_query_message.content or "{}")
-                wrong_work = deepcopy(query_payload["work"])
-                wrong_work["work_id"] = case["child_b_work_id"] + 10_000_000
-                query_payload["work"] = wrong_work
+                query_payload["work_id"] = case["child_b_work_id"] + 10_000_000
                 modified_query_message = source_query_message.model_copy(update={"content": json.dumps(query_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))})
             elif query_variant == "unverified-suffix":
                 modified_query_message = source_query_message.model_copy(update={"content": f"{source_query_message.content}\n\nunverified-model-suffix"})
@@ -629,8 +620,8 @@ async def test_query_delivery_requires_a_complete_current_persisted_result(image
             assert b_call.delivered is True
             assert "child_work_waits" not in parent.execution_state
             b_payload = _message_payload(b_result)
-            assert b_payload["status"] == "success"
-            assert b_payload["work"]["result"]["content"] == case["summary_b"]
+            assert b_payload["status"] == "succeeded"
+            assert b_payload["content"] == case["summary_b"]
             notification_snapshot = await _notification_snapshot(db, runtime.session_id)
             baseline_marker_ids = {marker[0] for marker in case["notification_snapshot"][0]}
             new_markers = [marker for marker in notification_snapshot[0] if marker[0] not in baseline_marker_ids]
@@ -737,7 +728,7 @@ async def test_query_delivery_save_and_automatic_delivery_race_without_duplicate
             assert b_call.delivered is True
             assert "child_work_waits" not in parent.execution_state
             b_result_payload = _message_payload(b_result)
-            assert b_result_payload["work"]["result"]["content"] == case["summary_b"]
+            assert b_result_payload["content"] == case["summary_b"]
             assert _message_payload(query_result) == case["query_result_payload"]
             assert _checkpoint_query_result(persisted, case["query_call_id"]).id == case["query_result_message_id"]
             b_result_rows = []

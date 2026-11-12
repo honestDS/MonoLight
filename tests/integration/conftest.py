@@ -236,6 +236,12 @@ def image_chat_runtime(
                 }
             raw_output = [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": content}]}] if content is not None else []
             raw_output.extend({"type": "function_call", "id": call.id, "call_id": call.id, "name": call.name, "arguments": json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")), "status": "completed"} for call in tool_calls)
+            output_formats = {"image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp"}
+            for image in message.generated_images or []:
+                image_output = {"type": "image_generation_call", "status": "completed", "id": image.id, "result": image.data}
+                if image.mime_type is not None:
+                    image_output["output_format"] = output_formats[image.mime_type]
+                raw_output.append(image_output)
             return {
                 "id": f"workflow-response-{len(provider_payloads)}",
                 "object": "response",

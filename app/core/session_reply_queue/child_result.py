@@ -1,8 +1,11 @@
+import asyncio
 import json
 import time
 from collections import Counter
 from copy import deepcopy
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+from urllib.parse import quote
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,13 +21,16 @@ from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud as reply_work_crud
 from app.core.exceptions import ParameterException
 from app.core.i18n import t
+from app.core.paths import get_user_temp_dir
 from app.core.session_reply_queue.executor_common import _result_message_dedupe_key
+from app.core.tools.send_file_to_user import resolve_file_token
 from app.models.audit import AuditRecordStatus
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
-from app.models.subagent import Subagent, SubagentToolCall, SubagentWork
+from app.models.subagent import Subagent, SubagentWork
+from app.schemas.response import SentFile
 
-__all__ = ["build_child_call_result", "get_child_snapshot", "load_child_work"]
+__all__ = ["build_subagent_work_result", "get_child_snapshot", "load_child_work"]
 
 
 async def load_child_work(
@@ -91,6 +97,56 @@ async def _failed_execution_is_unknown(db: AsyncSession, work: SessionReplyWorkI
     return any(message["role"] == MessageRole.TOOL and message.get("tool_execution_status") == "execution_unknown" for key in ("messages", "turn_messages") for message in checkpoint.get(key, []))
 
 
+def _add_verified_generated_image_paths(files: list[Any], uid: str) -> list[dict[str, Any]]:
+    verified_files: list[dict[str, Any]] = []
+
+    if not isinstance(uid, str) or not uid or "\x00" in uid or uid in {".", ".."} or PurePosixPath(uid).name != uid or PureWindowsPath(uid).name != uid:
+        return verified_files
+
+    try:
+        user_dir = get_user_temp_dir(Path.cwd(), uid)
+        temp_root = user_dir.parent.resolve(strict=False)
+        generated_dir = temp_root / user_dir.name / "generated_images"
+    except (OSError, RuntimeError, ValueError):
+        return verified_files
+
+    for file_item in files:
+        try:
+            sent_file = SentFile.model_validate(file_item)
+            if not sent_file.mime_type.lower().startswith("image/"):
+                continue
+            if sent_file.download_url != f"/api/v1/download-sent?token={quote(sent_file.id)}":
+                continue
+            registered_path = resolve_file_token(sent_file.id, uid=uid)
+            if registered_path.parent != generated_dir:
+                continue
+            resolved_path = registered_path.resolve(strict=True)
+            if resolved_path != registered_path or not resolved_path.is_file():
+                continue
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+        verified_file = sent_file.model_dump()
+        verified_file["name"] = resolved_path.name
+        verified_file["path"] = str(resolved_path)
+        verified_files.append(verified_file)
+
+    return verified_files
+
+
+def _parse_saved_assistant_files(content: str | None) -> tuple[str, list[Any]] | None:
+    try:
+        payload = json.loads(content or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("type") != "assistant_files":
+        return None
+    text = payload.get("text")
+    files = payload.get("files")
+    if not isinstance(text, str) or not isinstance(files, list) or not files:
+        return None
+    return text, files
+
+
 async def get_child_snapshot(
     db: AsyncSession,
     *,
@@ -155,10 +211,23 @@ async def get_child_snapshot(
         response = work.execution_state.get("response") or {}
         final_text = message is not None and message.type == MessageType.TEXT and message.role == MessageRole.ASSISTANT
         if response.get("skip_reply") is True or final_text:
+            content = deepcopy(response.get("content"))
+            response_files = response.get("files")
+            skip_reply = response.get("skip_reply") is True
+            if not response_files and final_text and not skip_reply:
+                saved_assistant_files = _parse_saved_assistant_files(message.content)
+                if saved_assistant_files is not None:
+                    saved_content, response_files = saved_assistant_files
+                    if content is None:
+                        content = saved_content
+            if isinstance(response_files, list) and response_files:
+                response_files = await asyncio.to_thread(_add_verified_generated_image_paths, response_files, work.uid)
+            else:
+                response_files = deepcopy(response_files)
             result = {
-                "content": deepcopy(response.get("content")),
-                "files": deepcopy(response.get("files")),
-                "skip_reply": response.get("skip_reply") is True,
+                "content": content,
+                "files": response_files,
+                "skip_reply": skip_reply,
             }
             if result["content"] is None and message is not None:
                 result["content"] = message.content
@@ -184,16 +253,20 @@ async def get_child_snapshot(
     return snapshot
 
 
-def build_child_call_result(call: SubagentToolCall, snapshot: dict[str, Any]) -> dict[str, Any]:
-    status = {"succeeded": "success", "execution_unknown": "execution_unknown"}.get(snapshot["status"], "failed")
+def build_subagent_work_result(subagent_id: str, snapshot: dict[str, Any]) -> dict[str, Any]:
     result = {
-        "status": status,
-        "operation": call.arguments["operation"],
-        "subagent_id": call.subagent_id,
-        "work_id": call.child_work_id,
-        "child_work_id": call.child_work_id,
-        "work": deepcopy(snapshot),
+        "subagent_id": subagent_id,
+        "work_id": snapshot["work_id"],
+        "status": snapshot["status"],
     }
-    if status != "success":
-        result["error"] = snapshot["error"]
+    internal_result = snapshot.get("result")
+    if isinstance(internal_result, dict):
+        if internal_result.get("content"):
+            result["content"] = deepcopy(internal_result["content"])
+        if internal_result.get("files"):
+            result["files"] = deepcopy(internal_result["files"])
+        if snapshot["status"] == "succeeded" and internal_result.get("skip_reply") is True:
+            result["status"] = "ended_without_reply"
+    if snapshot.get("error"):
+        result["reason"] = deepcopy(snapshot["error"])
     return result

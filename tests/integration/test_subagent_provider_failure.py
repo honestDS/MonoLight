@@ -221,7 +221,7 @@ async def _assert_failed_child_delivery(runtime, parent_work_id: int, child_work
             .all()
         )
         assert len(failed_posts) == 1
-        assert json.loads(failed_posts[0].content) == round_row.result
+        assert failed_posts[0].content == expected_error
 
         call = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id))).scalars().one()
         assert call.delivered is True
@@ -233,10 +233,12 @@ async def _assert_failed_child_delivery(runtime, parent_work_id: int, child_work
         tool_result_message = InternalMessage.model_validate_json(tool_result.content or "{}")
         assert tool_result_message.tool_execution_status == "failed"
         tool_result_payload = json.loads(tool_result_message.content or "{}")
-        assert tool_result_payload["status"] == "failed"
-        assert tool_result_payload["error"] == expected_error
-        assert tool_result_payload["work"]["error"] == expected_error
-        assert tool_result_payload["work"] == round_row.result
+        assert tool_result_payload == {
+            "subagent_id": call.subagent_id,
+            "work_id": child_work_id,
+            "status": "failed",
+            "reason": expected_error,
+        }
 
         parent = await db.get(SessionReplyWorkItem, parent_work_id)
         assert parent is not None
@@ -353,6 +355,170 @@ async def test_subagent_provider_failure_is_delivered_as_failed_work(
         await _set_session_stream(runtime, False)
         await _resume_parent(runtime, parent_work_id, expected_error)
         assert await _context_snapshot(runtime) == context_before
+
+
+@pytest.mark.asyncio
+async def test_query_result_reports_failed_subagent_with_successful_tool_execution(image_chat_runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+    async with image_chat_runtime("OPENAI_RESPONSES", goal_mode=False) as runtime:
+        await _configure_runtime(runtime)
+        parent_work_id, child_work_id, _ = await _start_parent(runtime)
+        raise_provider_error, provider_exceptions, provider_error_messages = _error_capture("provider")
+
+        async def fail_post_json(transformer, **kwargs):
+            runtime.provider_payloads.append(kwargs["payload"])
+            raise_provider_error(transformer)
+
+        with monkeypatch.context() as child_patch:
+            child_patch.setattr(OpenAIResponsesTransformer, "_post_json", fail_post_json)
+            child_done = await runtime.run_next(independent_only=True)
+
+        assert child_done is not None and child_done.id == child_work_id and child_done.status == SessionReplyWorkStatus.FAILED
+        assert len(provider_exceptions) == len(provider_error_messages) == 1
+        expected_error = provider_error_messages[0]
+        await _assert_failed_child_delivery(runtime, parent_work_id, child_work_id, expected_error)
+
+        async with runtime.factory() as db:
+            child = await db.get(SessionReplyWorkItem, child_work_id)
+            parent = await db.get(SessionReplyWorkItem, parent_work_id)
+            assert child is not None and child.subagent_id is not None and parent is not None
+            subagent_id, parent_message_id = child.subagent_id, int(parent.source_id)
+
+        query_call = InternalToolCall(id="query-failed-child", name=AGENT_WORK_TOOL_NAME, arguments={"operation": "query_result", "subagent_id": subagent_id, "work_id": child_work_id})
+        runtime.outputs.extend([InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[query_call]), InternalMessage(role=MessageRole.ASSISTANT, content="parent completed after querying the failed child")])
+        parent_done = await runtime.run_next(independent_only=False)
+        assert parent_done is not None and parent_done.id == parent_work_id and parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        async with runtime.factory() as db:
+            messages = (
+                (
+                    await db.execute(
+                        select(Message)
+                        .where(
+                            Message.session_id == runtime.session_id,
+                            Message.uid == runtime.uid,
+                            Message.profile_id == runtime.profile.id,
+                            Message.id >= parent_message_id,
+                            Message.work_id.is_(None),
+                            Message.role.in_((MessageRole.ASSISTANT, MessageRole.TOOL)),
+                            Message.type.in_((MessageType.TOOL_CALL, MessageType.TOOL_RESULT)),
+                        )
+                        .order_by(Message.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            persisted_query_call = None
+            query_result_message = None
+            for row in messages:
+                if row.role == MessageRole.ASSISTANT and row.type == MessageType.TOOL_CALL:
+                    assistant_message = InternalMessage.model_validate_json(row.content or "{}")
+                    for call in assistant_message.tool_calls or []:
+                        if call.name == query_call.name and call.arguments == query_call.arguments:
+                            persisted_query_call = call
+                elif row.role == MessageRole.TOOL and row.type == MessageType.TOOL_RESULT:
+                    tool_result_message = InternalMessage.model_validate_json(row.content or "{}")
+                    if persisted_query_call is not None and tool_result_message.tool_call_id == persisted_query_call.id:
+                        query_result_message = tool_result_message
+
+            assert persisted_query_call is not None
+            assert query_result_message is not None
+            assert query_result_message.tool_execution_status == "succeeded"
+            assert json.loads(query_result_message.content or "{}") == {
+                "subagent_id": subagent_id,
+                "work_id": child_work_id,
+                "status": "failed",
+                "reason": expected_error,
+            }
+
+
+@pytest.mark.asyncio
+async def test_subagent_end_session_skip_reply_is_delivered_as_compact_success(image_chat_runtime) -> None:
+    async with image_chat_runtime("OPENAI_RESPONSES", goal_mode=False) as runtime:
+        await _configure_runtime(runtime, include_end_session=True)
+        parent_work_id, child_work_id, _ = await _start_parent(runtime)
+
+        runtime.outputs.append(
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                tool_calls=[
+                    InternalToolCall(
+                        id="child-end-session-skip-reply",
+                        name=END_SESSION_TOOL_NAME,
+                        arguments={"skip_reply": True},
+                    )
+                ],
+            )
+        )
+        child_done = await runtime.run_next(independent_only=True)
+        assert child_done is not None
+        assert child_done.id == child_work_id
+        assert child_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        async with runtime.factory() as db:
+            child = await db.get(SessionReplyWorkItem, child_work_id)
+            assert child is not None
+            assert child.result_message_id is None
+            child_reports = (
+                (
+                    await db.execute(
+                        select(Message).where(
+                            Message.work_id == child_work_id,
+                            Message.role == MessageRole.ASSISTANT,
+                            Message.type == MessageType.TEXT,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert child_reports == []
+
+            round_row = await db.get(SubagentWork, child_work_id)
+            assert round_row is not None
+            assert isinstance(round_row.result, dict)
+            assert round_row.result["completed"] is True
+            assert round_row.result["status"] == "succeeded"
+            assert round_row.result["result"]["skip_reply"] is True
+
+            board_posts = (
+                (
+                    await db.execute(
+                        select(SubagentBoardPost).where(
+                            SubagentBoardPost.child_work_id == child_work_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(board_posts) == 1
+            assert board_posts[0].stage == "ended_without_reply"
+            assert board_posts[0].content == ""
+
+            call = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.parent_work_id == parent_work_id))).scalars().one()
+            assert call.delivered is True
+            assert call.tool_result_message_id is not None
+            tool_result = await db.get(Message, call.tool_result_message_id)
+            assert tool_result is not None
+            tool_result_message = InternalMessage.model_validate_json(tool_result.content or "{}")
+            assert tool_result_message.tool_execution_status == "succeeded"
+            assert json.loads(tool_result_message.content or "{}") == {
+                "subagent_id": call.subagent_id,
+                "work_id": child_work_id,
+                "status": "ended_without_reply",
+            }
+
+            parent = await db.get(SessionReplyWorkItem, parent_work_id)
+            assert parent is not None
+            assert parent.status == SessionReplyWorkStatus.READY_FOR_LLM
+
+        parent_content = "parent continued after the child ended without a reply"
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_content))
+        parent_done = await runtime.run_next(independent_only=False)
+        assert parent_done is not None
+        assert parent_done.id == parent_work_id
+        assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
 
 
 @pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"], ids=["openai", "openai-responses"])

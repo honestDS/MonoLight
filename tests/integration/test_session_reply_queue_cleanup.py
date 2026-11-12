@@ -952,10 +952,7 @@ async def test_query_subagent_refreshes_retention_until_strictly_after_24_hours(
             work_id=child.id if specify_work_id else None,
         )
 
-        assert response["status"] == "success"
-        assert response["work"]["completed"] == saved_round_result["completed"]
-        assert response["work"]["status"] == saved_round_result["status"]
-        assert response["work"]["result"] == saved_round_result["result"]
+        assert response == {"subagent_id": subagent.id, "work_id": child.id, "status": "succeeded", "content": saved_round_result["result"]["content"]}
 
     async with subagent_database() as db:
         subagent_row = (await db.execute(select(Subagent).where(Subagent.id == subagent.id))).scalars().one()
@@ -1036,8 +1033,12 @@ async def test_idle_cleanup_rechecks_activity_after_candidate_scan(subagent_data
                         profile_id=1,
                         subagent_id=subagent.id,
                     )
-                    assert response["status"] == "success"
-                    assert response["operation"] == "query_result"
+                    assert response == {
+                        "subagent_id": subagent.id,
+                        "work_id": child.id,
+                        "status": "succeeded",
+                        "content": saved_round_result["result"]["content"],
+                    }
                     new_work_id = None
                 else:
                     response = await child_work.send_subagent_message(
@@ -1050,7 +1051,7 @@ async def test_idle_cleanup_rechecks_activity_after_candidate_scan(subagent_data
                         message="继续已保存的子任务",
                     )
                     assert response["status"] == "queued"
-                    assert response["operation"] == "send_message"
+                    assert response["subagent_id"] == subagent.id
                     new_work_id = response["work_id"]
                     assert new_work_id is not None
 

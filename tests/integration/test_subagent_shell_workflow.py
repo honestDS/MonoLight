@@ -738,10 +738,12 @@ async def test_subagent_shell_cancel_cleans_only_current_round_resources(
                 assert result_row.id == create_call.tool_result_message_id
                 assert result_message.tool_call_id == create_call.tool_call_id
                 assert result_message.tool_execution_status == "failed"
-                assert result_payload["status"] == "failed"
-                assert result_payload["operation"] == "create"
-                assert result_payload["child_work_id"] == child_work_id
-                assert result_payload["error"] == t(ERR_SUBAGENT_CANCELLED)
+                assert result_payload == {
+                    "subagent_id": create_call.subagent_id,
+                    "work_id": child_work_id,
+                    "status": "cancelled",
+                    "reason": t(ERR_SUBAGENT_CANCELLED),
+                }
                 assert command not in json.dumps(result_payload, ensure_ascii=False)
 
             assert len(runtime.provider_payloads) == provider_count_after_cancel

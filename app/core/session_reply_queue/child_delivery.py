@@ -19,7 +19,7 @@ from app.core.crud.session.subagent import subagent_crud
 from app.core.exceptions import ParameterException
 from app.core.prompts import EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.child_result import (
-    build_child_call_result,
+    build_subagent_work_result,
     get_child_snapshot,
     load_child_work,
 )
@@ -85,7 +85,7 @@ def _read_subagent_notification(
     if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict):
         return False, True
     result = results[0]
-    return _is_positive_int(result.get("child_work_id")) and result.get("child_work_id") == child_work_id, True
+    return _is_positive_int(result.get("work_id")) and result.get("work_id") == child_work_id, True
 
 
 def _has_other_child_waits(state: dict[str, Any]) -> bool:
@@ -223,7 +223,7 @@ async def _load_child_tool_result(
     except (TypeError, ValueError):
         _invalid_context()
 
-    if stored.role != MessageRole.TOOL or not isinstance(stored.tool_call_id, str) or not stored.tool_call_id.strip() or not isinstance(payload, dict) or payload.get("child_work_id") != round_row.child_work_id:
+    if stored.role != MessageRole.TOOL or not isinstance(stored.tool_call_id, str) or not stored.tool_call_id.strip() or not isinstance(payload, dict) or not _is_positive_int(payload.get("work_id")) or payload.get("work_id") != round_row.child_work_id or payload.get("subagent_id") != call.subagent_id:
         _invalid_context()
     if message.audit_tool_call_id is not None and message.audit_tool_call_id != stored.tool_call_id:
         _invalid_context()
@@ -270,7 +270,7 @@ async def _apply_child_call_result(
         message_id=call.tool_result_message_id,
     )
     try:
-        child_result = build_child_call_result(call, snapshot)
+        child_result = build_subagent_work_result(call.subagent_id, snapshot)
     except (KeyError, TypeError, ValueError) as exc:
         raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID) from exc
     execution_status = {
@@ -290,7 +290,14 @@ async def _apply_child_call_result(
         replacement_payload = json.loads(replacement.content or "{}")
     except (TypeError, ValueError) as exc:
         raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID) from exc
-    if replacement.role != MessageRole.TOOL or replacement.tool_call_id != stored.tool_call_id or not isinstance(replacement_payload, dict) or replacement_payload.get("child_work_id") != round_row.child_work_id:
+    if (
+        replacement.role != MessageRole.TOOL
+        or replacement.tool_call_id != stored.tool_call_id
+        or not isinstance(replacement_payload, dict)
+        or not _is_positive_int(replacement_payload.get("work_id"))
+        or replacement_payload.get("work_id") != round_row.child_work_id
+        or replacement_payload.get("subagent_id") != call.subagent_id
+    ):
         _invalid_context()
     replacement.id = pending_message.id
     replacement.type = pending_message.type
@@ -410,17 +417,14 @@ async def acknowledge_observed_child_results(
             payload = json.loads(stored.content or "{}")
         except (TypeError, ValueError):
             continue
-        if not isinstance(payload, dict) or payload.get("status") != "success" or payload.get("operation") != observed_call.arguments.get("operation"):
+        if not isinstance(payload, dict):
             continue
 
         arguments = observed_call.arguments
         subagent_id = arguments["subagent_id"]
         if payload.get("subagent_id") != subagent_id:
             continue
-        work = payload.get("work")
-        if not isinstance(work, dict) or work.get("completed") is not True:
-            continue
-        child_work_id = work.get("work_id")
+        child_work_id = payload.get("work_id")
         if not _is_positive_int(child_work_id):
             continue
         if "work_id" in arguments and arguments.get("work_id") != child_work_id:
@@ -488,7 +492,7 @@ async def acknowledge_observed_child_results(
             continue
 
         for observed_message_id, payload in call_candidates:
-            if payload.get("work") != snapshot:
+            if payload != build_subagent_work_result(call.subagent_id, snapshot):
                 continue
             if observed_message_id <= call.tool_result_message_id:
                 continue

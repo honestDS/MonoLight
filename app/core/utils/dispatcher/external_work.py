@@ -39,9 +39,9 @@ def _build_external_wait_response(
 
         if tool_call.name == AGENT_WORK_TOOL_NAME:
             operation = tool_call.arguments.get("operation")
-            if operation not in ("create", "send_message") or payload.get("operation") != operation:
+            if operation not in ("create", "send_message"):
                 continue
-            child_work_id = payload.get("child_work_id")
+            child_work_id = payload.get("work_id")
             subagent_id = payload.get("subagent_id")
             if not isinstance(child_work_id, int) or isinstance(child_work_id, bool) or child_work_id <= 0 or not isinstance(subagent_id, str) or not subagent_id.strip():
                 continue

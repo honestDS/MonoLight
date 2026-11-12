@@ -12,6 +12,7 @@ from sqlmodel import select
 
 from app.core.constants import (
     AGENT_WORK_TOOL_NAME,
+    ERR_SUBAGENT_CANCELLED,
     ERR_SUBAGENT_CONTEXT_INVALID,
     ERR_SUBAGENT_NOT_FOUND,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
@@ -38,7 +39,7 @@ PROFILE_ID = 1
 PARENT_WORK_ID = 1
 PARENT_WORKER = "board-parent-worker"
 CHILD_WORKER = "board-child-worker"
-BOARD_POST_FIELDS = {"id", "subagent_id", "child_work_id", "stage", "content", "created_at"}
+BOARD_POST_RESPONSE_FIELDS = {"work_id", "stage", "content"}
 
 
 @pytest_asyncio.fixture
@@ -116,17 +117,16 @@ async def _create_running_subagent(
         )
     )
     assert result["status"] == "queued"
-    assert result["operation"] == "create"
-    assert result["work_id"] == result["child_work_id"]
+    assert set(result) == {"status", "subagent_id", "work_id"}
 
     subagent = await db.get(Subagent, result["subagent_id"])
-    child_work = await db.get(SessionReplyWorkItem, result["child_work_id"])
-    round_row = await db.get(SubagentWork, result["child_work_id"])
+    child_work = await db.get(SessionReplyWorkItem, result["work_id"])
+    round_row = await db.get(SubagentWork, result["work_id"])
     call = (
         await db.execute(
             select(SubagentToolCall).where(
                 SubagentToolCall.subagent_id == result["subagent_id"],
-                SubagentToolCall.child_work_id == result["child_work_id"],
+                SubagentToolCall.child_work_id == result["work_id"],
             )
         )
     ).scalar_one()
@@ -257,21 +257,9 @@ async def test_board_post_persists_formatted_stages_without_mutating_runtime_sta
         ("verification", "second stage\n  keeps spacing"),
         ("handoff", "last stage\n\nwith a blank line"),
     ]
-    returned_posts = []
     for stage, content in stages:
         result = await _execute_board_post(db_session, profile, stage=stage, content=content)
-        assert result["status"] == "success"
-        assert result["operation"] == "board_post"
-        assert result["subagent_id"] == subagent.id
-        assert result["work_id"] == child_work.id
-        assert set(result["post"]) == BOARD_POST_FIELDS
-        assert result["post"]["subagent_id"] == subagent.id
-        assert result["post"]["child_work_id"] == child_work.id
-        assert result["post"]["stage"] == stage
-        assert result["post"]["content"] == content
-        assert result["post"]["id"] > 0
-        assert result["post"]["created_at"]
-        returned_posts.append(result["post"])
+        assert result == {"status": "saved"}
 
     await db_session.refresh(parent)
     await db_session.refresh(child_work)
@@ -288,23 +276,11 @@ async def test_board_post_persists_formatted_stages_without_mutating_runtime_sta
         persisted_call = await reader.get(SubagentToolCall, call.id)
         persisted_messages = await _message_snapshot(reader)
 
-    assert [
-        post.model_dump(
-            mode="json",
-            include={"id", "subagent_id", "child_work_id", "stage", "content"},
-        )
-        for post in persisted_posts
-    ] == [
-        {
-            "id": post["id"],
-            "subagent_id": post["subagent_id"],
-            "child_work_id": post["child_work_id"],
-            "stage": post["stage"],
-            "content": post["content"],
-        }
-        for post in returned_posts
-    ]
+    assert len(persisted_posts) == len(stages)
+    assert [(post.uid, post.session_id, post.profile_id, post.subagent_id, post.child_work_id) for post in persisted_posts] == [(UID, SESSION_ID, PROFILE_ID, subagent.id, child_work.id)] * len(stages)
+    assert all(post.id is not None and post.id > 0 for post in persisted_posts)
     assert all(post.created_at is not None for post in persisted_posts)
+    assert [(post.stage, post.content) for post in persisted_posts] == stages
     assert persisted_parent is not None
     assert persisted_child is not None
     assert persisted_round is not None
@@ -325,7 +301,7 @@ async def test_board_read_returns_stable_history_empty_subagent_and_missing_erro
     )
     for stage, content in (("first", "first post"), ("second", "second post")):
         result = await _execute_board_post(db_session, profile, stage=stage, content=content)
-        assert result["status"] == "success"
+        assert result == {"status": "saved"}
 
     db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (PARENT_WORK_ID, PARENT_WORKER)
     empty_result = json.loads(
@@ -336,6 +312,7 @@ async def test_board_read_returns_stable_history_empty_subagent_and_missing_erro
         )
     )
     assert empty_result["status"] == "queued"
+    assert set(empty_result) == {"status", "subagent_id", "work_id"}
 
     before_round = {
         "current_work_id": round_row.current_work_id,
@@ -360,11 +337,12 @@ async def test_board_read_returns_stable_history_empty_subagent_and_missing_erro
     )
 
     assert first_read == second_read
-    assert first_read["status"] == "success"
-    assert first_read["operation"] == "board_read"
-    assert [post["stage"] for post in first_read["posts"]] == ["first", "second"]
-    assert [post["content"] for post in first_read["posts"]] == ["first post", "second post"]
-    assert all(set(post) == BOARD_POST_FIELDS for post in first_read["posts"])
+    assert set(first_read) == {"posts"}
+    assert first_read["posts"] == [
+        {"work_id": child_work.id, "stage": "first", "content": "first post"},
+        {"work_id": child_work.id, "stage": "second", "content": "second post"},
+    ]
+    assert all(set(post) == BOARD_POST_RESPONSE_FIELDS for post in first_read["posts"])
 
     empty_read = json.loads(
         await _executor(db_session, profile, tool_call_id="board-empty-read-call").execute(
@@ -372,12 +350,7 @@ async def test_board_read_returns_stable_history_empty_subagent_and_missing_erro
             subagent_id=empty_result["subagent_id"],
         )
     )
-    assert empty_read == {
-        "status": "success",
-        "operation": "board_read",
-        "subagent_id": empty_result["subagent_id"],
-        "posts": [],
-    }
+    assert empty_read == {"posts": []}
 
     missing_read = json.loads(
         await _executor(db_session, profile, tool_call_id="board-missing-read-call").execute(
@@ -385,9 +358,7 @@ async def test_board_read_returns_stable_history_empty_subagent_and_missing_erro
             subagent_id="f" * 32,
         )
     )
-    assert missing_read["status"] == "failed"
-    assert missing_read["operation"] == "board_read"
-    assert missing_read["error"] == t(ERR_SUBAGENT_NOT_FOUND)
+    assert missing_read == {"error": t(ERR_SUBAGENT_NOT_FOUND)}
 
     await db_session.refresh(round_row)
     await db_session.refresh(call)
@@ -416,7 +387,7 @@ async def test_board_post_keeps_original_child_work_id_across_confirmed_continua
         tool_call_id="board-continuation-create-call",
     )
     initial = await _execute_board_post(db_session, profile, stage="initial", content="initial post")
-    assert initial["status"] == "success"
+    assert initial == {"status": "saved"}
 
     continuation_id = original_work.id + 1
     continuation = SessionReplyWorkItem(
@@ -449,9 +420,13 @@ async def test_board_post_keeps_original_child_work_id_across_confirmed_continua
         content="confirmed continuation post",
         tool_call_id="board-confirmed-post-call",
     )
-    assert continued["status"] == "success"
-    assert continued["work_id"] == original_work.id
-    assert continued["post"]["child_work_id"] == original_work.id
+    assert continued == {"status": "saved"}
+    async with db_session.info["_board_session_factory"]() as reader:
+        continued_posts = await _board_posts(reader, subagent.id)
+    assert [(post.child_work_id, post.stage, post.content) for post in continued_posts] == [
+        (original_work.id, "initial", "initial post"),
+        (original_work.id, "confirmed", "confirmed continuation post"),
+    ]
     assert continuation_id != original_work.id
 
     continuation.status = SessionReplyWorkStatus.SUCCEEDED
@@ -498,9 +473,14 @@ async def test_board_post_keeps_original_child_work_id_across_confirmed_continua
         content="next round post",
         tool_call_id="board-next-post-call",
     )
-    assert next_result["status"] == "success"
-    assert next_result["work_id"] == next_child_id
-    assert next_result["post"]["child_work_id"] == next_child_id
+    assert next_result == {"status": "saved"}
+    async with db_session.info["_board_session_factory"]() as reader:
+        next_posts = await _board_posts(reader, subagent.id)
+    assert [(post.child_work_id, post.stage, post.content) for post in next_posts] == [
+        (original_work.id, "initial", "initial post"),
+        (original_work.id, "confirmed", "confirmed continuation post"),
+        (next_child_id, "next-round", "next round post"),
+    ]
 
     db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (PARENT_WORK_ID, PARENT_WORKER)
     history = json.loads(
@@ -509,13 +489,15 @@ async def test_board_post_keeps_original_child_work_id_across_confirmed_continua
             subagent_id=subagent.id,
         )
     )
-    assert history["status"] == "success"
-    assert [post["stage"] for post in history["posts"]] == ["initial", "confirmed", "next-round"]
-    assert [post["child_work_id"] for post in history["posts"]] == [original_work.id, original_work.id, next_child_id]
-    assert [post["content"] for post in history["posts"]] == [
-        "initial post",
-        "confirmed continuation post",
-        "next round post",
+    assert set(history) == {"posts"}
+    assert history["posts"] == [
+        {"work_id": original_work.id, "stage": "initial", "content": "initial post"},
+        {
+            "work_id": original_work.id,
+            "stage": "confirmed",
+            "content": "confirmed continuation post",
+        },
+        {"work_id": next_child_id, "stage": "next-round", "content": "next round post"},
     ]
 
 
@@ -524,11 +506,7 @@ async def test_board_post_rejects_foreground_claim(db_session: AsyncSession) -> 
     profile = await db_session.get(Profile, PROFILE_ID)
     assert profile is not None
     result = await _execute_board_post(db_session, profile, stage="invalid", content="must not persist")
-    assert result == {
-        "status": "failed",
-        "operation": "board_post",
-        "error": t(ERR_SUBAGENT_CONTEXT_INVALID),
-    }
+    assert result == {"error": t(ERR_SUBAGENT_CONTEXT_INVALID)}
     async with db_session.info["_board_session_factory"]() as reader:
         assert list((await reader.execute(select(SubagentBoardPost))).scalars()) == []
 
@@ -548,11 +526,7 @@ async def test_subagent_claim_cannot_read_board(db_session: AsyncSession) -> Non
             subagent_id=subagent.id,
         )
     )
-    assert result == {
-        "status": "failed",
-        "operation": "board_read",
-        "error": t(ERR_SUBAGENT_CONTEXT_INVALID),
-    }
+    assert result == {"error": t(ERR_SUBAGENT_CONTEXT_INVALID)}
 
 
 @pytest.mark.parametrize("claim_case", ["missing", "not-a-tuple", "bad-work-id", "blank-worker"])
@@ -579,11 +553,7 @@ async def test_board_post_rejects_missing_or_malformed_claim_without_writing(
         db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (child_work.id, " ")
 
     result = await _execute_board_post(db_session, profile, stage="invalid", content="must not persist")
-    assert result == {
-        "status": "failed",
-        "operation": "board_post",
-        "error": t(ERR_SUBAGENT_CONTEXT_INVALID),
-    }
+    assert result == {"error": t(ERR_SUBAGENT_CONTEXT_INVALID)}
     async with db_session.info["_board_session_factory"]() as reader:
         assert await _board_posts(reader, subagent_id) == []
 
@@ -626,11 +596,7 @@ async def test_board_post_rejects_invalid_round_identity_without_writing(
     db_session.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (child_work.id, CHILD_WORKER)
 
     result = await _execute_board_post(db_session, profile, stage="invalid", content="must not persist")
-    assert result == {
-        "status": "failed",
-        "operation": "board_post",
-        "error": t(ERR_SUBAGENT_CONTEXT_INVALID),
-    }
+    assert result == {"error": t(ERR_SUBAGENT_CONTEXT_INVALID)}
     async with db_session.info["_board_session_factory"]() as reader:
         assert await _board_posts(reader, subagent_id) == []
 
@@ -709,11 +675,12 @@ async def test_concurrent_board_post_and_cancel_preserve_cancelled_child_work(db
         timeout=30,
     )
 
-    assert cancel_result["status"] == "success"
-    assert cancel_result["operation"] == "cancel"
-    assert cancel_result["subagent_id"] == subagent_id
-    assert cancel_result["work"]["completed"] is True
-    assert cancel_result["work"]["status"] == "cancelled"
+    assert cancel_result == {
+        "subagent_id": subagent_id,
+        "work_id": child_work_id,
+        "status": "cancelled",
+        "reason": t(ERR_SUBAGENT_CANCELLED),
+    }
 
     async with session_factory() as reader:
         persisted_posts = await _board_posts(reader, subagent_id)
@@ -723,27 +690,25 @@ async def test_concurrent_board_post_and_cancel_preserve_cancelled_child_work(db
     assert persisted_child is not None
     assert persisted_child.status == SessionReplyWorkStatus.CANCELLED
     assert persisted_round is not None
-    assert persisted_round.result is not None
-    assert persisted_round.result["completed"] is True
-    assert persisted_round.result["status"] == "cancelled"
+    assert persisted_round.result == {
+        "work_id": child_work_id,
+        "current_work_id": child_work_id,
+        "completed": True,
+        "status": "cancelled",
+        "result": None,
+        "error": t(ERR_SUBAGENT_CANCELLED),
+    }
     cancelled_posts = [post for post in persisted_posts if post.stage == "cancelled"]
     concurrent_posts = [post for post in persisted_posts if post.stage == "concurrent"]
     assert len(cancelled_posts) == 1
-    cancelled_result = json.loads(cancelled_posts[0].content)
-    assert cancelled_result["work_id"] == child_work_id
-    assert cancelled_result == persisted_round.result
+    assert cancelled_posts[0].content == t(ERR_SUBAGENT_CANCELLED)
 
     if post_result.get("cancelled") is True:
         assert post_result == {"cancelled": True}
         assert concurrent_posts == []
     else:
         post = post_result["result"]
-        assert post["status"] == "success"
-        assert post["operation"] == "board_post"
-        assert post["subagent_id"] == subagent_id
-        assert post["work_id"] == child_work_id
-        assert post["post"]["stage"] == "concurrent"
-        assert post["post"]["content"] == "concurrent board post"
+        assert post == {"status": "saved"}
         assert len(concurrent_posts) == 1
         assert concurrent_posts[0].content == "concurrent board post"
 

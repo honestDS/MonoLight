@@ -360,9 +360,9 @@ async def _save_interactive_work_execution_checkpoint(
                     payload = json.loads(content or "")
                 except (TypeError, ValueError):
                     continue
-                if not isinstance(payload, dict) or payload.get("status") != "queued" or payload.get("operation") != operation:
+                if not isinstance(payload, dict) or payload.get("status") != "queued":
                     continue
-                child_work_id = payload.get("child_work_id")
+                child_work_id = payload.get("work_id")
                 subagent_id = payload.get("subagent_id")
                 if not isinstance(child_work_id, int) or isinstance(child_work_id, bool) or child_work_id <= 0 or not isinstance(subagent_id, str) or not subagent_id.strip():
                     continue

@@ -11,7 +11,7 @@ from app.core.constants import (
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud as reply_work_crud
 from app.core.crud.session.subagent import subagent_crud
 from app.core.exceptions import ParameterException
-from app.core.session_reply_queue.child_result import get_child_snapshot
+from app.core.session_reply_queue.child_result import build_subagent_work_result, get_child_snapshot
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus
@@ -138,19 +138,11 @@ async def finish_child_work(db: AsyncSession, *, work: SessionReplyWorkItem) -> 
         return False
 
     round_row.result = deepcopy(snapshot)
-    board_content = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
-    if len(board_content.encode("utf-8")) > SUBAGENT_BOARD_TEXT_MAX_BYTES:
-        board_content = json.dumps(
-            {
-                "work_id": snapshot["work_id"],
-                "current_work_id": snapshot["current_work_id"],
-                "completed": snapshot["completed"],
-                "status": snapshot["status"],
-                "full_result_operation": "query_result",
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+    child_result = build_subagent_work_result(subagent.id, snapshot)
+    board_content = child_result.get("content") or child_result.get("reason") or ""
+    needs_attachment_hint = not board_content and bool(child_result.get("files"))
+    if needs_attachment_hint or not isinstance(board_content, str) or len(board_content.encode("utf-8")) > SUBAGENT_BOARD_TEXT_MAX_BYTES:
+        board_content = json.dumps({"full_result_operation": "query_result"}, ensure_ascii=False)
     await subagent_crud.create_board_post(
         db,
         uid=actual_work.uid,
@@ -158,7 +150,7 @@ async def finish_child_work(db: AsyncSession, *, work: SessionReplyWorkItem) -> 
         profile_id=actual_work.profile_id,
         subagent_id=subagent.id,
         child_work_id=round_row.child_work_id,
-        stage=snapshot["status"],
+        stage=child_result["status"],
         content=board_content,
     )
     round_row.waiting_confirmation = False

@@ -271,10 +271,10 @@ async def test_subagent_file_write_confirmation_round_returns_to_parent(
                 result_payload = json.loads(result_message.content or "{}")
                 assert result_message.tool_call_id == original_parent_tool_call_id
                 assert result_message.tool_execution_status == "succeeded"
-                assert result_payload["status"] == "success"
+                assert result_payload["status"] == "succeeded"
                 assert result_payload["subagent_id"] == subagent.id
-                assert result_payload["child_work_id"] == child_work_id
-                assert result_payload["work"]["result"]["content"] == "子轮总结"
+                assert result_payload["work_id"] == child_work_id
+                assert result_payload["content"] == "子轮总结"
                 assert record is not None and record.status == AuditRecordStatus.SUCCEEDED
 
             parent_provider_start = len(runtime.provider_payloads)
@@ -339,10 +339,10 @@ async def test_subagent_file_write_confirmation_round_returns_to_parent(
                 result_payload = json.loads(result_message.content or "{}")
                 assert result_message.tool_call_id == original_parent_tool_call_id
                 assert result_message.tool_execution_status == "failed"
-                assert result_payload["status"] == "failed"
-                assert result_payload["error"] == t(ERR_SUBAGENT_CANCELLED)
-                assert result_payload["work"]["status"] == "cancelled"
-                assert result_payload["work"]["error"] == t(ERR_SUBAGENT_CANCELLED)
+                assert result_payload["status"] == "cancelled"
+                assert result_payload["subagent_id"] == subagent.id
+                assert result_payload["work_id"] == child_work_id
+                assert result_payload["reason"] == t(ERR_SUBAGENT_CANCELLED)
                 assert record is not None and record.status == AuditRecordStatus.REJECTED
 
             parent_provider_start = len(runtime.provider_payloads)
@@ -536,13 +536,10 @@ async def test_subagent_cancel_round_returns_cancelled_result_to_parent(
             result_payload = json.loads(result_message.content or "{}")
             assert result_message.tool_call_id == original_tool_call_id
             assert result_message.tool_execution_status == "failed"
-            assert result_payload["status"] == "failed"
-            assert result_payload["operation"] == "create"
+            assert result_payload["status"] == "cancelled"
             assert result_payload["subagent_id"] == subagent_id
-            assert result_payload["child_work_id"] == child_work_id
-            assert result_payload["error"] == t(ERR_SUBAGENT_CANCELLED)
-            assert result_payload["work"]["status"] == "cancelled"
-            assert result_payload["work"]["error"] == t(ERR_SUBAGENT_CANCELLED)
+            assert result_payload["work_id"] == child_work_id
+            assert result_payload["reason"] == t(ERR_SUBAGENT_CANCELLED)
             instruction_rows = (
                 (
                     await db.execute(
@@ -812,11 +809,10 @@ async def test_running_subagent_file_tool_cancel_keeps_late_result_private(
                 cancellation_payload = json.loads(cancellation_result.content or "{}")
                 assert cancellation_result.tool_call_id == original_parent_tool_call_id
                 assert cancellation_result.tool_execution_status == "failed"
-                assert cancellation_payload["status"] == "failed"
-                assert cancellation_payload["operation"] == "create"
-                assert cancellation_payload["child_work_id"] == child_work_id
-                assert cancellation_payload["error"] == t(ERR_SUBAGENT_CANCELLED)
-                assert cancellation_payload["work"]["status"] == "cancelled"
+                assert cancellation_payload["status"] == "cancelled"
+                assert cancellation_payload["subagent_id"] == subagent_id
+                assert cancellation_payload["work_id"] == child_work_id
+                assert cancellation_payload["reason"] == t(ERR_SUBAGENT_CANCELLED)
 
             release_file_tool.set()
             await asyncio.wait_for(file_tool_finished.wait(), timeout=10)

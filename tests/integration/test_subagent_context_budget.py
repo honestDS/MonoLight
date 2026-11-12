@@ -332,8 +332,12 @@ async def _assert_child_report_and_deliver_to_parent(
         result_message = InternalMessage.model_validate_json(result_row.content or "{}")
         result_payload = json.loads(result_message.content or "{}")
         assert result_message.tool_call_id == call.tool_call_id
-        assert result_payload["status"] == "success"
-        assert result_payload["work"]["result"]["content"] == report
+        assert result_payload == {
+            "subagent_id": call.subagent_id,
+            "work_id": call.child_work_id,
+            "status": "succeeded",
+            "content": report,
+        }
 
 
 @pytest.mark.parametrize("protocol", ["OPENAI", "OPENAI_RESPONSES"], ids=["openai", "openai-responses"])

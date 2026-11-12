@@ -41,7 +41,7 @@ AGENT_WORK_TOOL_SCHEMA = {
             "Use query_result to retrieve only the complete result saved for one finished work round, or its failure or cancellation reason. Do not use it to view progress or poll. "
             "With an explicit work_id, query that work round; without one, query the latest work round. "
             "Use board_post from the currently executing subagent task to record its own progress; it returns immediately so execution can continue, and its identity comes from the current execution context rather than user-supplied identifiers. "
-            "Use cancel to stop work that is no longer needed. Summarize the returned results for the user.\n\n"
+            "Use cancel to stop work that is no longer needed. Work results use status for the work-round state, ended_without_reply for a normal end without a report, reason for the work-round ending reason, and error when the call itself fails. Summarize the returned results for the user.\n\n"
             "Important boundaries\n"
             "board_post and board_read are limited to the current user, session, and Profile. Cancelling does not undo earlier changes. If execution is reported as unknown, verify what actually happened before repeating an action. "
             "Do not access subagents across users, sessions, or Profiles, or create nested subagents. Use only subagent_id values actually returned in this conversation under the current Profile."
@@ -227,12 +227,8 @@ def _validation_details(error: ValidationError) -> list[dict[str, str]]:
     return details
 
 
-def _failure(operation: Any, error: str, details: list[dict[str, str]] | None = None) -> str:
-    result: dict[str, Any] = {
-        "status": "failed",
-        "operation": operation,
-        "error": error,
-    }
+def _failure(error: str, details: list[dict[str, str]] | None = None) -> str:
+    result: dict[str, Any] = {"error": error}
     if details:
         result["details"] = details
     return json.dumps(result, ensure_ascii=False)
@@ -261,7 +257,6 @@ class AgentWorkExecutor(BaseExecutor):
             argument_model = BoardReadArguments
         if argument_model is None:
             return _failure(
-                operation,
                 t(ERR_SUBAGENT_ARGUMENTS_INVALID),
                 [{"field": "operation", "type": "invalid_operation"}],
             )
@@ -270,7 +265,6 @@ class AgentWorkExecutor(BaseExecutor):
             parsed = argument_model.model_validate(arguments)
         except ValidationError as exc:
             return _failure(
-                operation,
                 t(ERR_SUBAGENT_ARGUMENTS_INVALID),
                 _validation_details(exc),
             )
@@ -284,7 +278,7 @@ class AgentWorkExecutor(BaseExecutor):
         profile_uid = getattr(profile, "uid", None)
         tool_call_id = getattr(dispatch_context, "tool_call_id", None) if dispatch_context is not None else None
         if db is None or not _valid_text(uid) or not _valid_text(session_id) or isinstance(profile_id, bool) or not isinstance(profile_id, int) or profile_id <= 0 or not _valid_text(profile_uid) or profile_uid != uid or not _valid_text(tool_call_id):
-            return _failure(operation, t(ERR_TOOL_RUNTIME_CONTEXT_MISSING))
+            return _failure(t(ERR_TOOL_RUNTIME_CONTEXT_MISSING))
 
         from app.core.session_reply_queue.child_work import (
             cancel_subagent,
@@ -362,7 +356,6 @@ class AgentWorkExecutor(BaseExecutor):
         except ParameterException as exc:
             await db.rollback()
             return _failure(
-                operation,
                 t(exc.message, default=exc.message, **exc.kwargs),
             )
 

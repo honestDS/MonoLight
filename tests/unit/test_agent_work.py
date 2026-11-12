@@ -374,8 +374,6 @@ async def test_agent_work_executor_rejects_unsupported_operations_without_contex
     payload = json.loads(await AgentWorkExecutor(project_root=".").execute(operation=operation))
 
     assert payload == {
-        "status": "failed",
-        "operation": operation,
         "error": t(ERR_SUBAGENT_ARGUMENTS_INVALID),
         "details": [{"field": "operation", "type": "invalid_operation"}],
     }
@@ -400,8 +398,6 @@ async def test_agent_work_executor_reports_missing_context_for_board_operations(
     payload = json.loads(await AgentWorkExecutor(project_root=".").execute(operation=operation, **arguments))
 
     assert payload == {
-        "status": "failed",
-        "operation": operation,
         "error": t(ERR_TOOL_RUNTIME_CONTEXT_MISSING),
     }
 
@@ -441,8 +437,8 @@ async def test_agent_work_executor_returns_sanitized_argument_errors(
 ) -> None:
     payload = json.loads(await AgentWorkExecutor(project_root=".").execute(operation=operation, **arguments))
 
-    assert payload["status"] == "failed"
-    assert payload["operation"] == operation
-    assert payload["error"] == t(ERR_SUBAGENT_ARGUMENTS_INVALID)
-    assert payload["details"] == expected_details
+    assert payload == {
+        "error": t(ERR_SUBAGENT_ARGUMENTS_INVALID),
+        "details": expected_details,
+    }
     assert sensitive_value not in json.dumps(payload, ensure_ascii=False)

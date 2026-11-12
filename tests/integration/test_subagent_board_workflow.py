@@ -1,28 +1,41 @@
 import asyncio
+import base64
 import json
 from contextlib import aclosing, asynccontextmanager
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
 from sqlalchemy import select
 
 import app.core.background_tasks.runner as background_runner_module
+import app.core.dispatchers.interactive_runtime as interactive_runtime_module
 import app.core.session_reply_queue.child_work as child_work_module
 from app.api.v1 import chat as chat_api
-from app.core.constants import AGENT_WORK_TOOL_NAME, END_SESSION_TOOL_NAME, ERR_SUBAGENT_RESULT_NOT_READY, SESSION_REPLY_WORK_CLAIM_INFO_KEY
+from app.core.constants import (
+    AGENT_WORK_TOOL_NAME,
+    END_SESSION_TOOL_NAME,
+    ERR_SUBAGENT_CANCELLED,
+    ERR_SUBAGENT_RESULT_NOT_READY,
+    SEND_FILE_TO_USER_TOOL_NAME,
+    SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+)
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.todo import session_todo_crud
 from app.core.i18n import t
+from app.core.paths import get_user_temp_dir
 from app.core.prompts import SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.child_delivery import deliver_child_work_results, resume_child_work_for_parent
 from app.core.session_reply_queue.child_recovery import reconcile_child_work
 from app.core.session_reply_queue.consumer import SessionReplyConsumer
 from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.tools.send_file_to_user import _encode_token
 from app.core.utils.dispatcher.process_single_tool import get_tool_execution_status
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus
-from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
+from app.models.message import InternalGeneratedImage, InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session import ChatSession
 from app.models.session_event import SessionEvent
@@ -128,6 +141,47 @@ def _provider_agent_work_operations(payload: dict) -> list[str] | None:
         if isinstance(operations, list) and all(isinstance(value, str) for value in operations):
             return operations
     return None
+
+
+def _provider_function_call_output_payloads(payload: dict, *, name: str, arguments: dict) -> list[dict]:
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return []
+
+    function_calls = []
+    for item in input_items:
+        if not isinstance(item, dict) or item.get("type") != "function_call" or item.get("name") != name:
+            continue
+        raw_arguments = item.get("arguments")
+        if isinstance(raw_arguments, str):
+            try:
+                parsed_arguments = json.loads(raw_arguments)
+            except json.JSONDecodeError:
+                continue
+        elif isinstance(raw_arguments, dict):
+            parsed_arguments = raw_arguments
+        else:
+            continue
+        if parsed_arguments == arguments:
+            function_calls.append(item)
+    assert len(function_calls) == 1
+
+    call_id = function_calls[0].get("call_id") or function_calls[0].get("id")
+    assert isinstance(call_id, str) and call_id
+    output_payloads = []
+    for item in input_items:
+        if not isinstance(item, dict) or item.get("type") != "function_call_output" or item.get("call_id") != call_id:
+            continue
+        output = item.get("output")
+        if not isinstance(output, str):
+            continue
+        try:
+            output_payload, _ = json.JSONDecoder().raw_decode(output)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(output_payload, dict):
+            output_payloads.append(output_payload)
+    return output_payloads
 
 
 async def _enable_agent_work(runtime) -> None:
@@ -648,23 +702,21 @@ async def test_inspection_operations_do_not_suspend_an_unrelated_foreground_repl
                     inspection_results.append(payload)
             assert len(inspection_results) == 1
             inspection_result = inspection_results[0]
-            assert inspection_result["operation"] == operation
             if operation == "query_result":
-                assert inspection_result["status"] == "failed"
-                assert inspection_result["error"] == t(ERR_SUBAGENT_RESULT_NOT_READY)
-                assert "work" not in inspection_result
-                assert "result" not in inspection_result
+                assert inspection_result == {"error": t(ERR_SUBAGENT_RESULT_NOT_READY)}
             elif operation == "list":
-                assert inspection_result["status"] == "success"
-                assert len(inspection_result["subagents"]) == 1
-                listed_subagent = inspection_result["subagents"][0]
-                assert listed_subagent["subagent_id"] == child["subagent_id"]
-                assert listed_subagent["work"]["work_id"] == child["work_id"]
-                assert listed_subagent["work"]["completed"] is False
+                assert inspection_result == {
+                    "subagents": [
+                        {
+                            "subagent_id": child["subagent_id"],
+                            "work_id": child["work_id"],
+                            "name": child["create_arguments"]["name"],
+                            "status": "ready_for_llm",
+                        }
+                    ]
+                }
             else:
-                assert inspection_result["status"] == "success"
-                assert inspection_result["subagent_id"] == child["subagent_id"]
-                assert inspection_result["posts"] == []
+                assert inspection_result == {"posts": []}
         assert await runtime.run_next(independent_only=False) is None
         assert len(runtime.provider_payloads) == provider_start + 2
 
@@ -831,13 +883,12 @@ async def test_send_message_takes_over_unclaimed_child_report(image_chat_runtime
                     for result in pending_payload.get("results", []):
                         if not isinstance(result, dict):
                             continue
-                        work_id = result.get("child_work_id")
+                        work_id = result.get("work_id")
                         if isinstance(work_id, int) and not isinstance(work_id, bool):
                             pending_work_ids.append(work_id)
-                        work = result.get("work")
-                        result_payload = work.get("result") if isinstance(work, dict) else None
-                        if isinstance(result_payload, dict) and isinstance(result_payload.get("content"), str):
-                            pending_result_contents.append(result_payload["content"])
+                        result_content = result.get("content")
+                        if isinstance(result_content, str):
+                            pending_result_contents.append(result_content)
                 assert pending_work_ids == [sibling["work_id"]]
                 assert sibling_final in pending_result_contents
 
@@ -893,17 +944,24 @@ async def test_send_message_takes_over_unclaimed_child_report(image_chat_runtime
             old_create_message, old_create_payload = _payload(old_create_result)
             assert old_create_message.tool_call_id == old_create_call.tool_call_id
             assert old_create_message.tool_execution_status == "succeeded"
-            assert old_create_payload["operation"] == "create"
-            assert old_create_payload["work"]["result"]["content"] == old_child_final
+            assert old_create_payload == {
+                "subagent_id": old_child["subagent_id"],
+                "work_id": old_child["work_id"],
+                "status": "succeeded",
+                "content": old_child_final,
+            }
 
             send_result = await db.get(Message, send_call_row.tool_result_message_id)
             assert send_result is not None
             send_result_message, send_result_payload = _payload(send_result)
             assert send_result_message.tool_call_id == send_call_row.tool_call_id
             assert send_result_message.tool_execution_status == "succeeded"
-            assert send_result_payload["operation"] == "send_message"
-            assert send_result_payload["work"]["result"]["content"] == new_child_final
-            assert send_result_payload["work"]["work_id"] == new_child_id
+            assert send_result_payload == {
+                "subagent_id": old_child["subagent_id"],
+                "work_id": new_child_id,
+                "status": "succeeded",
+                "content": new_child_final,
+            }
 
             assert (
                 await _board_snapshot(
@@ -1054,13 +1112,22 @@ async def test_send_message_preserves_prepared_file_delivery(image_chat_runtime,
             old_create_result = await db.get(Message, old_create_call.tool_result_message_id)
             assert old_create_result is not None
             _, old_create_payload = _payload(old_create_result)
-            assert old_create_payload["work"]["result"]["content"] == (new_child_final if not child_finished else child_final)
+            assert old_create_payload == {
+                "subagent_id": child["subagent_id"],
+                "work_id": child["work_id"],
+                "status": "succeeded",
+                "content": new_child_final if not child_finished else child_final,
+            }
 
             send_result = await db.get(Message, send_call_row.tool_result_message_id)
             assert send_result is not None
             _, send_payload = _payload(send_result)
-            assert send_payload["operation"] == "send_message"
-            assert send_payload["work"]["result"]["content"] == new_child_final
+            assert send_payload == {
+                "subagent_id": child["subagent_id"],
+                "work_id": new_child_id,
+                "status": "succeeded",
+                "content": new_child_final,
+            }
 
         assert await runtime.run_next(independent_only=False) is None
 
@@ -1116,9 +1183,9 @@ async def test_subagent_completion_persists_succeeded_board_post_and_reconcile_i
             )
             assert len(posts) == 1
             assert posts[0].stage == "succeeded"
-            board_payload = json.loads(posts[0].content)
             if long_report:
                 assert len(posts[0].content.encode("utf-8")) <= 65_535
+                assert json.loads(posts[0].content) == {"full_result_operation": "query_result"}
                 round_row = await db.get(SubagentWork, child["work_id"])
                 assert round_row is not None
                 assert round_row.result is not None
@@ -1126,13 +1193,8 @@ async def test_subagent_completion_persists_succeeded_board_post_and_reconcile_i
                 assert round_row.result["status"] == "succeeded"
                 assert round_row.result["work_id"] == child["work_id"]
                 assert round_row.result["result"]["content"] == child_final
-                assert board_payload["completed"] is True
-                assert board_payload["status"] == "succeeded"
-                assert board_payload["work_id"] == child["work_id"]
-                assert board_payload["full_result_operation"] == "query_result"
             else:
-                assert board_payload["completed"] is True
-                assert board_payload["result"]["content"] == child_final
+                assert posts[0].content == child_final
 
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_final))
         parent_done = await runtime.run_next(independent_only=False)
@@ -1394,10 +1456,12 @@ async def test_send_message_board_review_query_result_does_not_rewake_parent(
                 subagent_id=subagent_id,
                 work_id=work_id,
             )
-            assert query_result["operation"] == "query_result"
-            assert query_result["work"]["completed"] is True
-            assert query_result["work"]["work_id"] == child["work_id"]
-            assert query_result["work"]["result"]["content"] == child_final
+            assert query_result == {
+                "subagent_id": child["subagent_id"],
+                "work_id": child["work_id"],
+                "status": "succeeded",
+                "content": child_final,
+            }
             runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_final))
             return query_result
 
@@ -1414,25 +1478,6 @@ async def test_send_message_board_review_query_result_does_not_rewake_parent(
                 if isinstance(content, list) and any(isinstance(part, dict) and instruction in str(part.get("text") or "") for part in content):
                     return True
             return False
-
-        def function_output_payloads(payload: dict, operation: str) -> list[dict]:
-            output_payloads = []
-            input_items = payload.get("input")
-            if not isinstance(input_items, list):
-                return output_payloads
-            for item in input_items:
-                if not isinstance(item, dict) or item.get("type") != "function_call_output":
-                    continue
-                output = item.get("output")
-                if not isinstance(output, str):
-                    continue
-                try:
-                    output_payload, _ = json.JSONDecoder().raw_decode(output)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(output_payload, dict) and output_payload.get("operation") == operation:
-                    output_payloads.append(output_payload)
-            return output_payloads
 
         monkeypatch.setattr(child_work_module, "post_subagent_board", coordinate_board_post)
         monkeypatch.setattr(child_work_module, "query_subagent_result", coordinate_query)
@@ -1573,13 +1618,33 @@ async def test_send_message_board_review_query_result_does_not_rewake_parent(
             assert len(child_request_indexes) == 1
             parent_requests = [payload for index, payload in enumerate(requests) if index not in child_request_indexes]
             assert len(parent_requests) == 3
-            board_read_outputs = function_output_payloads(parent_requests[1], "board_read")
-            query_result_outputs = function_output_payloads(parent_requests[2], "query_result")
+            board_read_outputs = _provider_function_call_output_payloads(
+                parent_requests[1],
+                name=board_read_call.name,
+                arguments=board_read_call.arguments,
+            )
+            query_result_outputs = _provider_function_call_output_payloads(
+                parent_requests[2],
+                name=query_call.name,
+                arguments=query_call.arguments,
+            )
             assert len(board_read_outputs) == 1
-            assert [(post["stage"], post["content"]) for post in board_read_outputs[0]["posts"]] == [(stage, stage_content)]
+            assert board_read_outputs[0] == {
+                "posts": [
+                    {
+                        "work_id": child["work_id"],
+                        "stage": stage,
+                        "content": stage_content,
+                    }
+                ]
+            }
             assert len(query_result_outputs) == 1
-            assert query_result_outputs[0]["work"]["completed"] is True
-            assert query_result_outputs[0]["work"]["result"]["content"] == child_final
+            assert query_result_outputs[0] == {
+                "subagent_id": child["subagent_id"],
+                "work_id": child["work_id"],
+                "status": "succeeded",
+                "content": child_final,
+            }
 
             async with runtime.factory() as db:
                 parent = await db.get(SessionReplyWorkItem, new_work_id)
@@ -1618,10 +1683,12 @@ async def test_send_message_board_review_query_result_does_not_rewake_parent(
                 send_result_payload, _ = json.JSONDecoder().raw_decode(send_result_message.content or "")
                 assert send_result_message.tool_call_id == actual_send_call_id
                 assert send_result_message.tool_execution_status == "succeeded"
-                assert send_result_payload["operation"] == "send_message"
-                assert send_result_payload["work"]["completed"] is True
-                assert send_result_payload["work"]["work_id"] == child["work_id"]
-                assert send_result_payload["work"]["result"]["content"] == child_final
+                assert send_result_payload == {
+                    "subagent_id": child["subagent_id"],
+                    "work_id": child["work_id"],
+                    "status": "succeeded",
+                    "content": child_final,
+                }
 
                 checkpoint = await session_reply_work_item_crud.get_checkpoint(db, new_work_id)
                 assert isinstance(checkpoint, dict)
@@ -1634,12 +1701,12 @@ async def test_send_message_board_review_query_result_does_not_rewake_parent(
                 query_content = query_message.content or ""
                 query_payload, query_payload_end = json.JSONDecoder().raw_decode(query_content)
                 assert query_message.tool_execution_status == "succeeded"
-                assert query_payload["status"] == "success"
-                assert query_payload["operation"] == "query_result"
-                assert query_payload["subagent_id"] == child["subagent_id"]
-                assert query_payload["work"]["completed"] is True
-                assert query_payload["work"]["work_id"] == child["work_id"]
-                assert query_payload["work"]["result"]["content"] == child_final
+                assert query_payload == {
+                    "subagent_id": child["subagent_id"],
+                    "work_id": child["work_id"],
+                    "status": "succeeded",
+                    "content": child_final,
+                }
                 assert query_content[query_payload_end:] == '\n\n<current_session_todo_snapshot>{"revision":1,"todos":[{"content":"verify-send-result","status":"in_progress"}]}</current_session_todo_snapshot>'
 
                 final_message = await db.get(Message, parent.result_message_id)
@@ -1785,16 +1852,15 @@ async def test_board_post_during_parent_review_is_reconciled_without_duplicate_d
                 assert len(board_posts) == 1
                 assert board_posts[0][1:] == (child["subagent_id"], child["work_id"], first_stage, first_content)
 
+            board_read_call = InternalToolCall(
+                id="inspection-concurrent-board-read",
+                name=AGENT_WORK_TOOL_NAME,
+                arguments={"operation": "board_read", "subagent_id": child["subagent_id"]},
+            )
             runtime.outputs.append(
                 InternalMessage(
                     role=MessageRole.ASSISTANT,
-                    tool_calls=[
-                        InternalToolCall(
-                            id="inspection-concurrent-board-read",
-                            name=AGENT_WORK_TOOL_NAME,
-                            arguments={"operation": "board_read", "subagent_id": child["subagent_id"]},
-                        )
-                    ],
+                    tool_calls=[board_read_call],
                 )
             )
             parent_provider_start = len(runtime.provider_payloads)
@@ -1898,23 +1964,26 @@ async def test_board_post_during_parent_review_is_reconciled_without_duplicate_d
                 assert after_duplicate_delivery == before_duplicate_delivery
 
             parent_review_payloads = runtime.provider_payloads[parent_provider_start:]
-            review_input = runtime.provider_payloads[-1].get("input")
-            assert isinstance(review_input, list)
-            board_read_outputs = []
-            for item in review_input:
-                if not isinstance(item, dict) or item.get("type") != "function_call_output":
-                    continue
-                output = item.get("output")
-                if not isinstance(output, str):
-                    continue
-                output_payload = json.loads(output)
-                if output_payload.get("operation") == "board_read":
-                    board_read_outputs.append(output_payload)
+            board_read_outputs = _provider_function_call_output_payloads(
+                runtime.provider_payloads[-1],
+                name=board_read_call.name,
+                arguments=board_read_call.arguments,
+            )
             assert len(board_read_outputs) == 1
-            assert [(post["stage"], post["content"]) for post in board_read_outputs[0]["posts"]] == [
-                (first_stage, first_content),
-                (second_stage, second_content),
-            ]
+            assert board_read_outputs[0] == {
+                "posts": [
+                    {
+                        "work_id": child["work_id"],
+                        "stage": first_stage,
+                        "content": first_content,
+                    },
+                    {
+                        "work_id": child["work_id"],
+                        "stage": second_stage,
+                        "content": second_content,
+                    },
+                ]
+            }
             assert user_message not in json.dumps(parent_review_payloads, ensure_ascii=False)
 
             runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=user_final))
@@ -2061,7 +2130,12 @@ async def test_cancel_queued_child_during_parent_review_does_not_rewake_parent(
             original_result_message, original_result_payload = _payload(original_result)
             assert original_result_message.tool_call_id == second_call.tool_call_id
             assert original_result_message.tool_execution_status == "failed"
-            assert original_result_payload["work"]["status"] == "cancelled"
+            assert original_result_payload == {
+                "subagent_id": second_child["subagent_id"],
+                "work_id": second_child["work_id"],
+                "status": "cancelled",
+                "reason": t(ERR_SUBAGENT_CANCELLED),
+            }
             cancel_posts = await _board_snapshot(
                 db,
                 subagent_id=second_child["subagent_id"],
@@ -2082,8 +2156,12 @@ async def test_cancel_queued_child_during_parent_review_does_not_rewake_parent(
         assert len(cancel_outputs) == 1
         assert isinstance(cancel_outputs[0].get("output"), str)
         cancel_payload = json.loads(cancel_outputs[0]["output"])
-        assert cancel_payload["operation"] == "cancel"
-        assert cancel_payload["work"]["status"] == "cancelled"
+        assert cancel_payload == {
+            "subagent_id": second_child["subagent_id"],
+            "work_id": second_child["work_id"],
+            "status": "cancelled",
+            "reason": t(ERR_SUBAGENT_CANCELLED),
+        }
 
         assert await runtime.run_next(independent_only=False) is None
 
@@ -2165,11 +2243,9 @@ async def test_legacy_explicit_wait_record_is_delivered_after_release(
 
             if wait_state == "registered":
                 queued_payload = {
-                    "status": "queued",
-                    "operation": "wait",
-                    "work_id": child["work_id"],
-                    "child_work_id": child["work_id"],
                     "subagent_id": child["subagent_id"],
+                    "work_id": child["work_id"],
+                    "status": "queued",
                 }
                 wait_result = InternalMessage(
                     role=MessageRole.TOOL,
@@ -2284,9 +2360,12 @@ async def test_legacy_explicit_wait_record_is_delivered_after_release(
             assert result_row.content != queued_wait_content
             result_message, result_payload = _payload(result_row)
             assert result_message.tool_execution_status == "succeeded"
-            assert result_payload["status"] == "success"
-            assert result_payload["operation"] == "wait"
-            assert result_payload["work"]["result"]["content"] == child_final
+            assert result_payload == {
+                "subagent_id": child["subagent_id"],
+                "work_id": child["work_id"],
+                "status": "succeeded",
+                "content": child_final,
+            }
 
         parent_provider_start = len(runtime.provider_payloads)
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_final))
@@ -2308,6 +2387,209 @@ async def test_legacy_explicit_wait_record_is_delivered_after_release(
         assert history_response.status_code == 200
         history = history_response.json()["data"]
         assert sum(item.get("content") == parent_final for item in history) == 1
+
+
+@pytest.mark.parametrize("recover_child", [False, True], ids=["normal", "recovery"])
+@pytest.mark.asyncio
+async def test_subagent_direct_image_delivery_uses_verified_path_and_recovers_saved_reply(image_chat_runtime, monkeypatch: pytest.MonkeyPatch, recover_child: bool) -> None:
+    parent_final = "subagent-image-parent-final-reply"
+    async with _create_case(image_chat_runtime, protocol="OPENAI_RESPONSES") as case:
+        runtime, child = case.runtime, case.children[0]
+        runtime.outputs.append(
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                generated_images=[
+                    InternalGeneratedImage(
+                        id=f"subagent-direct-image-{recover_child}",
+                        data=base64.b64encode(runtime.image_bytes).decode("ascii"),
+                        mime_type="image/png",
+                    )
+                ],
+            )
+        )
+        child_provider_start = len(runtime.provider_payloads)
+        saved_message_id: int | None = None
+        if recover_child:
+            original_save = interactive_runtime_module.save_assistant_message
+
+            async def interrupt_after_save(*args, **kwargs):
+                nonlocal saved_message_id
+                db = args[0] if args else kwargs["db"]
+                claim = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
+                claimed_work_id = claim[0] if isinstance(claim, (tuple, list)) and len(claim) == 2 else None
+                if claimed_work_id != child["work_id"]:
+                    return await original_save(*args, **kwargs)
+                message = args[4] if len(args) > 4 else kwargs["ai_msg"]
+                assert isinstance(message, InternalMessage) and not message.tool_calls
+                assert json.loads(message.content or "")["text"] == ""
+                saved_message = await original_save(*args, **kwargs)
+                saved_message_id = saved_message.id
+                raise asyncio.CancelledError("interrupted after saving the child image reply")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(interactive_runtime_module, "save_assistant_message", interrupt_after_save)
+                with pytest.raises(asyncio.CancelledError):
+                    await runtime.run_next(independent_only=True)
+            assert isinstance(saved_message_id, int) and not runtime.outputs
+            async with runtime.factory() as db:
+                work = await db.get(SessionReplyWorkItem, child["work_id"])
+                round_row = await db.get(SubagentWork, child["work_id"])
+                saved_message = await db.get(Message, saved_message_id)
+                assert work is not None and round_row is not None and saved_message is not None
+                assert work.status == SessionReplyWorkStatus.RUNNING and work.result_message_id is None and round_row.result is None
+                assert saved_message.type == MessageType.TEXT and json.loads(saved_message.content or "")["type"] == "assistant_files"
+                work.lock_until = 0
+                await db.commit()
+            before_recovery = len(runtime.provider_payloads)
+            await SessionReplyConsumer()._recover_expired()
+            assert len(runtime.provider_payloads) == before_recovery
+            async with runtime.factory() as db:
+                work = await db.get(SessionReplyWorkItem, child["work_id"])
+                round_row = await db.get(SubagentWork, child["work_id"])
+                assert work is not None and round_row is not None
+                assert work.status == SessionReplyWorkStatus.READY_FOR_LLM and round_row.result is None
+            child_done = await runtime.run_next(independent_only=True)
+        else:
+            child_done = await runtime.run_next(independent_only=True)
+        assert child_done is not None and child_done.id == child["work_id"] and child_done.status == SessionReplyWorkStatus.SUCCEEDED
+        assert len(runtime.provider_payloads) == child_provider_start + 1 and runtime.image_requests == []
+        child_tools = runtime.provider_payloads[child_provider_start].get("tools", [])
+        assert all((tool.get("function") if isinstance(tool.get("function"), dict) else tool).get("name") != SEND_FILE_TO_USER_TOOL_NAME for tool in child_tools)
+
+        async with runtime.factory() as db:
+            work = await db.get(SessionReplyWorkItem, child["work_id"])
+            round_row = await db.get(SubagentWork, child["work_id"])
+            create_message = await db.get(Message, child["create_result_id"])
+            assert work is not None and round_row is not None and create_message is not None
+            assert work.status == SessionReplyWorkStatus.SUCCEEDED and work.result_message_id is not None and round_row.result is not None
+            saved_message = await db.get(Message, work.result_message_id)
+            assert saved_message is not None and saved_message.type == MessageType.TEXT
+            saved_payload = json.loads(saved_message.content or "{}")
+            assert saved_payload["type"] == "assistant_files" and saved_payload["text"] == "" and "path" not in saved_payload["files"][0]
+            _, create_payload = _payload(create_message)
+            assert create_payload["subagent_id"] == child["subagent_id"] and create_payload["work_id"] == child["work_id"]
+            assert create_payload["status"] == "succeeded" and "content" not in create_payload and len(create_payload["files"]) == 1
+
+        generated_file = create_payload["files"][0]
+        generated_path = Path(generated_file["path"])
+        assert generated_path.is_absolute() and generated_path.parent == (get_user_temp_dir(Path.cwd(), runtime.uid) / "generated_images").resolve()
+        assert generated_path.read_bytes() == runtime.image_bytes
+        query_call = InternalToolCall(
+            id="direct-image-query-result",
+            name=AGENT_WORK_TOOL_NAME,
+            arguments={"operation": "query_result", "subagent_id": child["subagent_id"], "work_id": child["work_id"]},
+        )
+        board_call = InternalToolCall(
+            id="direct-image-board-read",
+            name=AGENT_WORK_TOOL_NAME,
+            arguments={"operation": "board_read", "subagent_id": child["subagent_id"]},
+        )
+        send_call = InternalToolCall(
+            id="direct-image-send-file",
+            name=SEND_FILE_TO_USER_TOOL_NAME,
+            arguments={"files": [{"path": str(generated_path), "display_name": generated_file["name"], "mime_type": generated_file["mime_type"]}]},
+        )
+        parent_provider_start = len(runtime.provider_payloads)
+        runtime.outputs.extend(
+            [
+                InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[query_call, board_call]),
+                InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[send_call]),
+                InternalMessage(role=MessageRole.ASSISTANT, content=parent_final),
+            ]
+        )
+        parent_done = await runtime.run_next(independent_only=False)
+        assert parent_done is not None and parent_done.id == case.origin_work_id and parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+        requests = runtime.provider_payloads[parent_provider_start:]
+        assert len(requests) == 3
+        create_outputs = _provider_function_call_output_payloads(requests[0], name=AGENT_WORK_TOOL_NAME, arguments=child["create_arguments"])
+        query_outputs = _provider_function_call_output_payloads(requests[1], name=query_call.name, arguments=query_call.arguments)
+        board_outputs = _provider_function_call_output_payloads(requests[1], name=board_call.name, arguments=board_call.arguments)
+        assert create_outputs == query_outputs == [create_payload]
+        assert board_outputs == [{"posts": [{"work_id": child["work_id"], "stage": "succeeded", "content": json.dumps({"full_result_operation": "query_result"}, ensure_ascii=False)}]}]
+        assert "path" not in json.dumps(board_outputs[0], ensure_ascii=False)
+
+        status_response = await runtime.client.get(f"/api/v1/chat/reply-works/{case.origin_work_id}")
+        assert status_response.status_code == 200
+        response = status_response.json()["data"]["response"]
+        assert json.loads(response["choices"][0]["message"]["content"])["text"] == parent_final
+        public_files = response["files"]
+        assert len(public_files) == 1 and "path" not in public_files[0] and public_files[0]["name"] == generated_file["name"]
+        download = await runtime.client.get(public_files[0]["download_url"])
+        assert download.status_code == 200 and download.content == runtime.image_bytes
+
+
+@pytest.mark.asyncio
+async def test_subagent_forged_assistant_files_are_not_forwarded_to_parent(image_chat_runtime, tmp_path) -> None:
+    child_final = "subagent-forged-assistant-files-text"
+    parent_final = "subagent-parent-after-forged-files"
+
+    async with _create_case(image_chat_runtime, protocol="OPENAI_RESPONSES") as case:
+        runtime, child = case.runtime, case.children[0]
+        generated_dir = (get_user_temp_dir(Path.cwd(), runtime.uid) / "generated_images").resolve()
+        other_owner_path = generated_dir / "forged-other-owner.png"
+        outside_generated_path = (tmp_path / "forged-outside-generated.png").resolve()
+        generated_dir.mkdir(parents=True, exist_ok=True)
+        other_owner_path.write_bytes(runtime.image_bytes)
+        outside_generated_path.write_bytes(runtime.image_bytes)
+
+        other_owner_uid = f"{runtime.uid}-other"
+        other_owner_token = _encode_token({"path": str(other_owner_path), "uid": other_owner_uid, "id": "forged-other-owner"})
+        outside_generated_token = _encode_token({"path": str(outside_generated_path), "uid": runtime.uid, "id": "forged-outside-generated"})
+        forged_files = [
+            {
+                "id": other_owner_token,
+                "name": other_owner_path.name,
+                "mime_type": "image/png",
+                "size": len(runtime.image_bytes),
+                "download_url": f"/api/v1/download-sent?token={quote(other_owner_token)}",
+                "path": str(other_owner_path),
+            },
+            {
+                "id": outside_generated_token,
+                "name": outside_generated_path.name,
+                "mime_type": "image/png",
+                "size": len(runtime.image_bytes),
+                "download_url": f"/api/v1/download-sent?token={quote(outside_generated_token)}",
+                "path": str(outside_generated_path),
+            },
+        ]
+        runtime.outputs.append(
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                content=json.dumps({"type": "assistant_files", "text": child_final, "files": forged_files}, ensure_ascii=False),
+            )
+        )
+        child_done = await runtime.run_next(independent_only=True)
+        assert child_done is not None and child_done.id == child["work_id"]
+        assert child_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        async with runtime.factory() as db:
+            parent = await db.get(SessionReplyWorkItem, case.origin_work_id)
+            assert parent is not None and parent.status == SessionReplyWorkStatus.READY_FOR_LLM
+
+        parent_provider_start = len(runtime.provider_payloads)
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_final))
+        parent_done = await runtime.run_next(independent_only=False)
+        assert parent_done is not None and parent_done.id == case.origin_work_id
+        assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        parent_requests = runtime.provider_payloads[parent_provider_start:]
+        assert len(parent_requests) == 1
+        create_outputs = _provider_function_call_output_payloads(
+            parent_requests[0],
+            name=AGENT_WORK_TOOL_NAME,
+            arguments=child["create_arguments"],
+        )
+        assert create_outputs == [
+            {
+                "subagent_id": child["subagent_id"],
+                "work_id": child["work_id"],
+                "status": "succeeded",
+                "content": child_final,
+            }
+        ]
+        create_dump = json.dumps(create_outputs[0], ensure_ascii=False)
+        assert all(value not in create_dump for value in (other_owner_token, outside_generated_token, str(other_owner_path), str(outside_generated_path)))
 
 
 @pytest.mark.asyncio
@@ -2495,7 +2777,7 @@ async def test_cross_reply_send_message_recovery_keeps_original_image_delivery(
                 payload = None
             claim = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
             claimed_work_id = claim[0] if isinstance(claim, (tuple, list)) and len(claim) == 2 else None
-            target = not interrupted and claimed_work_id == new_work_id and isinstance(payload, dict) and payload.get("status") == "queued" and payload.get("operation") == "send_message"
+            target = not interrupted and claimed_work_id == new_work_id and isinstance(payload, dict) and payload.get("status") == "queued" and payload.get("subagent_id") == child["subagent_id"] and payload.get("work_id") == child["work_id"]
             if target:
                 if interruption_point == "after-result-save":
                     saved_result_id = (await original_save_tool_response(*args, **kwargs)).id
@@ -2531,7 +2813,11 @@ async def test_cross_reply_send_message_recovery_keeps_original_image_delivery(
             send_result = await db.get(Message, send_row.tool_result_message_id)
             assert send_result is not None
             _, send_payload = _payload(send_result)
-            assert send_payload["status"] == "queued"
+            assert send_payload == {
+                "subagent_id": child["subagent_id"],
+                "work_id": child["work_id"],
+                "status": "queued",
+            }
             assert (saved_result_id is not None) is (interruption_point == "after-result-save")
             if saved_result_id is not None:
                 assert send_row.tool_result_message_id == saved_result_id
@@ -2585,7 +2871,18 @@ async def test_cross_reply_send_message_recovery_keeps_original_image_delivery(
             assert old_create_result is not None and send_result is not None
             _, old_create_payload = _payload(old_create_result)
             _, send_payload = _payload(send_result)
-            assert old_create_payload["work"]["result"]["content"] == child_final and send_payload["work"]["result"]["content"] == child_final
+            assert old_create_payload == {
+                "subagent_id": child["subagent_id"],
+                "work_id": child["work_id"],
+                "status": "succeeded",
+                "content": child_final,
+            }
+            assert send_payload == {
+                "subagent_id": child["subagent_id"],
+                "work_id": child["work_id"],
+                "status": "succeeded",
+                "content": child_final,
+            }
             original_message = await db.get(Message, origin.result_message_id)
             new_message = await db.get(Message, new_work.result_message_id)
             assert original_message is not None and original_message.content == original_final

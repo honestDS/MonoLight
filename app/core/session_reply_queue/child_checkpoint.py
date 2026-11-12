@@ -149,8 +149,10 @@ async def _recover_result(db: AsyncSession, work: SessionReplyWorkItem, call: Su
         payload = json.loads(strip_session_todo_snapshot(strip_terminal_watch_snapshot(result.content)) or "{}")
     except (TypeError, ValueError):
         _bad()
+    if not isinstance(payload, dict):
+        _bad()
     if payload.get("status") == "queued":
-        if payload.get("operation") != call.arguments.get("operation") or payload.get("child_work_id") != call.child_work_id or payload.get("subagent_id") != call.subagent_id:
+        if not _valid_id(payload.get("work_id")) or payload.get("work_id") != call.child_work_id or payload.get("subagent_id") != call.subagent_id:
             _bad()
         return result
     if result.tool_execution_status != "execution_unknown" and payload.get("status") != "execution_unknown":

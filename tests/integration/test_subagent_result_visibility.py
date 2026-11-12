@@ -179,8 +179,13 @@ async def test_subagent_result_delivery_is_hidden_from_user_history_but_kept_for
             assert tool_result_message.type == MessageType.TOOL_RESULT
             assert tool_result_message.tool_call_id == call.tool_call_id
             tool_result_payload = json.loads(tool_result_message.content or "{}")
-            assert tool_result_payload["child_work_id"] == child_work_id
-            assert child_summary in json.dumps(tool_result_payload, ensure_ascii=False)
+            expected_child_result = {
+                "subagent_id": call.subagent_id,
+                "work_id": child_work_id,
+                "status": "succeeded",
+                "content": child_summary,
+            }
+            assert tool_result_payload == expected_child_result
 
             markers = (await db.execute(select(Message).where(Message.session_id == runtime.session_id, Message.type == MessageType.SUBAGENT_RESULT).order_by(Message.id))).scalars().all()
             assert len(markers) == 1
@@ -189,7 +194,8 @@ async def test_subagent_result_delivery_is_hidden_from_user_history_but_kept_for
             marker_id = marker.id
             assert marker.role == MessageRole.USER
             assert marker.dedupe_key == f"subagent-result:{call.id}"
-            assert child_summary in (marker.content or "")
+            marker_payload = json.loads(marker.content or "{}")
+            assert marker_payload["results"] == [expected_child_result]
 
             checkpoint = await session_reply_work_item_crud.get_checkpoint(db, parent_work_id)
             assert isinstance(checkpoint, dict)

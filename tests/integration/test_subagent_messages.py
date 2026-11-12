@@ -396,7 +396,7 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
                 calls = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.child_work_id == child_work_id).order_by(SubagentToolCall.id))).scalars().all()
                 assert len(calls) == 2
                 assert len({call.tool_result_message_id for call in calls}) == 2
-                result_payloads = []
+                result_operations = []
                 for call in calls:
                     assert call.delivered is True
                     assert call.tool_result_message_id is not None
@@ -406,15 +406,14 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
                     assert result_message.tool_call_id == call.tool_call_id
                     assert result_message.tool_execution_status == "succeeded"
                     result_payload = json.loads(result_message.content or "{}")
-                    assert result_payload["status"] == "success"
-                    assert result_payload["operation"] == call.arguments["operation"]
-                    assert result_payload["subagent_id"] == subagent_id
-                    assert result_payload["work_id"] == child_work_id
-                    assert result_payload["child_work_id"] == child_work_id
-                    assert result_payload["work"]["work_id"] == child_work_id
-                    assert result_payload["work"]["result"]["content"] == child_summary
-                    result_payloads.append(result_payload)
-                assert {payload["operation"] for payload in result_payloads} == {"create", "send_message"}
+                    assert result_payload == {
+                        "subagent_id": subagent_id,
+                        "work_id": child_work_id,
+                        "status": "succeeded",
+                        "content": child_summary,
+                    }
+                    result_operations.append(call.arguments["operation"])
+                assert set(result_operations) == {"create", "send_message"}
 
             parent_provider_start = len(runtime.provider_payloads)
             third_parent_work_id: int | None = None
@@ -801,12 +800,12 @@ async def test_completed_subagent_starts_new_round_with_previous_context(
                 query_results[result_message.tool_call_id] = json.loads(result_message.content or "{}")
             assert set(query_results) == query_call_ids
             for payload in query_results.values():
-                assert payload["status"] == "success"
-                assert payload["operation"] == "query_result"
-                assert payload["subagent_id"] == subagent_id
-                assert payload["work"]["work_id"] == old_child_work_id
-                assert payload["work"]["status"] == "succeeded"
-                assert payload["work"]["result"]["content"] == first_summary
+                assert payload == {
+                    "subagent_id": subagent_id,
+                    "work_id": old_child_work_id,
+                    "status": "succeeded",
+                    "content": first_summary,
+                }
 
         second_summary = "second-round summary from saved context"
         child_provider_start = len(runtime.provider_payloads)
@@ -1034,7 +1033,12 @@ async def test_saved_child_text_with_late_message_stays_in_same_round(
                     result_message = InternalMessage.model_validate_json(result_row.content or "{}")
                     result_payload = json.loads(result_message.content or "{}")
                     assert result_message.tool_call_id == call.tool_call_id
-                    assert result_payload["work"]["result"]["content"] == final_text != first_text
+                    assert result_payload == {
+                        "subagent_id": subagent_id,
+                        "work_id": child_work_id,
+                        "status": "succeeded",
+                        "content": final_text,
+                    }
             assert len(late_rows) == 1 and late_rows[0].is_processed is True
 
             parent_provider_start = len(runtime.provider_payloads)

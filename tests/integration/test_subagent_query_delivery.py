@@ -43,6 +43,48 @@ def _has_user_instruction(payload: dict, instruction: str) -> bool:
     return False
 
 
+def _assert_completed_subagent_result(payload: dict, *, subagent_id: str, work_id: int, content: str) -> None:
+    assert isinstance(payload, dict)
+    assert payload == {
+        "subagent_id": subagent_id,
+        "work_id": work_id,
+        "status": "succeeded",
+        "content": content,
+    }
+
+
+def _provider_function_call_output(
+    payload: dict,
+    *,
+    name: str,
+    arguments: dict,
+) -> dict:
+    function_calls = []
+    for item in _provider_items(payload):
+        if item.get("type") != "function_call" or item.get("name") != name:
+            continue
+        serialized_arguments = item.get("arguments")
+        if not isinstance(serialized_arguments, str):
+            continue
+        try:
+            parsed_arguments = json.loads(serialized_arguments)
+        except json.JSONDecodeError:
+            continue
+        if parsed_arguments == arguments:
+            function_calls.append(item)
+    assert len(function_calls) == 1
+
+    matched_call_id = function_calls[0].get("call_id")
+    assert isinstance(matched_call_id, str) and matched_call_id
+    outputs = [item for item in _provider_items(payload) if item.get("type") == "function_call_output" and item.get("call_id") == matched_call_id]
+    assert len(outputs) == 1
+    raw_output = outputs[0].get("output")
+    assert isinstance(raw_output, str)
+    output_payload, _ = json.JSONDecoder().raw_decode(raw_output)
+    assert isinstance(output_payload, dict)
+    return output_payload
+
+
 @pytest.mark.parametrize("query_with_work_id", [False, True], ids=["query-latest", "query-explicit-work"])
 @pytest.mark.parametrize("with_todo_snapshot", [False, True], ids=["without-todo-snapshot", "with-todo-snapshot"])
 @pytest.mark.asyncio
@@ -137,6 +179,7 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
             b_call_id = call_b.id
             b_result_message_id = call_b.tool_result_message_id
             b_subagent_id = call_b.subagent_id
+            b_create_arguments = deepcopy(call_b.arguments)
             waits = parent.execution_state.get("child_work_waits")
             assert isinstance(waits, list)
             assert {slot.get("child_work_id") for slot in waits if isinstance(slot, dict)} == {child_a_work_id, child_b_work_id}
@@ -209,8 +252,7 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
                 subagent_id=subagent_id,
                 work_id=work_id,
             )
-            assert query_result["work"]["completed"] is True
-            assert query_result["work"]["result"]["content"] == summary_b
+            _assert_completed_subagent_result(query_result, subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
             async with runtime.factory() as check_db:
                 parent = await check_db.get(SessionReplyWorkItem, parent_work_id)
                 call_b = await check_db.get(SubagentToolCall, b_call_id)
@@ -242,27 +284,19 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
         assert len(query_payloads) == 1
         assert len(final_payloads) == 1
         final_payload_dump = json.dumps(final_payloads[0], ensure_ascii=False)
-        final_query_items = []
-        for item in _provider_items(final_payloads[0]):
-            if item.get("type") != "function_call" or item.get("name") != AGENT_WORK_TOOL_NAME:
-                continue
-            if json.loads(item["arguments"]) == query_arguments:
-                final_query_items.append(item)
-        assert len(final_query_items) == 1
-        assert json.loads(final_query_items[0]["arguments"]) == query_arguments
+        query_output_payload = _provider_function_call_output(
+            final_payloads[0],
+            name=query_call.name,
+            arguments=query_arguments,
+        )
+        _assert_completed_subagent_result(query_output_payload, subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
         assert summary_b in final_payload_dump
-        b_create_outputs = []
-        for item in _provider_items(final_payloads[0]):
-            if item.get("type") != "function_call_output":
-                continue
-            output_payload, _ = json.JSONDecoder().raw_decode(item["output"])
-            if output_payload.get("operation") == "create" and output_payload.get("child_work_id") == child_b_work_id:
-                b_create_outputs.append(output_payload)
-        assert len(b_create_outputs) == 1
-        b_create_output = b_create_outputs[0]
-        assert b_create_output["status"] == "success"
-        assert b_create_output["work"]["completed"] is True
-        assert b_create_output["work"]["result"]["content"] == summary_b
+        b_create_output = _provider_function_call_output(
+            final_payloads[0],
+            name=AGENT_WORK_TOOL_NAME,
+            arguments=b_create_arguments,
+        )
+        _assert_completed_subagent_result(b_create_output, subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
@@ -281,9 +315,7 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
             b_result_payload = json.loads(b_result_message.content or "{}")
             assert b_result_message.tool_call_id == call_b.tool_call_id
             assert b_result_message.tool_execution_status == "succeeded"
-            assert b_result_payload["operation"] == "create"
-            assert b_result_payload["work"]["completed"] is True
-            assert b_result_payload["work"]["result"]["content"] == summary_b
+            _assert_completed_subagent_result(b_result_payload, subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
 
             b_round = await db.get(SubagentWork, child_b_work_id)
             assert b_round is not None and b_round.result is not None
@@ -300,9 +332,7 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
             query_content = query_messages[0].content or ""
             query_payload, query_payload_end = json.JSONDecoder().raw_decode(query_content)
             query_snapshot = query_content[query_payload_end:]
-            assert query_payload["operation"] == "query_result"
-            assert query_payload["work"]["completed"] is True
-            assert query_payload["work"]["result"]["content"] == summary_b
+            _assert_completed_subagent_result(query_payload, subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
             if with_todo_snapshot:
                 expected_snapshot = '\n\n<current_session_todo_snapshot>{"revision":1,"todos":[{"content":"verify-child-delivery","status":"in_progress"}]}</current_session_todo_snapshot>'
                 assert query_snapshot == expected_snapshot
@@ -321,9 +351,7 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
             for result_message in checkpoint_b_results:
                 assert result_message.tool_execution_status == "succeeded"
                 result_payload = json.loads(result_message.content or "{}")
-                assert result_payload["status"] == "success"
-                assert result_payload["work"]["completed"] is True
-                assert result_payload["work"]["result"]["content"] == summary_b
+                _assert_completed_subagent_result(result_payload, subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
 
             markers = (await db.execute(select(Message).where(Message.session_id == runtime.session_id, Message.type == MessageType.SUBAGENT_RESULT).order_by(Message.id))).scalars().all()
             assert len(markers) == 1

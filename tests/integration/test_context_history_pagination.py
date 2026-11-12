@@ -446,7 +446,7 @@ async def test_persisted_history_real_image_attachment_paths_keep_provider_image
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("audit_status", ["blocked", "audit_failed", "pending"])
+@pytest.mark.parametrize("audit_status", ["blocked", "audit_failed", "pending", "cancelled"])
 @pytest.mark.parametrize(
     "transformer",
     [OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer],
@@ -480,6 +480,14 @@ async def test_persisted_audit_tool_feedback_is_obscured_from_provider_request(
         "refusal": private_markers[5],
         "provider_metadata": {"private": private_markers[6]},
     }
+    if audit_status == "cancelled":
+        audit_payload.update(
+            {
+                "work_id": 987654321,
+                "subagent_id": "AUDIT_SUBAGENT_ID_PRIVATE_MARKER",
+            }
+        )
+        private_markers.extend([str(audit_payload["work_id"]), audit_payload["subagent_id"]])
     persisted_tool_result_content = json.dumps(
         {
             "tool_call_id": tool_call_id,

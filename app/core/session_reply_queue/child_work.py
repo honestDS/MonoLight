@@ -17,7 +17,6 @@ from app.core.constants import (
     ERR_SUBAGENT_WORK_NOT_FOUND,
     GOAL_EXECUTION_PHASE_RUNNING,
     LOG_DISPATCHER_MAIN_AGENT_MESSAGE,
-    MSG_SUBAGENT_SUBMITTED,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
     SHELL_TOOL_NAME,
 )
@@ -38,6 +37,7 @@ from app.core.session_reply_queue.child_delivery import deliver_child_work_resul
 from app.core.session_reply_queue.child_lifecycle import finish_child_work
 from app.core.session_reply_queue.child_result import (
     _parse_audit_record_id,
+    build_subagent_work_result,
     get_child_snapshot,
     load_child_work,
 )
@@ -58,7 +58,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkItem,
     SessionReplyWorkStatus,
 )
-from app.models.subagent import Subagent, SubagentBoardPost, SubagentToolCall
+from app.models.subagent import Subagent, SubagentToolCall
 
 logger = get_logger(__name__)
 
@@ -142,13 +142,6 @@ async def _get_scoped_subagent(
     return subagent
 
 
-def _serialize_board_post(post: SubagentBoardPost) -> dict[str, Any]:
-    return post.model_dump(
-        mode="json",
-        include={"id", "subagent_id", "child_work_id", "stage", "content", "created_at"},
-    )
-
-
 async def post_subagent_board(
     db: AsyncSession,
     *,
@@ -190,7 +183,7 @@ async def post_subagent_board(
         if round_row is None or subagent.active_child_work_id != round_row.child_work_id or round_row.result is not None or round_row.waiting_confirmation is not False:
             raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
 
-        post = await subagent_crud.create_board_post(
+        await subagent_crud.create_board_post(
             db,
             uid=uid,
             session_id=session_id,
@@ -202,13 +195,6 @@ async def post_subagent_board(
         )
         subagent_id = subagent.id
         child_work_id = round_row.child_work_id
-        result = {
-            "status": "success",
-            "operation": "board_post",
-            "subagent_id": subagent_id,
-            "work_id": child_work_id,
-            "post": _serialize_board_post(post),
-        }
         await db.commit()
         try:
             async with AsyncSession(bind=db.bind, expire_on_commit=False) as delivery_db:
@@ -218,7 +204,7 @@ async def post_subagent_board(
                 "Subagent board post delivery failed",
                 extra={"subagent_id": subagent_id, "child_work_id": child_work_id},
             )
-        return result
+        return {"status": "saved"}
     except BaseException:
         await db.rollback()
         raise
@@ -256,13 +242,15 @@ async def read_subagent_board(
         )
         await db.commit()
 
-        serialized_posts = []
-        for post in posts:
-            serialized_posts.append(_serialize_board_post(post))
+        serialized_posts = [
+            {
+                "work_id": post.child_work_id,
+                "stage": post.stage,
+                "content": post.content,
+            }
+            for post in posts
+        ]
         return {
-            "status": "success",
-            "operation": "board_read",
-            "subagent_id": subagent.id,
             "posts": serialized_posts,
         }
     except BaseException:
@@ -271,15 +259,11 @@ async def read_subagent_board(
 
 
 def build_subagent_queued_result(call: SubagentToolCall) -> dict[str, Any]:
-    result = {
-        "status": "queued",
-        "operation": call.arguments["operation"],
+    return {
         "subagent_id": call.subagent_id,
         "work_id": call.child_work_id,
-        "child_work_id": call.child_work_id,
+        "status": "queued",
     }
-    result["message"] = t(MSG_SUBAGENT_SUBMITTED)
-    return result
 
 
 def _log_subagent_message(subagent: Subagent, call: SubagentToolCall, message: str) -> None:
@@ -317,9 +301,7 @@ async def _existing_submission(
         )
         if round_row is None or not isinstance(round_row.result, dict):
             raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
-        from app.core.session_reply_queue.child_result import build_child_call_result
-
-        return build_child_call_result(call, round_row.result)
+        return build_subagent_work_result(call.subagent_id, round_row.result)
     return build_subagent_queued_result(call)
 
 
@@ -772,12 +754,7 @@ async def cancel_subagent(
                 await finish_child_work(db, work=work)
                 snapshot = await get_child_snapshot(db, subagent=subagent, round_row=round_row)
             await db.commit()
-            return {
-                "status": "success",
-                "operation": "cancel",
-                "subagent_id": subagent.id,
-                "work": snapshot,
-            }
+            return build_subagent_work_result(subagent.id, snapshot)
 
         error = t(ERR_SUBAGENT_CANCELLED)
         confirmation_cancellation = None
@@ -856,12 +833,7 @@ async def cancel_subagent(
         await db.refresh(work)
         await finish_child_work(db, work=work)
         snapshot = await get_child_snapshot(db, subagent=subagent, round_row=round_row)
-        result = {
-            "status": "success",
-            "operation": "cancel",
-            "subagent_id": subagent.id,
-            "work": snapshot,
-        }
+        result = build_subagent_work_result(subagent.id, snapshot)
         delivery_child_work_id = round_row.child_work_id
         await db.commit()
 
@@ -905,17 +877,14 @@ async def list_subagents(
         entries.append(
             {
                 "subagent_id": subagent.id,
+                "work_id": snapshot["work_id"],
+                "status": snapshot["status"],
                 "name": subagent.name,
-                "work": snapshot,
             }
         )
 
     await db.commit()
-    return {
-        "status": "success",
-        "operation": "list",
-        "subagents": entries,
-    }
+    return {"subagents": entries}
 
 
 async def query_subagent_result(
@@ -954,9 +923,4 @@ async def query_subagent_result(
     if snapshot.get("completed") is not True:
         raise ParameterException(ERR_SUBAGENT_RESULT_NOT_READY)
     await db.commit()
-    return {
-        "status": "success",
-        "operation": "query_result",
-        "subagent_id": subagent.id,
-        "work": snapshot,
-    }
+    return build_subagent_work_result(subagent.id, snapshot)

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.constants import (
+    AGENT_WORK_TOOL_NAME,
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_BACKGROUND_TASK_UNSUPPORTED,
     ERR_TERMINAL_PTY_DIMENSIONS_INVALID,
@@ -111,16 +112,20 @@ def get_queued_child_work_id(content: str | None) -> int | None:
         return None
     if not isinstance(payload, dict) or payload.get("status") != "queued":
         return None
-    child_work_id = payload.get("child_work_id")
+    work_id = payload.get("work_id")
     subagent_id = payload.get("subagent_id")
-    if not isinstance(child_work_id, int) or isinstance(child_work_id, bool) or child_work_id <= 0:
+    if not isinstance(work_id, int) or isinstance(work_id, bool) or work_id <= 0:
         return None
     if not isinstance(subagent_id, str) or not subagent_id:
         return None
-    return child_work_id
+    return work_id
 
 
-def get_tool_execution_status(tool_result: InternalMessage) -> Literal["succeeded", "failed", "execution_unknown"]:
+def get_tool_execution_status(
+    tool_result: InternalMessage,
+    *,
+    is_subagent_result_lookup: bool = False,
+) -> Literal["succeeded", "failed", "execution_unknown"]:
     if tool_result.tool_execution_status:
         return tool_result.tool_execution_status
     try:
@@ -128,6 +133,10 @@ def get_tool_execution_status(tool_result: InternalMessage) -> Literal["succeede
     except (TypeError, ValueError):
         return "succeeded"
     if not isinstance(payload, dict):
+        return "succeeded"
+    work_id = payload.get("work_id")
+    subagent_id = payload.get("subagent_id")
+    if is_subagent_result_lookup and isinstance(work_id, int) and not isinstance(work_id, bool) and work_id > 0 and isinstance(subagent_id, str) and subagent_id and "error" not in payload:
         return "succeeded"
     if payload.get("status") == "execution_unknown":
         return "execution_unknown"
@@ -562,9 +571,14 @@ async def process_single_tool(
         tool_call_id=tool_call.id,
         content=tool_result,
     )
-    tool_msg.tool_execution_status = get_tool_execution_status(tool_msg)
+    is_subagent_result_lookup = tool_name == AGENT_WORK_TOOL_NAME and args.get("operation") in ("query_result", "cancel")
+    tool_msg.tool_execution_status = get_tool_execution_status(
+        tool_msg,
+        is_subagent_result_lookup=is_subagent_result_lookup,
+    )
     is_recall_tool = tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME or (tool_name == MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME and args.get("operation") == "recall")
-    if not is_recall_tool and get_queued_background_task_id(tool_msg.content) is None and get_queued_child_work_id(tool_msg.content) is None:
+    is_queued_child_work = tool_name == AGENT_WORK_TOOL_NAME and get_queued_child_work_id(tool_msg.content) is not None
+    if not is_recall_tool and get_queued_background_task_id(tool_msg.content) is None and not is_queued_child_work:
         tool_result_budget_tokens = max(1, (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2)
 
         truncation_stats = await asyncio.to_thread(

@@ -22,6 +22,20 @@ def obscure_audit_tool_result(payload: Any) -> Any:
         return payload
 
     status = payload.get("status")
+    # agent_work 的取消结果与审计取消状态使用不同的扁平结构。
+    if (
+        status == "cancelled"
+        and set(payload) == {"status", "work_id", "subagent_id", "reason"}
+        and isinstance(payload.get("work_id"), int)
+        and not isinstance(payload.get("work_id"), bool)
+        and payload["work_id"] > 0
+        and isinstance(payload.get("subagent_id"), str)
+        and payload["subagent_id"]
+        and isinstance(payload.get("reason"), str)
+        and payload["reason"]
+    ):
+        return payload
+
     error_keys = {
         "blocked": ERR_AUDIT_ROUND_BLOCKED,
         "audit_failed": ERR_AUDIT_SERVICE_FAILED_STOP,
