@@ -87,7 +87,7 @@
             <el-icon><ChatDotRound /></el-icon>
             <template #title><span>{{ $t('common.menu.chat') }}</span></template>
           </el-menu-item>
-          <el-menu-item v-if="userPermissions.isSuperuser" index="/users">
+          <el-menu-item v-if="userPermissions.showAdminNavigation" index="/users">
             <el-icon><User /></el-icon>
             <template #title><span>{{ $t('common.menu.users') }}</span></template>
           </el-menu-item>
@@ -103,7 +103,7 @@
             <el-icon><Clock /></el-icon>
             <template #title><span>{{ $t('common.menu.scheduled_tasks') }}</span></template>
           </el-menu-item>
-          <el-menu-item v-if="userPermissions.isSuperuser" index="/skills">
+          <el-menu-item v-if="userPermissions.showAdminNavigation" index="/skills">
             <el-icon><MagicStick /></el-icon>
             <template #title><span>{{ $t('common.menu.skills') }}</span></template>
           </el-menu-item>
@@ -115,7 +115,7 @@
             <el-menu-item index="/profiles">
               <span>{{ $t('common.menu.profiles') }}</span>
             </el-menu-item>
-            <el-menu-item v-if="userPermissions.isSuperuser" index="/channels">
+            <el-menu-item v-if="userPermissions.showAdminNavigation" index="/channels">
               <span>{{ $t('common.menu.channels') }}</span>
             </el-menu-item>
             <el-menu-item index="/message-platforms">
@@ -125,7 +125,7 @@
               <span>{{ $t('common.menu.prompts') }}</span>
             </el-menu-item>
           </el-sub-menu>
-          <el-sub-menu v-if="userPermissions.isSuperuser" index="/logs" popper-class="sidebar-submenu-popper">
+          <el-sub-menu v-if="userPermissions.showAdminNavigation" index="/logs" popper-class="sidebar-submenu-popper">
             <template #title>
               <el-icon><Document /></el-icon>
               <span>{{ $t('common.menu.logs') }}</span>

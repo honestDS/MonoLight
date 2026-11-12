@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createPinia } from 'pinia'
+import { watch } from 'vue'
 import { useUserPermissionsStore } from '../src/composables/useUserPermissions.js'
 
 function deferred() {
@@ -21,6 +22,7 @@ test('starts with an unknown permission state', () => {
   assert.equal(store.currentUser, null)
   assert.equal(store.verifiedToken, null)
   assert.equal(store.isSuperuser, false)
+  assert.equal(store.showAdminNavigation, false)
 })
 
 for (const isSuperuser of [true, false]) {
@@ -39,6 +41,7 @@ for (const isSuperuser of [true, false]) {
     assert.deepEqual(store.currentUser, user)
     assert.equal(store.verifiedToken, token)
     assert.equal(store.isSuperuser, isSuperuser)
+    assert.equal(store.showAdminNavigation, isSuperuser)
   })
 }
 
@@ -57,6 +60,7 @@ test('does not call the backend without a token', async () => {
 
   assert.equal(result, false)
   assert.equal(requestCalled, false)
+  assert.equal(store.showAdminNavigation, false)
   assert.equal(store.currentUser, null)
   assert.equal(store.verifiedToken, null)
   assert.equal(store.isSuperuser, false)
@@ -78,6 +82,12 @@ for (const [label, response] of invalidResponses) {
     const pinia = createPinia()
     const store = useUserPermissionsStore(pinia)
 
+    await store.refresh({
+      request: async () => ({ data: { data: { is_superuser: true } } }),
+      getToken: () => 'token',
+    })
+    assert.equal(store.showAdminNavigation, true)
+
     const result = await store.refresh({
       request: async () => response,
       getToken: () => 'token',
@@ -87,6 +97,7 @@ for (const [label, response] of invalidResponses) {
     assert.equal(store.currentUser, null)
     assert.equal(store.verifiedToken, null)
     assert.equal(store.isSuperuser, false)
+    assert.equal(store.showAdminNavigation, false)
   })
 }
 
@@ -100,6 +111,7 @@ test('clears existing superuser permission when the request fails', async () => 
     getToken: () => token,
   })
   assert.equal(store.isSuperuser, true)
+  assert.equal(store.showAdminNavigation, true)
 
   const result = await store.refresh({
     request: async () => {
@@ -112,6 +124,7 @@ test('clears existing superuser permission when the request fails', async () => 
   assert.equal(store.currentUser, null)
   assert.equal(store.verifiedToken, null)
   assert.equal(store.isSuperuser, false)
+  assert.equal(store.showAdminNavigation, false)
 })
 
 test('clear empties permission state immediately and is idempotent', async () => {
@@ -122,32 +135,47 @@ test('clear empties permission state immediately and is idempotent', async () =>
     request: async () => ({ data: { data: { is_superuser: true } } }),
     getToken: () => 'token',
   })
+  assert.equal(store.showAdminNavigation, true)
 
   store.clear()
   assert.equal(store.currentUser, null)
   assert.equal(store.verifiedToken, null)
   assert.equal(store.isSuperuser, false)
+  assert.equal(store.showAdminNavigation, false)
 
   assert.doesNotThrow(() => store.clear())
   assert.equal(store.currentUser, null)
   assert.equal(store.verifiedToken, null)
   assert.equal(store.isSuperuser, false)
+  assert.equal(store.showAdminNavigation, false)
 })
 
 test('does not restore a pending superuser response after clear', async () => {
   const pinia = createPinia()
   const store = useUserPermissionsStore(pinia)
   const request = deferred()
+  let currentToken = 'token'
+
+  await store.refresh({
+    request: async () => ({ data: { data: { is_superuser: true } } }),
+    getToken: () => currentToken,
+  })
+  assert.equal(store.showAdminNavigation, true)
 
   const pendingRefresh = store.refresh({
     request: () => request.promise,
-    getToken: () => 'token',
+    getToken: () => currentToken,
   })
+  assert.equal(store.showAdminNavigation, true)
 
+  currentToken = null
   store.clear()
   assert.equal(store.currentUser, null)
   assert.equal(store.verifiedToken, null)
   assert.equal(store.isSuperuser, false)
+  assert.equal(store.showAdminNavigation, false)
+  store.clear()
+  assert.equal(store.showAdminNavigation, false)
 
   request.resolve({ data: { data: { is_superuser: true } } })
 
@@ -155,6 +183,7 @@ test('does not restore a pending superuser response after clear', async () => {
   assert.equal(store.currentUser, null)
   assert.equal(store.verifiedToken, null)
   assert.equal(store.isSuperuser, false)
+  assert.equal(store.showAdminNavigation, false)
 })
 
 test('does not grant a pending response to a switched token', async () => {
@@ -163,10 +192,17 @@ test('does not grant a pending response to a switched token', async () => {
   const request = deferred()
   let currentToken = 'old-token'
 
+  await store.refresh({
+    request: async () => ({ data: { data: { is_superuser: true } } }),
+    getToken: () => currentToken,
+  })
+  assert.equal(store.showAdminNavigation, true)
+
   const pendingRefresh = store.refresh({
     request: () => request.promise,
     getToken: () => currentToken,
   })
+  assert.equal(store.showAdminNavigation, true)
 
   currentToken = 'new-token'
   request.resolve({ data: { data: { is_superuser: true } } })
@@ -175,6 +211,7 @@ test('does not grant a pending response to a switched token', async () => {
   assert.equal(store.currentUser, null)
   assert.equal(store.verifiedToken, null)
   assert.equal(store.isSuperuser, false)
+  assert.equal(store.showAdminNavigation, false)
 })
 
 test('does not let an old superuser response overwrite a newer ordinary refresh', async () => {
@@ -184,10 +221,17 @@ test('does not let an old superuser response overwrite a newer ordinary refresh'
   const newRequest = deferred()
   let currentToken = 'old-token'
 
+  await store.refresh({
+    request: async () => ({ data: { data: { is_superuser: true } } }),
+    getToken: () => currentToken,
+  })
+  assert.equal(store.showAdminNavigation, true)
+
   const oldRefresh = store.refresh({
     request: () => oldRequest.promise,
     getToken: () => currentToken,
   })
+  assert.equal(store.showAdminNavigation, true)
 
   currentToken = 'new-token'
   const newUser = { id: 'new-user', is_superuser: false }
@@ -195,18 +239,24 @@ test('does not let an old superuser response overwrite a newer ordinary refresh'
     request: () => newRequest.promise,
     getToken: () => currentToken,
   })
+  assert.equal(store.showAdminNavigation, false)
+
+  await Promise.resolve()
+  assert.equal(store.showAdminNavigation, false)
 
   newRequest.resolve({ data: { data: newUser } })
   assert.equal(await newRefresh, true)
   assert.deepEqual(store.currentUser, newUser)
   assert.equal(store.verifiedToken, currentToken)
   assert.equal(store.isSuperuser, false)
+  assert.equal(store.showAdminNavigation, false)
 
   oldRequest.resolve({ data: { data: { id: 'old-user', is_superuser: true } } })
   assert.equal(await oldRefresh, false)
   assert.deepEqual(store.currentUser, newUser)
   assert.equal(store.verifiedToken, currentToken)
   assert.equal(store.isSuperuser, false)
+  assert.equal(store.showAdminNavigation, false)
 })
 
 test('does not let an old failed refresh clear a newer superuser success', async () => {
@@ -250,6 +300,8 @@ test('keeps permission state isolated between Pinia instances', async () => {
   assert.equal(storeB.currentUser, null)
   assert.equal(storeB.verifiedToken, null)
   assert.equal(storeB.isSuperuser, false)
+  assert.equal(storeA.showAdminNavigation, false)
+  assert.equal(storeB.showAdminNavigation, false)
 
   const userA = { id: 'user-a', is_superuser: true }
   await storeA.refresh({
@@ -260,9 +312,11 @@ test('keeps permission state isolated between Pinia instances', async () => {
   assert.deepEqual(storeA.currentUser, userA)
   assert.equal(storeA.verifiedToken, 'token-a')
   assert.equal(storeA.isSuperuser, true)
+  assert.equal(storeA.showAdminNavigation, true)
   assert.equal(storeB.currentUser, null)
   assert.equal(storeB.verifiedToken, null)
   assert.equal(storeB.isSuperuser, false)
+  assert.equal(storeB.showAdminNavigation, false)
 
   const userB = { id: 'user-b', is_superuser: false }
   await storeB.refresh({
@@ -273,9 +327,15 @@ test('keeps permission state isolated between Pinia instances', async () => {
   assert.deepEqual(storeB.currentUser, userB)
   assert.equal(storeB.verifiedToken, 'token-b')
   assert.equal(storeB.isSuperuser, false)
+  assert.equal(storeB.showAdminNavigation, false)
   assert.deepEqual(storeA.currentUser, userA)
   assert.equal(storeA.verifiedToken, 'token-a')
   assert.equal(storeA.isSuperuser, true)
+  assert.equal(storeA.showAdminNavigation, true)
+
+  storeB.clear()
+  assert.equal(storeB.showAdminNavigation, false)
+  assert.equal(storeA.showAdminNavigation, true)
 })
 
 for (const expectedSuperuser of [false, true]) {
@@ -294,17 +354,20 @@ for (const expectedSuperuser of [false, true]) {
     assert.equal(store.currentUser, null)
     assert.equal(store.verifiedToken, null)
     assert.equal(store.isSuperuser, false)
+    assert.equal(store.showAdminNavigation, false)
 
     await Promise.resolve()
     assert.equal(store.currentUser, null)
     assert.equal(store.verifiedToken, null)
     assert.equal(store.isSuperuser, false)
+    assert.equal(store.showAdminNavigation, false)
 
     request.resolve({ data: { data: user } })
     assert.equal(await pendingRefresh, true)
     assert.deepEqual(store.currentUser, user)
     assert.equal(store.verifiedToken, token)
     assert.equal(store.isSuperuser, expectedSuperuser)
+    assert.equal(store.showAdminNavigation, expectedSuperuser)
   })
 }
 
@@ -318,6 +381,7 @@ test('clears existing superuser state during a slow same-token revalidation', as
     getToken: () => token,
   })
   assert.equal(store.isSuperuser, true)
+  assert.equal(store.showAdminNavigation, true)
 
   const request = deferred()
   const pendingRefresh = store.refresh({
@@ -328,11 +392,13 @@ test('clears existing superuser state during a slow same-token revalidation', as
   assert.equal(store.currentUser, null)
   assert.equal(store.verifiedToken, null)
   assert.equal(store.isSuperuser, false)
+  assert.equal(store.showAdminNavigation, true)
 
   await Promise.resolve()
   assert.equal(store.currentUser, null)
   assert.equal(store.verifiedToken, null)
   assert.equal(store.isSuperuser, false)
+  assert.equal(store.showAdminNavigation, true)
 
   const ordinaryUser = { id: 'ordinary-user', is_superuser: false }
   request.resolve({ data: { data: ordinaryUser } })
@@ -340,4 +406,71 @@ test('clears existing superuser state during a slow same-token revalidation', as
   assert.deepEqual(store.currentUser, ordinaryUser)
   assert.equal(store.verifiedToken, token)
   assert.equal(store.isSuperuser, false)
+  assert.equal(store.showAdminNavigation, false)
 })
+
+for (const oldFails of [false, true]) {
+  test(`preserves same-token navigation and ignores an old ${oldFails ? 'failure' : 'success'}`, async (t) => {
+    const store = useUserPermissionsStore(createPinia())
+    const token = 'token'
+
+    await store.refresh({
+      request: async () => ({ data: { data: { is_superuser: true } } }),
+      getToken: () => token,
+    })
+    assert.equal(store.showAdminNavigation, true)
+
+    const navigationChanges = []
+    const stop = watch(
+      () => store.showAdminNavigation,
+      (value) => navigationChanges.push(value),
+      { flush: 'sync' },
+    )
+    t.after(stop)
+
+    const oldRequest = deferred()
+    const newRequest = deferred()
+    const oldRefresh = store.refresh({
+      request: () => oldRequest.promise,
+      getToken: () => token,
+    })
+    assert.equal(store.showAdminNavigation, true)
+
+    const newRefresh = store.refresh({
+      request: () => newRequest.promise,
+      getToken: () => token,
+    })
+    assert.equal(store.currentUser, null)
+    assert.equal(store.verifiedToken, null)
+    assert.equal(store.isSuperuser, false)
+    assert.equal(store.showAdminNavigation, true)
+
+    await Promise.resolve()
+    assert.equal(store.currentUser, null)
+    assert.equal(store.verifiedToken, null)
+    assert.equal(store.isSuperuser, false)
+    assert.equal(store.showAdminNavigation, true)
+    assert.deepEqual(navigationChanges, [])
+
+    const newUser = { id: 'new-user', is_superuser: oldFails }
+    newRequest.resolve({ data: { data: newUser } })
+    assert.equal(await newRefresh, true)
+    assert.deepEqual(store.currentUser, newUser)
+    assert.equal(store.verifiedToken, token)
+    assert.equal(store.isSuperuser, oldFails)
+    assert.equal(store.showAdminNavigation, oldFails)
+    assert.deepEqual(navigationChanges, oldFails ? [] : [false])
+
+    if (oldFails) {
+      oldRequest.reject(new Error('old request failed'))
+    } else {
+      oldRequest.resolve({ data: { data: { is_superuser: true } } })
+    }
+    assert.equal(await oldRefresh, false)
+    assert.deepEqual(store.currentUser, newUser)
+    assert.equal(store.verifiedToken, token)
+    assert.equal(store.isSuperuser, oldFails)
+    assert.equal(store.showAdminNavigation, oldFails)
+    assert.deepEqual(navigationChanges, oldFails ? [] : [false])
+  })
+}

@@ -4,6 +4,8 @@ import { defineStore } from 'pinia'
 export const useUserPermissionsStore = defineStore('userPermissions', () => {
   const currentUser = ref(null)
   const verifiedToken = ref(null)
+  const showAdminNavigation = ref(false)
+  let navigationToken = null
   let requestVersion = 0
 
   const isSuperuser = computed(() => currentUser.value?.is_superuser === true)
@@ -12,12 +14,19 @@ export const useUserPermissionsStore = defineStore('userPermissions', () => {
     requestVersion += 1
     currentUser.value = null
     verifiedToken.value = null
+    showAdminNavigation.value = false
+    navigationToken = null
   }
 
   async function refresh({ request, getToken }) {
-    clear()
-
     const token = getToken()
+    requestVersion += 1
+    currentUser.value = null
+    verifiedToken.value = null
+    if (!token || token !== navigationToken) {
+      showAdminNavigation.value = false
+      navigationToken = null
+    }
     const version = requestVersion
 
     if (!token) {
@@ -38,11 +47,14 @@ export const useUserPermissionsStore = defineStore('userPermissions', () => {
       }
 
       if (typeof user?.is_superuser !== 'boolean') {
+        clear()
         return false
       }
 
       currentUser.value = user
       verifiedToken.value = token
+      showAdminNavigation.value = user.is_superuser === true
+      navigationToken = token
       return true
     } catch {
       if (version === requestVersion) {
@@ -56,6 +68,7 @@ export const useUserPermissionsStore = defineStore('userPermissions', () => {
     currentUser,
     verifiedToken,
     isSuperuser,
+    showAdminNavigation,
     clear,
     refresh,
   }

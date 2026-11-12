@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
 import { createPinia } from 'pinia'
+import { watch } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { useUserPermissionsStore } from '../src/composables/useUserPermissions.js'
 import {
@@ -261,6 +262,53 @@ test('hydrates an ordinary role on an entry page and reuses it on normal navigat
   assert.equal(harness.authRequests.requests.length, 1)
 })
 
+test('keeps admin navigation visible while rechecking sequential management navigations', async t => {
+  const harness = createHarness()
+  harness.storage.token = 'super-token'
+
+  const entryNavigation = harness.router.push('/knowledge-base')
+  await harness.resolveNextSetup(false)
+  await harness.resolveNextAuth({ is_superuser: true })
+  await entryNavigation
+
+  assert.equal(harness.router.currentRoute.value.path, '/knowledge-base')
+  assert.equal(harness.permissions.isSuperuser, true)
+  assert.equal(harness.permissions.showAdminNavigation, true)
+
+  const navigationVisibilityChanges = []
+  const stopWatching = watch(
+    () => harness.permissions.showAdminNavigation,
+    visible => navigationVisibilityChanges.push(visible),
+    { flush: 'sync' },
+  )
+  t.after(stopWatching)
+
+  for (const routeCase of [
+    { path: '/users', view: '../views/UsersView.vue' },
+    { path: '/skills', view: '../views/SkillsView.vue' },
+  ]) {
+    const previousPath = harness.router.currentRoute.value.path
+    const navigation = harness.router.push(routeCase.path)
+    await harness.resolveNextSetup(false)
+    const request = await harness.authRequests.next()
+
+    assert.equal(harness.router.currentRoute.value.path, previousPath)
+    assert.equal(harness.loadedViews.includes(routeCase.view), false)
+    assert.equal(harness.permissions.isSuperuser, false)
+    assert.equal(harness.permissions.showAdminNavigation, true)
+
+    request.deferred.resolve(userResponse({ is_superuser: true }))
+    await navigation
+
+    assert.equal(harness.router.currentRoute.value.path, routeCase.path)
+    assert.equal(harness.loadedViews.includes(routeCase.view), true)
+    assert.equal(harness.permissions.isSuperuser, true)
+    assert.equal(harness.permissions.showAdminNavigation, true)
+  }
+
+  assert.deepEqual(navigationVisibilityChanges, [])
+})
+
 for (const routeCase of managementRouteCases) {
   test(`rechecks a cached superuser on ${routeCase.path} navigation and blocks a downgraded role`, async () => {
     const harness = createHarness()
@@ -279,6 +327,7 @@ for (const routeCase of managementRouteCases) {
 
     assert.equal(harness.router.currentRoute.value.path, '/')
     assert.equal(harness.permissions.isSuperuser, false)
+    assert.equal(harness.permissions.showAdminNavigation, false)
     assert.equal(harness.authRequests.requests.length, 2)
     assert.equal(harness.loadedViews.includes(routeCase.view), false)
   })

@@ -1,5 +1,5 @@
 <template>
-  <div v-if="userPermissions.isSuperuser" class="view-container">
+  <div v-if="userPermissions.showAdminNavigation" class="view-container">
     <BaseDataTable
       :data="skills"
       :loading="loading"
@@ -46,7 +46,7 @@
             type="danger"
             size="small"
             :loading="deletingId === row.id && deletingId !== null"
-            :disabled="loading || deletingId !== null"
+            :disabled="loading || deletingId !== null || !userPermissions.isSuperuser"
             @click="handleDelete(row)"
           >
             {{ t('common.delete') }}
