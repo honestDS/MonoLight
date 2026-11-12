@@ -411,6 +411,22 @@ class CRUDSessionReplyWorkItem:
         result = await db.execute(statement)
         return int(result.scalar_one()) - 1
 
+    async def has_pending_user_input(self, db: AsyncSession, *, uid: str, session_id: str) -> bool:
+        result = await db.execute(
+            select(SessionReplyWorkItem.id)
+            .where(
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.session_id == session_id,
+                SessionReplyWorkItem.work_type == SessionReplyWorkType.FOREGROUND_REPLY,
+                SessionReplyWorkItem.source_type == SessionReplySourceType.USER_MESSAGE,
+                SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
+                SessionReplyWorkItem.input_message_ids.is_(None),
+                _work_category_expression(SessionReplyWorkItem.__table__) == SessionReplyWorkCategory.FOREGROUND.value,
+            )
+            .limit(1)
+        )
+        return result.scalar() is not None
+
     async def defer_ready_board_reviews(self, db: AsyncSession, *, uid: str, session_id: str) -> None:
         pending_user_input = SessionReplyWorkItem.__table__.alias("pending_user_input")
         pending_user_input_category = _work_category_expression(pending_user_input)
@@ -449,6 +465,50 @@ class CRUDSessionReplyWorkItem:
                 )
                 .values(sequence_no=sequence_no, updated_at=get_local_time())
             )
+
+    async def yield_board_review(
+        self,
+        db: AsyncSession,
+        *,
+        work_id: int,
+        worker_id: str,
+        expired_at: int | None = None,
+        commit: bool = True,
+    ) -> bool:
+        conditions = [
+            SessionReplyWorkItem.id == work_id,
+            SessionReplyWorkItem.status == SessionReplyWorkStatus.RUNNING,
+            SessionReplyWorkItem.locked_by == worker_id,
+            _is_subagent_board_review(),
+            _work_category_expression(SessionReplyWorkItem.__table__) == SessionReplyWorkCategory.FOREGROUND.value,
+        ]
+        if expired_at is not None:
+            conditions.append(or_(SessionReplyWorkItem.lock_until.is_(None), SessionReplyWorkItem.lock_until <= expired_at))
+        result = await db.execute(
+            update(SessionReplyWorkItem)
+            .where(*conditions)
+            .values(
+                status=SessionReplyWorkStatus.READY_FOR_LLM,
+                locked_by=None,
+                lock_until=None,
+                available_at=int(time.time()),
+                attempt_count=SessionReplyWorkItem.attempt_count - 1,
+                updated_at=get_local_time(),
+            )
+            .returning(SessionReplyWorkItem.uid, SessionReplyWorkItem.session_id)
+        )
+        yielded = result.first()
+        if yielded is None:
+            if commit:
+                await db.rollback()
+            return False
+
+        _, session_id = yielded
+        sequence_no = await self.allocate_sequence_no(db, session_id)
+        await db.execute(update(SessionReplyWorkItem).where(SessionReplyWorkItem.id == work_id).values(sequence_no=sequence_no, updated_at=get_local_time()))
+        if commit:
+            await db.commit()
+        return True
 
     async def enqueue(
         self,
@@ -1085,10 +1145,24 @@ class CRUDSessionReplyWorkItem:
                 terminal_error = t(ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN)
             elif work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
                 terminal_error = "Confirmed tool execution was interrupted; result unknown and automatic retry is forbidden"
-            elif stream_started:
-                terminal_error = "Stream interrupted after partial response"
-            elif work.attempt_count >= work.max_attempts:
-                terminal_error = "Maximum retry attempts reached after worker interruption"
+            else:
+                if state.get("subagent_board_review_pending") is True and work.work_category == SessionReplyWorkCategory.FOREGROUND:
+                    checkpoint = await self._get_checkpoint_payload(db, work.id)
+                    if isinstance(checkpoint, dict) and checkpoint.get("yield_to_user_pending") is True:
+                        yielded = await self.yield_board_review(
+                            db,
+                            work_id=work.id,
+                            worker_id=work.locked_by,
+                            expired_at=now,
+                            commit=False,
+                        )
+                        if yielded:
+                            recovered_count += 1
+                        continue
+                if stream_started:
+                    terminal_error = "Stream interrupted after partial response"
+                elif work.attempt_count >= work.max_attempts:
+                    terminal_error = "Maximum retry attempts reached after worker interruption"
 
             if terminal_error is not None:
                 terminal_claims.append((work.id, work.locked_by, terminal_error))

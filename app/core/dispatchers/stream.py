@@ -122,6 +122,7 @@ class StreamDispatcherMixin:
         additional_user_messages_fetcher: Callable[[], Awaitable[UserInputBatch | list[InternalMessage] | None]] | None = None,
         execution_resume_state: dict[str, Any] | None = None,
         execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        execution_yield_checker: Callable[[], Awaitable[bool]] | None = None,
         context_summary_work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
         expose_tool_call_content: bool = True,
         show_tool_calls: bool = True,
@@ -171,6 +172,7 @@ class StreamDispatcherMixin:
             "additional_user_messages_fetcher": additional_user_messages_fetcher,
             "execution_resume_state": execution_resume_state,
             "execution_checkpoint_callback": execution_checkpoint_callback,
+            "execution_yield_checker": execution_yield_checker,
             "request_metadata_callback": request_metadata_callback,
             "cache_key": cache_key,
             "context_summary_work_validity_checker": context_summary_work_validity_checker,
@@ -207,15 +209,16 @@ class StreamDispatcherMixin:
                     yield cls._build_error_event(payload.render_message(), session_id, request_id)
                     break
 
-                if payload.get("status") == "waiting_external_work":
-                    external_wait_event = {
-                        "type": "external_wait",
+                status = payload.get("status")
+                if status in {"waiting_external_work", "yielded_to_user"}:
+                    control_event = {
+                        "type": "external_wait" if status == "waiting_external_work" else "execution_yield",
                         "session_id": session_id,
                         "response": payload,
                     }
                     if request_id is not None:
-                        external_wait_event["request_id"] = request_id
-                    yield external_wait_event
+                        control_event["request_id"] = request_id
+                    yield control_event
                     break
 
                 yield cls._build_done_event(

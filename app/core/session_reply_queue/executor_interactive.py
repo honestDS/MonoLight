@@ -64,19 +64,54 @@ class _InteractiveWorkStreamEventState:
     is_scheduled_task_work: bool = False
 
     def __post_init__(self) -> None:
-        if self.work_id is None or self.uid is None or self.session_id is None or self.work_sequence_no is None:
-            work_id = self.work.id
-            uid = self.work.uid
-            session_id = self.work.session_id
-            work_sequence_no = self.work.sequence_no
-            if self.work_id is None:
-                self.work_id = work_id
-            if self.uid is None:
-                self.uid = uid
-            if self.session_id is None:
-                self.session_id = session_id
-            if self.work_sequence_no is None:
-                self.work_sequence_no = work_sequence_no
+        if self.work_id is not None and self.uid is not None and self.session_id is not None and self.work_sequence_no is not None:
+            return
+        work_id = self.work.id
+        uid = self.work.uid
+        session_id = self.work.session_id
+        work_sequence_no = self.work.sequence_no
+        if self.work_id is None:
+            self.work_id = work_id
+        if self.uid is None:
+            self.uid = uid
+        if self.session_id is None:
+            self.session_id = session_id
+        if self.work_sequence_no is None:
+            self.work_sequence_no = work_sequence_no
+
+
+async def _persist_interactive_work_stream_event_metadata(
+    event_db,
+    *,
+    stream_state: _InteractiveWorkStreamEventState,
+    persisted_event: dict[str, Any],
+) -> dict[str, Any]:
+    if persisted_event["type"] != "llm_request_metadata":
+        return persisted_event
+    persisted_event = _metadata_with_work_order(
+        SimpleNamespace(
+            id=stream_state.work_id,
+            sequence_no=stream_state.work_sequence_no,
+        ),
+        {
+            **persisted_event,
+            **stream_state.session_token_totals,
+        },
+        event_sequence_no=stream_state.next_sequence,
+        update_session_context=stream_state.update_session_context,
+    )
+    if not stream_state.update_session_context:
+        persisted_event["type"] = "llm_request_metadata"
+        persisted_event["session_id"] = stream_state.session_id
+        return persisted_event
+    await session_crud.update_llm_request_metadata(
+        event_db,
+        session_id=stream_state.session_id,
+        uid=stream_state.uid,
+        metadata=persisted_event,
+        commit=False,
+    )
+    return persisted_event
 
 
 async def _persist_interactive_work_stream_event(
@@ -102,30 +137,11 @@ async def _persist_interactive_work_stream_event(
         if not updated:
             await event_db.rollback()
             raise asyncio.CancelledError(t(ERR_SESSION_REPLY_LEASE_LOST))
-        if persisted_event["type"] == "llm_request_metadata":
-            persisted_event = _metadata_with_work_order(
-                SimpleNamespace(
-                    id=work_id,
-                    sequence_no=stream_state.work_sequence_no,
-                ),
-                {
-                    **persisted_event,
-                    **stream_state.session_token_totals,
-                },
-                event_sequence_no=stream_state.next_sequence,
-                update_session_context=stream_state.update_session_context,
-            )
-            if not stream_state.update_session_context:
-                persisted_event["type"] = "llm_request_metadata"
-                persisted_event["session_id"] = stream_state.session_id
-            if stream_state.update_session_context:
-                await session_crud.update_llm_request_metadata(
-                    event_db,
-                    session_id=stream_state.session_id,
-                    uid=stream_state.uid,
-                    metadata=persisted_event,
-                    commit=False,
-                )
+        persisted_event = await _persist_interactive_work_stream_event_metadata(
+            event_db,
+            stream_state=stream_state,
+            persisted_event=persisted_event,
+        )
         await session_reply_stream_event_crud.publish(
             event_db,
             work_id=work_id,
@@ -172,10 +188,10 @@ async def _publish_interactive_work_stream_event(
     persisted_event = await _persist_interactive_work_stream_event(stream_state, event)
 
     response_id = event.get("response_id")
+    content = event.get("content")
+    if event.get("type") == "turn_end" and isinstance(response_id, str) and response_id.strip() and isinstance(content, str) and content.strip():
+        stream_state.turn_end_content_by_response_id[response_id] = content.strip()
     if event.get("type") == "turn_end":
-        content = event.get("content")
-        if isinstance(response_id, str) and response_id.strip() and isinstance(content, str) and content.strip():
-            stream_state.turn_end_content_by_response_id[response_id] = content.strip()
         return
 
     if event.get("type") != "tool_start" or not isinstance(response_id, str) or not response_id.strip():
@@ -234,6 +250,15 @@ async def _fetch_additional_subagent_messages(
     )
 
 
+async def _has_pending_foreground_user_input(*, uid: str, session_id: str) -> bool:
+    async with AsyncSessionLocal() as db:
+        return await session_reply_work_item_crud.has_pending_user_input(
+            db,
+            uid=uid,
+            session_id=session_id,
+        )
+
+
 async def _check_interactive_work_validity(
     *,
     work_id: int,
@@ -262,6 +287,137 @@ async def _check_interactive_work_validity(
     return session.profile_id == profile_id
 
 
+async def _acknowledge_subagent_checkpoint_messages(
+    db,
+    *,
+    work: SessionReplyWorkItem,
+    checkpoint: dict[str, Any],
+) -> None:
+    checkpoint_message_ids: list[int] = []
+    seen_message_ids: set[int] = set()
+    for message in checkpoint.get("messages", []):
+        if not isinstance(message, dict) or message.get("role") != MessageRole.USER:
+            continue
+        message_id = message.get("id")
+        if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0 or message_id in seen_message_ids:
+            continue
+        seen_message_ids.add(message_id)
+        checkpoint_message_ids.append(message_id)
+    if not checkpoint_message_ids:
+        return
+    await subagent_crud.acknowledge_messages(
+        db,
+        work=work,
+        message_ids=checkpoint_message_ids,
+    )
+
+
+async def _register_observed_child_work_slots(
+    db,
+    *,
+    work: SessionReplyWorkItem,
+    checkpoint: dict[str, Any],
+    state: dict[str, Any],
+) -> None:
+    tool_calls_by_id: dict[str, dict[str, Any]] = {}
+    for message in checkpoint.get("messages", []):
+        if not isinstance(message, dict) or message.get("role") != MessageRole.ASSISTANT:
+            continue
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict) or tool_call.get("name") != AGENT_WORK_TOOL_NAME:
+                continue
+            tool_call_id = tool_call.get("id")
+            if not isinstance(tool_call_id, str) or not tool_call_id.strip():
+                continue
+            tool_calls_by_id[tool_call_id] = tool_call
+
+    child_tool_slots: list[dict[str, Any]] = []
+    registered_child_tool_keys: set[tuple[Any, Any, Any, Any]] = set()
+    registered_response_ids: dict[tuple[Any, Any, Any], Any] = {}
+    for slot_list_name in ("child_work_waits", "child_work_receipts"):
+        previous_child_work_slots = state.get(slot_list_name)
+        if not isinstance(previous_child_work_slots, list):
+            continue
+        for slot in previous_child_work_slots:
+            if not isinstance(slot, dict):
+                continue
+            child_tool_key = (slot.get("child_work_id"), slot.get("subagent_id"), slot.get("tool_call_id"))
+            registered_child_tool_keys.add((*child_tool_key, slot.get("tool_result_message_id")))
+            response_id = slot.get("response_id")
+            if response_id is None:
+                continue
+            registered_response_ids[child_tool_key] = response_id
+
+    for message in checkpoint.get("messages", []):
+        if not isinstance(message, dict) or message.get("role") != MessageRole.TOOL:
+            continue
+        tool_call_id = message.get("tool_call_id")
+        if not isinstance(tool_call_id, str) or not tool_call_id.strip():
+            continue
+        tool_call = tool_calls_by_id.get(tool_call_id)
+        if tool_call is None:
+            continue
+        arguments = tool_call.get("arguments")
+        operation = None
+        if isinstance(arguments, dict):
+            operation = arguments.get("operation")
+        if not isinstance(operation, str) or operation not in {"create", "send_message"}:
+            continue
+        tool_result_message_id = message.get("id")
+        if not isinstance(tool_result_message_id, int) or isinstance(tool_result_message_id, bool) or tool_result_message_id <= 0:
+            continue
+        content = strip_session_todo_snapshot(strip_terminal_watch_snapshot(message.get("content")))
+        try:
+            payload = json.loads(content or "")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get("status") != "queued":
+            continue
+        child_work_id = payload.get("work_id")
+        subagent_id = payload.get("subagent_id")
+        if not isinstance(child_work_id, int) or isinstance(child_work_id, bool) or child_work_id <= 0 or not isinstance(subagent_id, str) or not subagent_id.strip():
+            continue
+
+        call = await subagent_crud.get_call(
+            db,
+            parent_work_id=work.id,
+            tool_call_id=tool_call_id,
+        )
+        if call is None or call.delivered is True:
+            continue
+        child_tool_key = (child_work_id, subagent_id, tool_call_id)
+        child_tool_slot_key = (*child_tool_key, tool_result_message_id)
+        if child_tool_slot_key in registered_child_tool_keys:
+            continue
+        child_tool_slots.append(
+            {
+                "child_work_id": child_work_id,
+                "subagent_id": subagent_id,
+                "tool_call_id": tool_call_id,
+                "tool_name": AGENT_WORK_TOOL_NAME,
+                "tool_result_message_id": tool_result_message_id,
+                "response_id": registered_response_ids.get(child_tool_key),
+            }
+        )
+        registered_child_tool_keys.add(child_tool_slot_key)
+    if child_tool_slots:
+        await external_work_crud.register_child_tools(
+            db,
+            work=work,
+            execution_state=state,
+            slots=child_tool_slots,
+        )
+    await acknowledge_observed_child_results(
+        db,
+        parent=work,
+        checkpoint=checkpoint,
+        execution_state=state,
+    )
+
+
 async def _save_interactive_work_execution_checkpoint(
     db,
     checkpoint: dict[str, Any],
@@ -288,119 +444,23 @@ async def _save_interactive_work_execution_checkpoint(
 
         await db.refresh(work)
         state = dict(work.execution_state or {})
-        if active_audit_execution_present:
-            if active_audit_execution is None:
-                state.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
-            else:
-                state[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
+        if active_audit_execution_present and active_audit_execution is None:
+            state.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
+        if active_audit_execution_present and active_audit_execution is not None:
+            state[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
         is_subagent_work = work.subagent_id is not None
         if is_subagent_work:
-            checkpoint_message_ids: list[int] = []
-            seen_message_ids: set[int] = set()
-            for message in checkpoint.get("messages", []):
-                if not isinstance(message, dict) or message.get("role") != MessageRole.USER:
-                    continue
-                message_id = message.get("id")
-                if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0 or message_id in seen_message_ids:
-                    continue
-                seen_message_ids.add(message_id)
-                checkpoint_message_ids.append(message_id)
-            if checkpoint_message_ids:
-                await subagent_crud.acknowledge_messages(
-                    db,
-                    work=work,
-                    message_ids=checkpoint_message_ids,
-                )
-        else:
-            tool_calls_by_id: dict[str, dict[str, Any]] = {}
-            for message in checkpoint.get("messages", []):
-                if not isinstance(message, dict) or message.get("role") != MessageRole.ASSISTANT:
-                    continue
-                tool_calls = message.get("tool_calls")
-                if not isinstance(tool_calls, list):
-                    continue
-                for tool_call in tool_calls:
-                    if not isinstance(tool_call, dict) or tool_call.get("name") != AGENT_WORK_TOOL_NAME:
-                        continue
-                    tool_call_id = tool_call.get("id")
-                    if isinstance(tool_call_id, str) and tool_call_id.strip():
-                        tool_calls_by_id[tool_call_id] = tool_call
-
-            child_tool_slots: list[dict[str, Any]] = []
-            registered_child_tool_keys: set[tuple[Any, Any, Any, Any]] = set()
-            registered_response_ids: dict[tuple[Any, Any, Any], Any] = {}
-            for slot_list_name in ("child_work_waits", "child_work_receipts"):
-                previous_child_work_slots = state.get(slot_list_name)
-                if isinstance(previous_child_work_slots, list):
-                    for slot in previous_child_work_slots:
-                        if not isinstance(slot, dict):
-                            continue
-                        child_tool_key = (slot.get("child_work_id"), slot.get("subagent_id"), slot.get("tool_call_id"))
-                        registered_child_tool_keys.add((*child_tool_key, slot.get("tool_result_message_id")))
-                        if slot.get("response_id") is not None:
-                            registered_response_ids[child_tool_key] = slot.get("response_id")
-            for message in checkpoint.get("messages", []):
-                if not isinstance(message, dict) or message.get("role") != MessageRole.TOOL:
-                    continue
-                tool_call_id = message.get("tool_call_id")
-                if not isinstance(tool_call_id, str) or not tool_call_id.strip():
-                    continue
-                tool_call = tool_calls_by_id.get(tool_call_id)
-                if tool_call is None:
-                    continue
-                arguments = tool_call.get("arguments")
-                operation = arguments.get("operation") if isinstance(arguments, dict) else None
-                if not isinstance(operation, str) or operation not in {"create", "send_message"}:
-                    continue
-                tool_result_message_id = message.get("id")
-                if not isinstance(tool_result_message_id, int) or isinstance(tool_result_message_id, bool) or tool_result_message_id <= 0:
-                    continue
-                content = strip_session_todo_snapshot(strip_terminal_watch_snapshot(message.get("content")))
-                try:
-                    payload = json.loads(content or "")
-                except (TypeError, ValueError):
-                    continue
-                if not isinstance(payload, dict) or payload.get("status") != "queued":
-                    continue
-                child_work_id = payload.get("work_id")
-                subagent_id = payload.get("subagent_id")
-                if not isinstance(child_work_id, int) or isinstance(child_work_id, bool) or child_work_id <= 0 or not isinstance(subagent_id, str) or not subagent_id.strip():
-                    continue
-
-                call = await subagent_crud.get_call(
-                    db,
-                    parent_work_id=work.id,
-                    tool_call_id=tool_call_id,
-                )
-                if call is None or call.delivered is True:
-                    continue
-                child_tool_key = (child_work_id, subagent_id, tool_call_id)
-                child_tool_slot_key = (*child_tool_key, tool_result_message_id)
-                if child_tool_slot_key in registered_child_tool_keys:
-                    continue
-                child_tool_slots.append(
-                    {
-                        "child_work_id": child_work_id,
-                        "subagent_id": subagent_id,
-                        "tool_call_id": tool_call_id,
-                        "tool_name": AGENT_WORK_TOOL_NAME,
-                        "tool_result_message_id": tool_result_message_id,
-                        "response_id": registered_response_ids.get(child_tool_key),
-                    }
-                )
-                registered_child_tool_keys.add(child_tool_slot_key)
-            if child_tool_slots:
-                await external_work_crud.register_child_tools(
-                    db,
-                    work=work,
-                    execution_state=state,
-                    slots=child_tool_slots,
-                )
-            await acknowledge_observed_child_results(
+            await _acknowledge_subagent_checkpoint_messages(
                 db,
-                parent=work,
+                work=work,
                 checkpoint=checkpoint,
-                execution_state=state,
+            )
+        if not is_subagent_work:
+            await _register_observed_child_work_slots(
+                db,
+                work=work,
+                checkpoint=checkpoint,
+                state=state,
             )
 
         updated = await session_reply_work_item_crud.update_claimed(
@@ -420,6 +480,69 @@ async def _save_interactive_work_execution_checkpoint(
 
     work.id = work_id
     work.execution_state = state
+
+
+def _build_interactive_additional_system_prompt(
+    existing_prompt: Any,
+    *,
+    is_subagent_work: bool,
+    is_subagent_board_review: bool,
+) -> str | None:
+    normalized_prompt = None
+    if isinstance(existing_prompt, str) and existing_prompt.strip():
+        normalized_prompt = existing_prompt.strip()
+
+    guidance = None
+    if is_subagent_work:
+        guidance = SUBAGENT_EXECUTION_GUIDANCE_PROMPT
+    if not is_subagent_work and is_subagent_board_review:
+        guidance = SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT
+
+    if normalized_prompt is not None and guidance is not None:
+        return f"{normalized_prompt}\n\n{guidance}"
+    if guidance is not None:
+        return guidance
+    if normalized_prompt is not None:
+        return normalized_prompt
+    return None
+
+
+async def _finalize_interactive_work_response_metadata(
+    response: dict[str, Any],
+    *,
+    db,
+    metadata_work: SimpleNamespace,
+    session_id: str,
+    uid: str,
+    session_token_totals: dict[str, Any],
+    scheduled_task_work: bool,
+    update_session_context: bool,
+    persist_session_context: bool,
+) -> dict[str, Any]:
+    if scheduled_task_work:
+        response.pop("llm_request_metadata", None)
+        return response
+    metadata = response.get("llm_request_metadata")
+    if not isinstance(metadata, dict):
+        return response
+    response["llm_request_metadata"] = _metadata_with_work_order(
+        metadata_work,
+        {
+            **metadata,
+            **session_token_totals,
+        },
+        update_session_context=update_session_context,
+    )
+    if not persist_session_context or not update_session_context:
+        return response
+    await session_crud.update_llm_request_metadata(
+        db,
+        session_id=session_id,
+        uid=uid,
+        metadata=response["llm_request_metadata"],
+        commit=False,
+    )
+    return response
 
 
 async def _dispatch_interactive_work(
@@ -447,10 +570,9 @@ async def _dispatch_interactive_work(
     execution_state = work.execution_state or {}
     is_subagent_board_review = execution_state.get("subagent_board_review_pending") is True
     scheduled_task_work = await is_scheduled_task_work(db, work)
+    request_purpose = ProviderUsageType.MAIN_DIALOGUE
     if scheduled_task_work:
         request_purpose = ProviderUsageType.SCHEDULED_TASK
-    else:
-        request_purpose = ProviderUsageType.MAIN_DIALOGUE
     is_independent_work = (await session_reply_work_item_crud.get_message_work_id(db, work)) is not None
     update_session_context = not scheduled_task_work and not is_independent_work and frozen_context_messages is None
     stream_requested = False if is_independent_work else bool((work.execution_state or {}).get("stream_requested"))
@@ -478,7 +600,7 @@ async def _dispatch_interactive_work(
         sequence_no=work_sequence_no,
     )
 
-    async def persist_request_metadata(metadata: dict[str, Any]) -> None:
+    async def _persist_request_metadata(metadata: dict[str, Any]) -> None:
         result = await _persist_interactive_work_request_metadata(
             metadata,
             work=work,
@@ -498,6 +620,7 @@ async def _dispatch_interactive_work(
     expose_tool_call_content = False if is_independent_work else bool(execution_state.get("expose_tool_call_content", True))
     show_tool_calls = False if is_independent_work else bool(execution_state.get("show_tool_calls", True))
 
+    additional_user_messages_fetcher = None
     if work.subagent_id is not None:
         additional_user_messages_fetcher = partial(
             _fetch_additional_subagent_messages,
@@ -505,7 +628,7 @@ async def _dispatch_interactive_work(
             work=work,
             worker_id=worker_id,
         )
-    elif allow_additional_user_messages and not is_subagent_board_review:
+    if work.subagent_id is None and allow_additional_user_messages and not is_subagent_board_review:
         additional_user_messages_fetcher = partial(
             _fetch_additional_foreground_user_messages,
             db,
@@ -513,8 +636,6 @@ async def _dispatch_interactive_work(
             worker_id=worker_id,
             stream_state=stream_state,
         )
-    else:
-        additional_user_messages_fetcher = None
 
     dispatch_kwargs = {
         "db": db,
@@ -545,7 +666,7 @@ async def _dispatch_interactive_work(
             work=work,
             worker_id=worker_id,
         ),
-        "request_metadata_callback": persist_request_metadata,
+        "request_metadata_callback": _persist_request_metadata,
         "context_summary_work_validity_checker": partial(
             _check_interactive_work_validity,
             work_id=work_id,
@@ -559,51 +680,41 @@ async def _dispatch_interactive_work(
         "show_tool_calls": show_tool_calls,
         "tool_workflow": await resolve_work_tool_workflow(db, work),
     }
-    additional_system_prompt = execution_state.get("additional_system_prompt")
-    if work.subagent_id is not None:
-        if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
-            additional_system_prompt = f"{additional_system_prompt.strip()}\n\n{SUBAGENT_EXECUTION_GUIDANCE_PROMPT}"
-        else:
-            additional_system_prompt = SUBAGENT_EXECUTION_GUIDANCE_PROMPT
+    if is_subagent_board_review and work.subagent_id is None and not is_independent_work:
+        dispatch_kwargs["execution_yield_checker"] = partial(
+            _has_pending_foreground_user_input,
+            uid=uid,
+            session_id=session_id,
+        )
+    additional_system_prompt = _build_interactive_additional_system_prompt(
+        execution_state.get("additional_system_prompt"),
+        is_subagent_work=work.subagent_id is not None,
+        is_subagent_board_review=is_subagent_board_review,
+    )
+    if additional_system_prompt is not None:
         dispatch_kwargs["additional_system_prompt"] = additional_system_prompt
-    else:
-        if is_subagent_board_review:
-            if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
-                additional_system_prompt = f"{additional_system_prompt.strip()}\n\n{SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT}"
-            else:
-                additional_system_prompt = SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT
-        if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
-            dispatch_kwargs["additional_system_prompt"] = additional_system_prompt.strip()
+    context_summary_lifecycle_callback = None
+    if update_session_context:
+        context_summary_lifecycle_callback = partial(
+            _publish_interactive_work_stream_event,
+            stream_state,
+        )
     if not stream_requested:
         response = await ChatDispatcher.dispatch(
             **dispatch_kwargs,
-            context_summary_lifecycle_callback=partial(
-                _publish_interactive_work_stream_event,
-                stream_state,
-            )
-            if update_session_context
-            else None,
+            context_summary_lifecycle_callback=context_summary_lifecycle_callback,
         )
-        if scheduled_task_work:
-            response.pop("llm_request_metadata", None)
-        elif isinstance(response.get("llm_request_metadata"), dict):
-            response["llm_request_metadata"] = _metadata_with_work_order(
-                metadata_work,
-                {
-                    **response["llm_request_metadata"],
-                    **stream_state.session_token_totals,
-                },
-                update_session_context=update_session_context,
-            )
-            if update_session_context:
-                await session_crud.update_llm_request_metadata(
-                    db,
-                    session_id=session_id,
-                    uid=uid,
-                    metadata=response["llm_request_metadata"],
-                    commit=False,
-                )
-        return response
+        return await _finalize_interactive_work_response_metadata(
+            response,
+            db=db,
+            metadata_work=metadata_work,
+            session_id=session_id,
+            uid=uid,
+            session_token_totals=stream_state.session_token_totals,
+            scheduled_task_work=scheduled_task_work,
+            update_session_context=update_session_context,
+            persist_session_context=True,
+        )
 
     response = None
     async for event in ChatDispatcher.dispatch_stream(
@@ -612,27 +723,27 @@ async def _dispatch_interactive_work(
         raise_errors=True,
     ):
         event_type = event.get("type")
-        if event_type in {"done", "external_wait"}:
-            response = event.get("response")
-            response_id = event.get("response_id")
-            if event_type == "done" and isinstance(response, dict) and isinstance(response_id, str) and response_id:
-                response = {**response, "response_id": response_id}
-        elif event_type == "error":
+        if event_type == "error":
             error_message = str(event.get("message") or t(ERR_LLM_UNEXPECTED_ERROR))
             raise RuntimeError(error_message)
-        else:
-            await _publish_interactive_work_stream_event(stream_state, event)
+        response_id = event.get("response_id")
+        if event_type in {"done", "external_wait", "execution_yield"}:
+            response = event.get("response")
+        if event_type == "done" and isinstance(response, dict) and isinstance(response_id, str) and response_id:
+            response = {**response, "response_id": response_id}
+        if event_type in {"done", "external_wait", "execution_yield"}:
+            continue
+        await _publish_interactive_work_stream_event(stream_state, event)
     if not isinstance(response, dict):
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
-    if scheduled_task_work:
-        response.pop("llm_request_metadata", None)
-    elif isinstance(response.get("llm_request_metadata"), dict):
-        response["llm_request_metadata"] = _metadata_with_work_order(
-            metadata_work,
-            {
-                **response["llm_request_metadata"],
-                **stream_state.session_token_totals,
-            },
-            update_session_context=update_session_context,
-        )
-    return response
+    return await _finalize_interactive_work_response_metadata(
+        response,
+        db=db,
+        metadata_work=metadata_work,
+        session_id=session_id,
+        uid=uid,
+        session_token_totals=stream_state.session_token_totals,
+        scheduled_task_work=scheduled_task_work,
+        update_session_context=update_session_context,
+        persist_session_context=False,
+    )

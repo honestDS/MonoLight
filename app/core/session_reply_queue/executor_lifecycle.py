@@ -167,6 +167,14 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
                 raise RuntimeError(t(ERR_INTERNAL_SERVER_ERROR))
             skip_reply = isinstance(response, dict) and response.get("skip_reply") is True
 
+        if isinstance(response, dict) and response.get("status") == "yielded_to_user":
+            await session_reply_work_item_crud.yield_board_review(
+                db,
+                work_id=work_id,
+                worker_id=worker_id,
+            )
+            return
+
         current_execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
         if skip_reply and work.subagent_id is None and current_execution_state.get("subagent_board_review_pending") is True:
             state = dict(current_execution_state)

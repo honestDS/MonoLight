@@ -183,6 +183,8 @@ async def _save_execution_checkpoint(
     *,
     active_audit_execution: dict[str, Any] | None = None,
     update_active_audit_execution: bool = False,
+    pending_generation: dict[str, Any] | None = None,
+    yield_to_user_pending: bool = False,
 ) -> None:
     if state.callback is None:
         return
@@ -201,6 +203,10 @@ async def _save_execution_checkpoint(
     }
     if state.session_total_output_tokens is not None:
         checkpoint["session_total_output_tokens"] = state.session_total_output_tokens
+    if pending_generation is not None:
+        checkpoint["pending_generation"] = pending_generation
+    if yield_to_user_pending:
+        checkpoint["yield_to_user_pending"] = True
     if state.pending_resume_message_ids:
         checkpoint["pending_resume_message_ids"] = list(state.pending_resume_message_ids)
     if _is_valid_memory_recall_boundary(state.memory_recall_boundary_message_id):

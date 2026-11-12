@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -6,6 +7,7 @@ import uuid
 from collections.abc import Awaitable, Callable, MutableSet
 from typing import Any, Literal
 
+from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel.router import select_channel
@@ -29,7 +31,10 @@ from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
-from app.core.dispatchers.interactive_generation import generate_interactive_turn
+from app.core.dispatchers.interactive_generation import (
+    InteractiveGenerationResult,
+    generate_interactive_turn,
+)
 from app.core.dispatchers.interactive_state import build_interactive_dispatch_state
 from app.core.dispatchers.memory import MemoryRecallContext, run_memory_recall_precheck
 from app.core.exceptions import BaseBusinessException, LLMException, ServerException
@@ -99,6 +104,7 @@ async def dispatch_interactive(
     additional_user_messages_fetcher: Callable[[], Awaitable[UserInputBatch | list[InternalMessage] | None]] | None = None,
     execution_resume_state: dict[str, Any] | None = None,
     execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    execution_yield_checker: Callable[[], Awaitable[bool]] | None = None,
     context_summary_work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
     expose_tool_call_content: bool = True,
     show_tool_calls: bool = True,
@@ -192,6 +198,41 @@ async def dispatch_interactive(
         )
         is_subagent_work = state.tool_workflow == TOOL_WORKFLOW_SUBAGENT
         accepts_additional_messages = state.execution_scope == END_SESSION_SCOPE_FOREGROUND or is_subagent_work
+        generation_result_adapter = TypeAdapter(InteractiveGenerationResult)
+        pending_generation = execution_resume_state.get("pending_generation") if execution_resume_state is not None else None
+        if pending_generation is not None:
+            state.latest_llm_request_metadata = pending_generation["llm_request_metadata"]
+
+        def _build_pending_generation(response_id: str, generation_result: InteractiveGenerationResult) -> dict[str, Any]:
+            return {
+                "response_id": response_id,
+                "result": generation_result_adapter.dump_python(generation_result, mode="json"),
+                "llm_request_metadata": state.latest_llm_request_metadata,
+            }
+
+        async def _yield_to_user_if_requested(current_pending_generation: dict[str, Any] | None) -> bool:
+            if execution_yield_checker is None or not await execution_yield_checker():
+                return False
+            await _save_execution_checkpoint(
+                state.checkpoint_state,
+                state.messages,
+                state.current_turn,
+                pending_generation=current_pending_generation,
+                yield_to_user_pending=True,
+            )
+            return True
+
+        async def _yield_after_generation_if_requested(response_id: str, generation_result: InteractiveGenerationResult) -> bool:
+            if execution_yield_checker is None or not await execution_yield_checker():
+                return False
+            await _save_execution_checkpoint(
+                state.checkpoint_state,
+                state.messages,
+                state.current_turn,
+                pending_generation=_build_pending_generation(response_id, generation_result),
+                yield_to_user_pending=True,
+            )
+            return True
 
         async def append_external_results() -> bool:
             if state.execution_scope != END_SESSION_SCOPE_FOREGROUND:
@@ -474,105 +515,128 @@ async def dispatch_interactive(
                         )
 
                 if reload_history:
-                    await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+                    await _save_execution_checkpoint(
+                        state.checkpoint_state,
+                        state.messages,
+                        state.current_turn,
+                        pending_generation=pending_generation,
+                    )
 
                 max_turns = state.max_turns
                 goal_mode = state.goal_mode
-                if not goal_mode and state.current_turn >= max_turns:
+                if not goal_mode and pending_generation is None and state.current_turn >= max_turns:
                     state.current_turn = max_turns - 1
 
-                while goal_mode or state.current_turn <= max_turns:
+                while pending_generation is not None or goal_mode or state.current_turn <= max_turns:
+                    if await _yield_to_user_if_requested(pending_generation):
+                        return {"status": "yielded_to_user"}
                     if context_summary_work_validity_checker is not None and not await context_summary_work_validity_checker():
                         raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST))
-                    reuse_input = reuse_saved_input
-                    reuse_saved_input = False
                     new_user_batch = None
-                    if accepts_additional_messages and (not reuse_input or is_subagent_work):
-                        new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
-                        if new_user_batch is not None:
-                            state.current_turn = 0
-                            state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_RUNNING
-                            append_new_user_messages(
-                                state.cfg,
-                                state.messages,
-                                new_user_batch.messages,
-                                state.img_understanding,
-                                state.audio_understanding,
-                                state.video_understanding,
-                            )
-                            state.checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
-                            if state.memory_enabled:
-                                update_memory_recall_boundary(state.checkpoint_state, new_user_batch.latest_message_id)
-                    external_results_received = await append_external_results()
-                    if new_user_batch is not None or external_results_received:
-                        await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
-                    if state.memory_precheck_enabled and memory_recall_needs_precheck(state.checkpoint_state):
-                        state.checkpoint_state.memory_recall_status = "pending"
-                        await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
-                        memory_recall_result = await run_memory_recall_precheck(
-                            MemoryRecallContext(
-                                db=db,
-                                uid=uid,
-                                session_id=session_id,
-                                profile=profile,
-                                cfg=state.cfg,
-                                username=username,
-                                messages=state.messages,
-                                turn_messages=state.turn_messages,
-                                current_user_boundary_message_id=state.checkpoint_state.memory_recall_boundary_message_id,
-                                upper_message_id=state.checkpoint_state.upper_message_id,
-                                chat_channel=state.chat_channel,
-                                chat_cursor_key=state.chat_cursor_key,
-                                chat_channel_obj=state.chat_channel_obj,
-                                model_entry=state.model_entry,
-                                channel_rule=state.channel_rule,
-                                chat_params=state.chat_params,
-                                dispatcher_mode=dispatcher_mode,
-                                stream_event_callback=stream_event_callback,
-                                show_tool_calls=show_tool_calls,
-                                expose_tool_call_content=expose_tool_call_content,
-                                allowed_knowledge_base_ids=state.allowed_knowledge_base_ids,
-                                main_tools=state.tools,
-                                total_output_tokens=state.checkpoint_state.total_output_tokens,
-                                session_total_output_tokens=state.checkpoint_state.session_total_output_tokens,
-                                session_total_input_tokens=state.checkpoint_state.session_total_input_tokens,
-                                session_total_cached_tokens=state.checkpoint_state.session_total_cached_tokens,
-                            )
+                    generation_was_resumed = pending_generation is not None
+                    if generation_was_resumed:
+                        response_id = pending_generation["response_id"]
+                        state.latest_llm_request_metadata = pending_generation["llm_request_metadata"]
+                        generation_result = generation_result_adapter.validate_python(pending_generation["result"])
+                        await _save_execution_checkpoint(
+                            state.checkpoint_state,
+                            state.messages,
+                            state.current_turn,
+                            pending_generation=pending_generation,
                         )
-                        state.messages = memory_recall_result.messages
-                        state.turn_messages = memory_recall_result.turn_messages
-                        state.checkpoint_state.turn_messages = state.turn_messages
-                        state.chat_channel = memory_recall_result.chat_channel
-                        state.chat_cursor_key = memory_recall_result.chat_cursor_key
-                        state.chat_channel_obj = memory_recall_result.chat_channel_obj
-                        state.model_entry = memory_recall_result.model_entry
-                        state.channel_rule = memory_recall_result.channel_rule
-                        state.chat_params = memory_recall_result.chat_params
-                        state.checkpoint_state.total_output_tokens = memory_recall_result.total_output_tokens
-                        state.checkpoint_state.session_total_output_tokens = memory_recall_result.session_total_output_tokens
-                        state.checkpoint_state.session_total_input_tokens = memory_recall_result.session_total_input_tokens
-                        state.checkpoint_state.session_total_cached_tokens = memory_recall_result.session_total_cached_tokens
-                        state.img_understanding, state.audio_understanding, state.video_understanding = get_multimodal_from_entry(state.model_entry)
-                        state.checkpoint_state.memory_recall_status = memory_recall_result.status
+                        pending_generation = None
+                    else:
+                        reuse_input = reuse_saved_input
+                        reuse_saved_input = False
+                        if accepts_additional_messages and (not reuse_input or is_subagent_work):
+                            new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"])
+                            if new_user_batch is not None:
+                                state.current_turn = 0
+                                state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_RUNNING
+                                append_new_user_messages(
+                                    state.cfg,
+                                    state.messages,
+                                    new_user_batch.messages,
+                                    state.img_understanding,
+                                    state.audio_understanding,
+                                    state.video_understanding,
+                                )
+                                state.checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
+                                if state.memory_enabled:
+                                    update_memory_recall_boundary(state.checkpoint_state, new_user_batch.latest_message_id)
+                        external_results_received = await append_external_results()
+                        if new_user_batch is not None or external_results_received:
+                            await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+                        if state.memory_precheck_enabled and memory_recall_needs_precheck(state.checkpoint_state):
+                            state.checkpoint_state.memory_recall_status = "pending"
+                            await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+                            memory_recall_result = await run_memory_recall_precheck(
+                                MemoryRecallContext(
+                                    db=db,
+                                    uid=uid,
+                                    session_id=session_id,
+                                    profile=profile,
+                                    cfg=state.cfg,
+                                    username=username,
+                                    messages=state.messages,
+                                    turn_messages=state.turn_messages,
+                                    current_user_boundary_message_id=state.checkpoint_state.memory_recall_boundary_message_id,
+                                    upper_message_id=state.checkpoint_state.upper_message_id,
+                                    chat_channel=state.chat_channel,
+                                    chat_cursor_key=state.chat_cursor_key,
+                                    chat_channel_obj=state.chat_channel_obj,
+                                    model_entry=state.model_entry,
+                                    channel_rule=state.channel_rule,
+                                    chat_params=state.chat_params,
+                                    dispatcher_mode=dispatcher_mode,
+                                    stream_event_callback=stream_event_callback,
+                                    show_tool_calls=show_tool_calls,
+                                    expose_tool_call_content=expose_tool_call_content,
+                                    allowed_knowledge_base_ids=state.allowed_knowledge_base_ids,
+                                    main_tools=state.tools,
+                                    total_output_tokens=state.checkpoint_state.total_output_tokens,
+                                    session_total_output_tokens=state.checkpoint_state.session_total_output_tokens,
+                                    session_total_input_tokens=state.checkpoint_state.session_total_input_tokens,
+                                    session_total_cached_tokens=state.checkpoint_state.session_total_cached_tokens,
+                                )
+                            )
+                            state.messages = memory_recall_result.messages
+                            state.turn_messages = memory_recall_result.turn_messages
+                            state.checkpoint_state.turn_messages = state.turn_messages
+                            state.chat_channel = memory_recall_result.chat_channel
+                            state.chat_cursor_key = memory_recall_result.chat_cursor_key
+                            state.chat_channel_obj = memory_recall_result.chat_channel_obj
+                            state.model_entry = memory_recall_result.model_entry
+                            state.channel_rule = memory_recall_result.channel_rule
+                            state.chat_params = memory_recall_result.chat_params
+                            state.checkpoint_state.total_output_tokens = memory_recall_result.total_output_tokens
+                            state.checkpoint_state.session_total_output_tokens = memory_recall_result.session_total_output_tokens
+                            state.checkpoint_state.session_total_input_tokens = memory_recall_result.session_total_input_tokens
+                            state.checkpoint_state.session_total_cached_tokens = memory_recall_result.session_total_cached_tokens
+                            state.img_understanding, state.audio_understanding, state.video_understanding = get_multimodal_from_entry(state.model_entry)
+                            state.checkpoint_state.memory_recall_status = memory_recall_result.status
+                            await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+
+                        state.current_turn += 1
+
+                        if not goal_mode and state.current_turn == max_turns and state.checkpoint_state.execution_phase != GOAL_EXECUTION_PHASE_FINALIZING:
+                            summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
+                            state.messages.append(InternalMessage(role=MessageRole.USER, content=summary_notice))
+                            state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_FINALIZING
+
                         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
+                        response_id = str(uuid.uuid4())
+                        generation_result = await generate_interactive_turn(
+                            state,
+                            current_tools=state.tools,
+                            # 最终阶段由本地阶段拦截，避免依赖上游对 none 的处理差异。
+                            tool_choice="auto",
+                            response_id=response_id,
+                            cache_key=cache_key,
+                        )
+                        if await _yield_after_generation_if_requested(response_id, generation_result):
+                            return {"status": "yielded_to_user"}
 
-                    state.current_turn += 1
-
-                    if not goal_mode and state.current_turn == max_turns and state.checkpoint_state.execution_phase != GOAL_EXECUTION_PHASE_FINALIZING:
-                        summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
-                        state.messages.append(InternalMessage(role=MessageRole.USER, content=summary_notice))
-                        state.checkpoint_state.execution_phase = GOAL_EXECUTION_PHASE_FINALIZING
-
-                    await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
-                    response_id = str(uuid.uuid4())
-                    generation_result = await generate_interactive_turn(
-                        state,
-                        current_tools=state.tools,
-                        # 最终阶段由本地阶段拦截，避免依赖上游对 none 的处理差异。
-                        tool_choice="auto",
-                        response_id=response_id,
-                        cache_key=cache_key,
-                    )
                     ai_msg = generation_result.message
 
                     end_session_signal = (state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_RUNNING and is_end_session_signal(ai_msg)) or (state.checkpoint_state.execution_phase == GOAL_EXECUTION_PHASE_FINALIZING and is_skip_reply_signal(ai_msg))
@@ -677,13 +741,18 @@ async def dispatch_interactive(
                     state.turn_messages.append(display_msg)
 
                     new_user_batch = await _fetch_additional_user_messages(state.additional_user_messages_context, state.chat_params["max_tokens"]) if not ai_msg.tool_calls and accepts_additional_messages else None
+                    message_dedupe_key = None
+                    if not ai_msg.tool_calls and new_user_batch is None:
+                        message_dedupe_key = final_message_dedupe_key
+                    elif generation_was_resumed and ai_msg.tool_calls and final_message_dedupe_key is not None:
+                        message_dedupe_key = hashlib.sha256(f"{final_message_dedupe_key}:response:{response_id}".encode()).hexdigest()
                     saved_msg = await save_assistant_message(
                         db,
                         session_id,
                         uid,
                         profile.id,
                         display_msg,
-                        dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls and new_user_batch is None else None,
+                        dedupe_key=message_dedupe_key,
                         created_at=generation_result.attempt_started_at if stream_event_callback is not None else None,
                     )
                     ai_msg.id = display_msg.id
