@@ -1,8 +1,8 @@
 <template>
-  <div v-if="userPermissions.isSuperuser" class="view-container">
+  <div v-if="userPermissions.showAdminNavigation" class="view-container">
     <BaseDataTable
       :data="skills"
-      :loading="loading"
+      :loading="loading || !userPermissions.isSuperuser"
       :total="total"
       v-model:current-page="currentPage"
       v-model:page-size="pageSize"
@@ -46,7 +46,7 @@
             type="danger"
             size="small"
             :loading="deletingId === row.id && deletingId !== null"
-            :disabled="loading || deletingId !== null"
+            :disabled="loading || deletingId !== null || !userPermissions.isSuperuser"
             @click="handleDelete(row)"
           >
             {{ t('common.delete') }}
@@ -58,7 +58,7 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import BaseDataTable from '../components/BaseDataTable.vue'
@@ -159,6 +159,15 @@ async function handleDelete(row) {
     deletingId.value = null
   }
 }
+
+watch(
+  () => userPermissions.isSuperuser,
+  (isSuperuser) => {
+    if (isSuperuser) {
+      loadSkills()
+    }
+  }
+)
 
 onMounted(() => {
   isActive = true
