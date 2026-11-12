@@ -18,7 +18,7 @@ def to_jsonable(value):
 
 
 def is_context_summary_message(message: InternalMessage) -> bool:
-    return isinstance(message.content, str) and message.content.startswith("<conversation_summary ")
+    return message.conversation_summary is not None
 
 
 def merge_user_message_contents(
@@ -42,6 +42,15 @@ def merge_user_message_contents(
 def message_token_text(msg: InternalMessage) -> str:
     if msg.tool_calls:
         return msg.model_dump_json(exclude_none=True)
+    if msg.conversation_summary is not None:
+        return json.dumps(
+            {
+                "conversation_summary": msg.conversation_summary.content,
+                "user_message": to_jsonable(msg.content),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     if isinstance(msg.content, str):
         return msg.content
     if msg.content is None:

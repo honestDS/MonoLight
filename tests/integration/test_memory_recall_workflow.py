@@ -28,6 +28,8 @@ from app.core.retrieval.schemas import RetrievalHit
 from app.core.tools import longterm_memory as longterm_memory_module
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
 from app.core.utils.assistant_files import build_assistant_files_content
+from app.core.utils.context_summary import ContextSummaryState
+from app.core.utils.context_summary.user_message_block import append_covered_user_message
 from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.channel import ChannelConfig, ChannelRule, ModelChannel
@@ -49,6 +51,7 @@ from app.models.memory import (
 )
 from app.models.message import (
     ImagePart,
+    InternalConversationSummary,
     InternalMessage,
     InternalResponse,
     InternalToolCall,
@@ -279,12 +282,17 @@ async def _seed_memory_recall_workflow(session_factory, *, chat_protocol: str = 
 
 
 @pytest.mark.parametrize("input_kind", ["text", "inline_image", "image_attachment"])
+@pytest.mark.parametrize(
+    "covered_user_content",
+    [None, "", "普通铁粉 开票税务类别\n保留原始标点：“引号”"],
+)
 @pytest.mark.asyncio
 async def test_memory_recall_precheck_persists_executes_and_recovers_idempotently(
     memory_recall_session_factory,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
     input_kind: str,
+    covered_user_content: str | None,
 ) -> None:
     profile, cfg, current_user_id, memory_id, vector_item_id = await _seed_memory_recall_workflow(memory_recall_session_factory)
     assert current_user_id is not None
@@ -394,7 +402,12 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     history_assistant_text = "Noted your VS Code editor preference."
     preserved_reasoning_content = "PRESERVED_INTERNAL_REASONING"
     preserved_provider_metadata = {"source": {"marker": "PRESERVED_PROVIDER_METADATA"}}
-    summary_content = '<conversation_summary through_message_id="41">\nEarlier background: The user is working on Python projects.\n</conversation_summary>'
+    summary_content = "Earlier background: The user is working on Python projects."
+    summary_content_with_covered_user = append_covered_user_message(
+        summary_content,
+        message_id=40 if covered_user_content is not None else None,
+        content=covered_user_content,
+    )
     todo_snapshot = '<current_session_todo_snapshot>{"revision":7,"todos":[{"content":"STALE_TODO_MUST_NOT_LEAK","status":"pending"}]}</current_session_todo_snapshot>'
     current_user_content = "Which editor do I prefer?"
     current_attachment_path = None
@@ -415,8 +428,13 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
                 )
                 assert updated is True
 
+        summary_message = ContextSummaryState(
+            content=summary_content_with_covered_user,
+            message_id=41,
+        ).as_message()
+        assert summary_message is not None
         context_messages = [
-            InternalMessage(role=MessageRole.USER, content=summary_content),
+            summary_message,
             InternalMessage(role=MessageRole.USER, content=history_user_content),
             InternalMessage(
                 role=MessageRole.ASSISTANT,
@@ -533,7 +551,21 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     assert precheck_assistant.provider_metadata == source_assistant.provider_metadata == preserved_provider_metadata
     assert precheck_assistant.provider_metadata is not source_assistant.provider_metadata
     assert precheck_assistant.provider_metadata["source"] is not source_assistant.provider_metadata["source"]
-    assert any(message.role == MessageRole.USER and message.content == summary_content for message in precheck_messages)
+    summary_payload = None
+    for message in precheck_messages:
+        if message.role != MessageRole.USER:
+            continue
+        if not isinstance(message.content, str):
+            continue
+        try:
+            candidate_payload = json.loads(message.content)
+        except json.JSONDecodeError:
+            continue
+        if "conversation_summary" not in candidate_payload:
+            continue
+        summary_payload = candidate_payload
+        break
+    assert summary_payload == {"conversation_summary": summary_content, "user_message": covered_user_content}
     todo_messages = [message for message in precheck_messages if message.role == MessageRole.USER and isinstance(message.content, str) and "current_session_todo" in message.content]
     assert len(todo_messages) == 1
     todo_payload = json.loads(todo_messages[0].content)
@@ -566,6 +598,10 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
         "CURRENT_IMAGE_MUST_NOT_LEAK",
         "data:image/",
         "image_url",
+        "through_message_id",
+        "covered_user_message_id",
+        "<covered_user_message",
+        "base64-utf8",
         "[系统提示,此处不是用户说的话]",
         "[系统提示结束]",
     ):
@@ -1514,7 +1550,11 @@ async def test_memory_recall_precheck_skips_image_only_input(
     context_messages = [
         InternalMessage(
             role=MessageRole.USER,
-            content='<conversation_summary through_message_id="41">\nEarlier background: The user is working on Python projects.\n</conversation_summary>',
+            conversation_summary=InternalConversationSummary(
+                through_message_id=41,
+                content="Earlier background: The user is working on Python projects.",
+            ),
+            content=None,
         ),
         InternalMessage(role=MessageRole.USER, content="I prefer VS Code as my editor for Python projects."),
         InternalMessage(role=MessageRole.ASSISTANT, content="Noted your VS Code editor preference."),

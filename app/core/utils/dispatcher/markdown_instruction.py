@@ -107,6 +107,8 @@ def materialize_user_environment_prompts(messages: list[InternalMessage]) -> lis
             real_non_text_parts = []
 
         payload: dict[str, Any] = {"user_message": user_message}
+        if message.conversation_summary is not None:
+            payload["conversation_summary"] = message.conversation_summary.content
         if message.attachments:
             payload["attachment_paths"] = list(message.attachments)
         for field in ("environment", "response_settings", "platform_constraints"):
@@ -129,6 +131,7 @@ def materialize_user_environment_prompts(messages: list[InternalMessage]) -> lis
             message.content = [TextPart(text=materialized_content), *real_non_text_parts]
         else:
             message.content = materialized_content
+        message.conversation_summary = None
     return request_messages
 
 

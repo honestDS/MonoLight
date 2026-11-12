@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.session.terminal_watch import terminal_watch_reply_crud
 from app.core.prompts import TERMINAL_WATCH_STATE_INSTRUCTION_PROMPT
-from app.core.utils.context_messages import is_context_summary_message
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
 
@@ -227,15 +226,13 @@ def strip_terminal_watch_snapshot(content: str | None) -> str | None:
 def strip_terminal_watch_snapshots(messages: list[InternalMessage]) -> list[InternalMessage]:
     stripped: list[InternalMessage] = []
     for message in messages:
-        if (message.role == MessageRole.TOOL or is_context_summary_message(message)) and isinstance(message.content, str):
-            stripped.append(
-                message.model_copy(
-                    deep=True,
-                    update={"content": strip_terminal_watch_snapshot(message.content)},
-                )
-            )
-        else:
-            stripped.append(message.model_copy(deep=True))
+        stripped_message = message.model_copy(deep=True)
+        if stripped_message.role == MessageRole.TOOL and isinstance(stripped_message.content, str):
+            stripped_message.content = strip_terminal_watch_snapshot(stripped_message.content)
+        conversation_summary = stripped_message.conversation_summary
+        if conversation_summary is not None:
+            conversation_summary.content = strip_terminal_watch_snapshot(conversation_summary.content)
+        stripped.append(stripped_message)
     return stripped
 
 
@@ -247,17 +244,29 @@ def append_terminal_watch_snapshot(
     if not snapshot:
         return updated
 
-    target = next(
-        (message for message in reversed(updated) if message.role == MessageRole.TOOL and isinstance(message.content, str)),
-        None,
-    )
+    target = None
+    for message in reversed(updated):
+        if message.role != MessageRole.TOOL:
+            continue
+        if not isinstance(message.content, str):
+            continue
+        target = message
+        break
     if target is None:
-        target = next((message for message in updated if is_context_summary_message(message) and isinstance(message.content, str)), None)
+        for message in updated:
+            if message.conversation_summary is not None:
+                target = message
+                break
     if target is None:
         return updated
 
-    base_content = target.content or ""
-    target.content = f"{base_content}\n\n{snapshot}" if base_content else snapshot
+    if target.role == MessageRole.TOOL:
+        base_content = target.content or ""
+        target.content = f"{base_content}\n\n{snapshot}" if base_content else snapshot
+    else:
+        conversation_summary = target.conversation_summary
+        base_content = conversation_summary.content or ""
+        conversation_summary.content = f"{base_content}\n\n{snapshot}" if base_content else snapshot
     return updated
 
 

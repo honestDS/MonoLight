@@ -27,7 +27,6 @@ from app.core.crud.context_summary.fragment import (
 from app.core.crud.context_summary.stage import context_summary_stage_crud
 from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.exceptions import LLMContextLengthException, LLMException, LLMRequestRejectedException
-from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.core.utils.context_budget import calculate_context_summary_trigger_tokens
 from app.core.utils.context_summary import cleanup as context_summary_cleanup
 from app.core.utils.context_summary import merge as context_summary_merge
@@ -35,11 +34,11 @@ from app.core.utils.context_summary import reduction as context_summary_reductio
 from app.core.utils.context_summary import service as context_summary_service
 from app.core.utils.context_summary import stage as context_summary_stage
 from app.core.utils.context_summary.boundary import ContextSummaryTriggerMode
-from app.core.utils.context_summary.common import ContextSummaryOutputBudgetError
+from app.core.utils.context_summary.common import ContextSummaryOutputBudgetError, ContextSummaryState
 from app.core.utils.context_summary.model_call import call_context_summary_model, estimate_context_summary_prompt_tokens
 from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot, select_context_summary_model
 from app.core.utils.context_summary.snapshot import build_context_summary_snapshot
-from app.core.utils.context_summary.user_message_block import split_covered_user_message
+from app.core.utils.context_summary.user_message_block import append_covered_user_message, split_covered_user_message
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
 from app.core.utils.dispatcher.frozen_context import compact_frozen_context_messages
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
@@ -163,10 +162,12 @@ async def test_persisted_context_summary_is_reused_as_history_boundary(
     assert messages[0].role == MessageRole.SYSTEM
     assert messages[0].content == "stable system prompt"
     assert messages[1].role == MessageRole.USER
-    assert messages[1].content == CONTEXT_SUMMARY_WRAPPER.format(
-        through_message_id=2,
-        content="compressed old turns",
-    )
+    summary_meta = messages[1].conversation_summary
+    assert summary_meta is not None
+    assert summary_meta.content == "compressed old turns"
+    assert summary_meta.through_message_id == 2
+    assert summary_meta.covered_user_message_id is None
+    assert messages[1].content is None
     assert [message.id for message in messages[2:]] == [3, 4]
     assert [message.content for message in messages[2:]] == ["recent question", "recent answer"]
 
@@ -254,27 +255,40 @@ async def test_real_summary_stage_persists_fragment_and_completion(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "covered_user_content",
+    [
+        pytest.param(None, id="without-covered-user"),
+        pytest.param(
+            '中文用户原文\n包含“引号”、"双引号"和<xml attr="值">样式文本</xml>',
+            id="with-covered-user",
+        ),
+    ],
+)
 async def test_frozen_context_compaction_refines_over_budget_single_summary(
     context_summary_database: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    covered_user_content: str | None,
 ) -> None:
-    original_summary = "entry " * 6500
+    covered_user_message_id = 1 if covered_user_content is not None else None
+    original_summary_text = "entry " * 6500
+    original_summary = append_covered_user_message(
+        original_summary_text,
+        message_id=covered_user_message_id,
+        content=covered_user_content,
+    )
+    assert original_summary is not None
     first_summary_response = "entry " * 3200
     first_summary = first_summary_response.strip()
     short_summary = "short summary"
     task_model_id = "task-model"
     task_protocol = "openai"
     task_channel_id = 11
+    summary_message = ContextSummaryState(content=original_summary, message_id=1).as_message()
+    assert summary_message is not None
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="system"),
-        InternalMessage(
-            role=MessageRole.USER,
-            id=None,
-            content=CONTEXT_SUMMARY_WRAPPER.format(
-                through_message_id=1,
-                content=original_summary,
-            ),
-        ),
+        summary_message,
     ]
     summary_model = ContextSummaryModelSnapshot(
         channel_id=task_channel_id,
@@ -347,25 +361,41 @@ async def test_frozen_context_compaction_refines_over_budget_single_summary(
             channel_id=task_channel_id,
         )
 
-    first_candidate = [
-        messages[0],
-        InternalMessage(
-            role=MessageRole.USER,
-            content=CONTEXT_SUMMARY_WRAPPER.format(
-                through_message_id=1,
-                content=first_summary,
-            ),
-        ),
-    ]
+    first_summary_content = append_covered_user_message(
+        first_summary,
+        message_id=covered_user_message_id,
+        content=covered_user_content,
+    )
+    assert first_summary_content is not None
+    first_summary_message = ContextSummaryState(content=first_summary_content, message_id=1).as_message()
+    assert first_summary_message is not None
+    first_candidate = [messages[0], first_summary_message]
 
     assert target_tokens == 2_908
-    assert compacted[1].content == CONTEXT_SUMMARY_WRAPPER.format(
-        through_message_id=1,
-        content=short_summary,
-    )
+    compacted_summary_meta = compacted[1].conversation_summary
+    assert compacted_summary_meta is not None
+    assert compacted_summary_meta.content == short_summary
+    assert compacted_summary_meta.through_message_id == 1
+    assert compacted_summary_meta.covered_user_message_id == covered_user_message_id
+    assert compacted[1].content == covered_user_content
     assert request_tokens(compacted) <= target_tokens
     assert request_tokens(first_candidate) > target_tokens
     assert len(model_prompts) == 2
+    conversation_section = model_prompts[0].split("Conversation segment to compress:\n", 1)[1]
+    conversation_section = conversation_section.split("\n\nReturn only the updated summary using the output template.", 1)[0]
+    conversation_messages = [json.loads(line) for line in conversation_section.splitlines() if line]
+    expected_summary = original_summary_text
+    if covered_user_content is not None:
+        expected_summary = original_summary_text.rstrip()
+    assert conversation_messages == [
+        {
+            "role": MessageRole.USER.value,
+            "user_message": covered_user_content,
+            "conversation_summary": expected_summary,
+        }
+    ]
+    assert "through_message_id" not in conversation_section
+    assert "covered_user_message_id" not in conversation_section
     assert model_prompts[1].startswith("Further compress the summary below")
     assert first_summary in model_prompts[1]
 
@@ -492,10 +522,12 @@ async def test_checkpoint_summary_threshold_uses_persisted_provider_usage_not_lo
         )
 
     assert generation_calls == [True]
-    assert compacted[1].content == CONTEXT_SUMMARY_WRAPPER.format(
-        through_message_id=2,
-        content="provider-triggered summary",
-    )
+    compacted_summary_meta = compacted[1].conversation_summary
+    assert compacted_summary_meta is not None
+    assert compacted_summary_meta.content == "provider-triggered summary"
+    assert compacted_summary_meta.through_message_id == 2
+    assert compacted_summary_meta.covered_user_message_id is None
+    assert compacted[1].content is None
     assert [message.id for message in compacted[2:]] == [3, 4]
 
     async with context_summary_database() as db:
@@ -721,37 +753,21 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
             assert tool_call.arguments["operation"] == "recall"
             assert_recall_payload(tool_result_message.content)
 
-    def assert_summary_context(request: list[InternalMessage]) -> str:
-        summary_messages: list[str] = []
+    def assert_summary_context(request: list[InternalMessage]) -> None:
+        summary_payloads: list[dict] = []
         for message in request:
             if message.role != MessageRole.USER or not isinstance(message.content, str):
                 continue
-            candidate = message.content
             try:
-                materialized = json.loads(candidate)
+                materialized = json.loads(message.content)
             except json.JSONDecodeError:
-                materialized = None
-            if isinstance(materialized, dict) and isinstance(materialized.get("user_message"), str):
-                candidate = materialized["user_message"]
-            if candidate.startswith("<conversation_summary"):
-                summary_messages.append(candidate)
-        assert len(summary_messages) == 1
-        summary_content = summary_messages[0]
-        template_prefix, template_suffix = CONTEXT_SUMMARY_WRAPPER.format(
-            through_message_id=5,
-            content="__SUMMARY_CONTENT__",
-        ).split("__SUMMARY_CONTENT__", 1)
-        assert summary_content.startswith(template_prefix)
-        assert summary_content.endswith(template_suffix)
-        summary_body = summary_content[len(template_prefix) : -len(template_suffix)]
-        model_summary, covered = split_covered_user_message(summary_body)
-        assert model_summary == "overflow recovery summary"
-        assert covered is not None
-        assert covered.message_id == 3
-        assert covered.content == "current question"
-        assert not any(message.role == MessageRole.TOOL for message in request)
-        assert not any(message.tool_calls for message in request)
-        return summary_content
+                continue
+            if isinstance(materialized, dict) and materialized.get("conversation_summary") == "overflow recovery summary":
+                summary_payloads.append(materialized)
+        assert len(summary_payloads) == 1
+        summary_payload = summary_payloads[0]
+        assert summary_payload["conversation_summary"] == "overflow recovery summary"
+        assert summary_payload["user_message"] == "current question"
 
     result = None
     state = None
@@ -823,12 +839,17 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
         assert summary_calls == (2 if first_summary_failure else 1)
         assert fallback_calls == (1 if first_summary_failure else 0)
     assert_tool_context(attempts[:-1])
-    summary_request_content = assert_summary_context(attempts[-1])
+    assert_summary_context(attempts[-1])
     assert all(not any("overflow recovery summary" in (message.content or "") for message in request) for request in attempts[:-1])
     assert any("overflow recovery summary" in (message.content or "") for message in attempts[-1])
     assert state is not None
     assert state.checkpoint_state.upper_message_id == 3
-    assert state.messages[1].content == summary_request_content
+    state_summary_meta = state.messages[1].conversation_summary
+    assert state_summary_meta is not None
+    assert state_summary_meta.content == "overflow recovery summary"
+    assert state_summary_meta.through_message_id == 5
+    assert state_summary_meta.covered_user_message_id == 3
+    assert state.messages[1].content == "current question"
     assert [message.id for message in state.messages[2:]] == []
     model_summary, covered = split_covered_user_message(session.context_summary)
     assert model_summary == "overflow recovery summary"
@@ -1838,12 +1859,11 @@ async def test_context_summary_checkpoint_refines_against_complete_request_budge
         )
 
     def candidate_messages(summary: str) -> list[InternalMessage]:
+        summary_message = ContextSummaryState(content=summary, message_id=4).as_message()
+        assert summary_message is not None
         return [
             system_message,
-            InternalMessage(
-                role=MessageRole.USER,
-                content=CONTEXT_SUMMARY_WRAPPER.format(through_message_id=4, content=summary),
-            ),
+            summary_message,
             current_message,
         ]
 
@@ -1888,7 +1908,12 @@ async def test_context_summary_checkpoint_refines_against_complete_request_budge
     if mode == "success":
         checkpointed = await run_checkpoint()
         assert request_tokens(checkpointed) <= target_tokens
-        assert checkpointed[1].content == CONTEXT_SUMMARY_WRAPPER.format(through_message_id=4, content=short_summary)
+        checkpointed_summary_meta = checkpointed[1].conversation_summary
+        assert checkpointed_summary_meta is not None
+        assert checkpointed_summary_meta.content == short_summary
+        assert checkpointed_summary_meta.through_message_id == 4
+        assert checkpointed_summary_meta.covered_user_message_id is None
+        assert checkpointed[1].content is None
         assert checkpointed[2].id == 5
         assert len(model_prompts) == 4
     else:
@@ -1918,16 +1943,21 @@ async def test_context_summary_checkpoint_refines_against_complete_request_budge
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entry_mode", ["threshold", "forced"], ids=["threshold", "forced"])
+@pytest.mark.parametrize(
+    "main_protocol",
+    ["openai", "openai_responses", "deepseek", "deepseek_responses"],
+    ids=["openai", "openai-responses", "deepseek", "deepseek-responses"],
+)
 async def test_context_summary_chunks_tool_results_and_preserves_continuation(
     context_summary_database: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     entry_mode: str,
+    main_protocol: str,
 ) -> None:
     uid = "continuation-user"
     session_id = "continuation-session"
     main_channel_id = 21
     main_model_id = "main-model"
-    main_protocol = "openai"
     summary_model = ContextSummaryModelSnapshot(
         channel_id=11,
         channel_name="small-summary-channel",
@@ -2125,7 +2155,7 @@ async def test_context_summary_chunks_tool_results_and_preserves_continuation(
             )
 
     def _summary_message(messages: list[InternalMessage]) -> InternalMessage:
-        summaries = [message for message in messages if message.role == MessageRole.USER and isinstance(message.content, str) and message.content.startswith("<conversation_summary")]
+        summaries = [message for message in messages if message.role == MessageRole.USER and message.conversation_summary is not None]
         assert len(summaries) == 1
         return summaries[0]
 
@@ -2157,20 +2187,23 @@ async def test_context_summary_chunks_tool_results_and_preserves_continuation(
         expected_todos: list[dict[str, str]],
         expected_markers: list[str],
     ) -> None:
-        assert isinstance(message.content, str)
-        template_prefix, template_suffix = CONTEXT_SUMMARY_WRAPPER.format(
-            through_message_id=through_message_id,
-            content="__SUMMARY_CONTENT__",
-        ).split("__SUMMARY_CONTENT__", 1)
-        assert message.content.startswith(template_prefix)
-        assert message.content.endswith(template_suffix)
-        summary_content = message.content[len(template_prefix) : -len(template_suffix)]
-        _assert_summary_content(
-            summary_content,
-            expected_todo_revision=expected_todo_revision,
-            expected_todos=expected_todos,
-            expected_markers=expected_markers,
-        )
+        summary_meta = message.conversation_summary
+        assert summary_meta is not None
+        assert summary_meta.through_message_id == through_message_id
+        assert summary_meta.covered_user_message_id == 1
+        assert message.content == full_user_content
+        assert all(marker in summary_meta.content for marker in expected_markers)
+        todo_start = summary_meta.content.rfind("<current_session_todo_snapshot>")
+        assert todo_start >= 0
+        assert parse_session_todo_snapshot(summary_meta.content[todo_start:]) == {
+            "revision": expected_todo_revision,
+            "todos": expected_todos,
+        }
+        materialized_message = materialize_user_environment_prompts([message])[0]
+        assert isinstance(materialized_message.content, str)
+        materialized_payload = json.loads(materialized_message.content)
+        assert materialized_payload["conversation_summary"] == summary_meta.content
+        assert materialized_payload["user_message"] == full_user_content
         assert isinstance(message.environment_prompt, str)
         environment = json.loads(message.environment_prompt)
         assert environment["environment"]["runtime_context"] == "runtime-continuation-marker"
@@ -2273,14 +2306,104 @@ async def test_context_summary_chunks_tool_results_and_preserves_continuation(
     assert [message.id for message in reloaded_messages if message.id is not None] == []
     reloaded_summary = reloaded_messages[1:]
     assert len(reloaded_summary) == 1
+    _assert_summary_message(
+        reloaded_summary[0],
+        through_message_id=5,
+        expected_todo_revision=1,
+        expected_todos=todo_v1,
+        expected_markers=evidence_markers,
+    )
     assert reloaded_summary[0].content == first_summary_message.content
     materialized_reloaded_messages = materialize_user_environment_prompts(reloaded_messages)
     assert isinstance(materialized_reloaded_messages[1].content, str)
     reloaded_user_payload = json.loads(materialized_reloaded_messages[1].content)
+    assert reloaded_user_payload["conversation_summary"] == reloaded_summary[0].conversation_summary.content
+    assert reloaded_user_payload["user_message"] == full_user_content
     assert reloaded_user_payload["environment"]["runtime_context"] == "runtime-continuation-marker"
     assert reloaded_user_payload["platform_constraints"] == "platform-continuation-marker"
     assert reloaded_user_payload["response_settings"] == {"markdown": True, "max_output_tokens": 512}
     assert reloaded_user_payload["platform_guidance"] == guidance_prompt
+
+    main_upstream_payloads: list[dict] = []
+
+    async def capture_upstream_json(*_args, **kwargs):
+        main_upstream_payloads.append(kwargs["payload"])
+        if main_protocol in {"openai", "deepseek"}:
+            return {
+                "id": "chatcmpl-main",
+                "model": main_model_id,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "main response"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            }
+        return {
+            "id": "resp-main",
+            "status": "completed",
+            "model": main_model_id,
+            "output": [
+                {
+                    "id": "msg-main",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "main response", "annotations": []}],
+                }
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        }
+
+    monkeypatch.setattr(BaseOpenAITransformer, "_post_json", capture_upstream_json)
+    monkeypatch.setattr(http_transport_module, "post_json", capture_upstream_json)
+    main_response = await LLMClient.generate(
+        api_key="test-key",
+        base_url="https://main.invalid/v1",
+        model_id=main_model_id,
+        messages=materialized_reloaded_messages,
+        tools=[],
+        max_tokens=512,
+        channel_id=main_channel_id,
+        protocol=main_protocol,
+    )
+
+    assert main_response.message.content == "main response"
+    assert len(main_upstream_payloads) == 1
+    main_payload = main_upstream_payloads[0]
+    assert main_payload["model"] == main_model_id
+    input_key = "input" if main_protocol in {"openai_responses", "deepseek_responses"} else "messages"
+    assert input_key in main_payload
+    outbound_input = main_payload[input_key]
+    assert isinstance(outbound_input, list)
+    outbound_user_items = [item for item in outbound_input if isinstance(item, dict) and item.get("role") == MessageRole.USER.value]
+    assert len(outbound_user_items) == 1
+    outbound_user_content = outbound_user_items[0].get("content")
+    assert isinstance(outbound_user_content, str)
+    outbound_user_payload = json.loads(outbound_user_content)
+    assert outbound_user_payload == reloaded_user_payload
+    assert isinstance(outbound_user_payload["conversation_summary"], str)
+    assert isinstance(outbound_user_payload["user_message"], str)
+    assert "through_message_id" not in outbound_user_content
+    assert "covered_user_message_id" not in outbound_user_content
+    assert "<covered_user_message" not in outbound_user_content
+
+    input_payload = {input_key: outbound_input}
+    outbound_input_tokens = estimate_tokens(
+        json.dumps(input_payload, ensure_ascii=False, separators=(",", ":"), default=str),
+        model_id=main_model_id,
+        protocol=main_protocol,
+    )
+    estimated_input_tokens = estimate_request_context_tokens(
+        materialized_reloaded_messages,
+        [],
+        model_id=main_model_id,
+        protocol=main_protocol,
+        channel_id=main_channel_id,
+    )
+    assert outbound_input_tokens == estimated_input_tokens
 
     new_tool_call = InternalToolCall(
         id="continuation-call-delta",

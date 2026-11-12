@@ -9,7 +9,6 @@ from app.core.constants import (
 )
 from app.core.context import ContextManager
 from app.core.exceptions import LLMException
-from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.core.utils.context_budget import calculate_context_summary_trigger_tokens
 from app.core.utils.context_messages import is_context_summary_message
 from app.core.utils.context_summary.cleanup import cleanup_context_summary_work_safely
@@ -25,13 +24,12 @@ from app.core.utils.context_summary.stage import (
     build_summary_work_identity,
     generate_snapshot_summary_result,
 )
-from app.core.utils.context_summary.user_message_block import append_covered_user_message, split_covered_user_message
 from app.core.utils.dispatcher.markdown_instruction import (
     inherit_user_request_context,
     materialize_user_environment_prompts,
 )
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalConversationSummary, InternalMessage, MessageRole
 from app.models.profile import Profile, ProfileConfig
 from app.providers.llm.client import estimate_request_context_tokens
 
@@ -83,9 +81,7 @@ def _select_frozen_compaction_segment(
             continue
 
         tool_calls = message.tool_calls or []
-        if pending_multimodal_tool_call_ids and any(
-            tool_call.id in pending_multimodal_tool_call_ids for tool_call in tool_calls
-        ):
+        if pending_multimodal_tool_call_ids and any(tool_call.id in pending_multimodal_tool_call_ids for tool_call in tool_calls):
             break
         if not tool_calls:
             safe_end = index + 1
@@ -110,43 +106,21 @@ def _select_frozen_compaction_segment(
     return messages[:safe_end]
 
 
-def _summary_through_message_id(message: InternalMessage) -> int | None:
-    if not is_context_summary_message(message) or not isinstance(message.content, str):
-        return None
-    prefix = '<conversation_summary through_message_id="'
-    if not message.content.startswith(prefix):
-        return None
-    value_start = len(prefix)
-    value_end = message.content.find('">', value_start)
-    if value_end < 0:
-        return None
-    value = message.content[value_start:value_end]
-    if not 1 <= len(value) <= 19 or not all("0" <= character <= "9" for character in value):
-        return None
-    return int(value)
-
-
 def _covered_user_from_segment(messages: list[InternalMessage]) -> tuple[int | None, str | None]:
     covered_message_id = None
     covered_content = None
     for message in messages:
-        if message.role != MessageRole.USER or not isinstance(message.content, str):
+        if message.role != MessageRole.USER:
             continue
-        if not is_context_summary_message(message):
-            if isinstance(message.id, int) and not isinstance(message.id, bool) and message.id > 0:
-                covered_message_id = message.id
-                covered_content = message.content
+        if message.conversation_summary is not None:
+            covered_message_id = message.conversation_summary.covered_user_message_id
+            covered_content = message.content if isinstance(message.content, str) else None
             continue
-
-        content = message.content
-        body_start = content.find(">\n")
-        body_end = content.rfind("\n</conversation_summary>")
-        if body_start < 0 or body_end <= body_start:
+        if not isinstance(message.content, str):
             continue
-        _model_summary, covered = split_covered_user_message(content[body_start + 2 : body_end])
-        if covered is not None:
-            covered_message_id = covered.message_id
-            covered_content = covered.content
+        if isinstance(message.id, int) and not isinstance(message.id, bool) and message.id > 0:
+            covered_message_id = message.id
+            covered_content = message.content
     return covered_message_id, covered_content
 
 
@@ -206,19 +180,12 @@ async def compact_frozen_context_messages(
         return messages
 
     covered_message_id, covered_content = _covered_user_from_segment(segment)
-    summary_through_id = max(
-        [
-            message.id
-            for message in segment
-            if isinstance(message.id, int) and not isinstance(message.id, bool) and message.id > 0
-        ]
-        + [
-            through_id
-            for message in segment
-            if (through_id := _summary_through_message_id(message)) is not None
-        ],
-        default=covered_message_id or 0,
-    )
+    summary_through_id = covered_message_id or 0
+    for message in segment:
+        if isinstance(message.id, int) and not isinstance(message.id, bool) and message.id > 0:
+            summary_through_id = max(summary_through_id, message.id)
+        if message.conversation_summary is not None:
+            summary_through_id = max(summary_through_id, message.conversation_summary.through_message_id)
     snapshot = build_frozen_context_summary_snapshot(segment, work_id=work_id)
     _, work_dedupe_key, _ = build_summary_work_identity(
         session_id=session_id,
@@ -230,16 +197,14 @@ async def compact_frozen_context_messages(
     inherit_user_request_context(replacement_template, segment)
 
     def build_candidate_messages(summary: str) -> list[InternalMessage]:
-        summary_with_covered_user = append_covered_user_message(
-            summary,
-            message_id=covered_message_id,
-            content=covered_content,
-        )
         replacement = replacement_template.model_copy(
+            deep=True,
             update={
-                "content": CONTEXT_SUMMARY_WRAPPER.format(
+                "content": covered_content,
+                "conversation_summary": InternalConversationSummary(
                     through_message_id=summary_through_id,
-                    content=summary_with_covered_user or "",
+                    content=summary,
+                    covered_user_message_id=covered_message_id,
                 ),
             },
         )
