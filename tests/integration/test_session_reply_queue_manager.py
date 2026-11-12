@@ -9,6 +9,7 @@ from sqlmodel import select
 
 from app.adapters.weixin_openclaw.message import extract_text_and_attachments
 from app.core.constants import ERR_CHAT_REQUEST_ID_CONFLICT
+from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem, session_reply_work_item_crud
 from app.core.exceptions import BaseBusinessException, ParameterException
@@ -317,6 +318,185 @@ async def test_foreground_freeze_merges_contiguous_work_and_is_stable(db_session
     assert merged.merged_into_id == first.id
     processed = list((await db_session.execute(select(Message).where(Message.id.in_([1, 2])))).scalars().all())
     assert all(message.is_processed for message in processed)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_stage", ["freeze", "absorb"])
+async def test_foreground_input_stops_at_resumed_frozen_work(db_session: AsyncSession, input_stage: str):
+    crud = CRUDSessionReplyWorkItem()
+    manager = SessionReplyQueueManager()
+    old_worker_id = "worker-old"
+    current_worker_id = "worker-current"
+
+    old_message = await add_message(db_session, 165, "old frozen input")
+    old_work = await enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=old_message.id,
+        dedupe_key="foreground-message:165",
+    )
+    old_work.execution_state = {**old_work.execution_state, "request_ids": ["request-old"]}
+    db_session.add(old_work)
+    await db_session.commit()
+
+    claimed_old_work = await crud.claim_next(db_session, worker_id=old_worker_id, lease_seconds=300)
+    assert claimed_old_work is not None
+    assert claimed_old_work.id == old_work.id
+    old_work = claimed_old_work
+    old_frozen_result = await manager.freeze_foreground_input(
+        db_session,
+        work=old_work,
+        worker_id=old_worker_id,
+    )
+    assert old_frozen_result == ("old frozen input", [], [old_message.id])
+    await db_session.refresh(old_work)
+    await db_session.refresh(old_message)
+    assert old_work.input_message_ids == [old_message.id]
+    assert old_message.is_processed is True
+
+    old_checkpoint_message = InternalMessage(role=MessageRole.USER, content="old resume checkpoint")
+    old_checkpoint = {
+        "messages": [old_checkpoint_message.model_dump(mode="json", exclude_none=True)],
+    }
+    assert old_work.id is not None
+    await crud.save_checkpoint(db_session, old_work.id, old_checkpoint)
+    await db_session.commit()
+    old_execution_state = dict(old_work.execution_state)
+
+    old_work.status = SessionReplyWorkStatus.WAITING_EXTERNAL_WORK
+    old_work.locked_by = None
+    old_work.lock_until = None
+    db_session.add(old_work)
+    await db_session.commit()
+
+    current_message = await add_message(db_session, 169, "current user input")
+    current_work = await enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=current_message.id,
+        dedupe_key="foreground-message:169",
+    )
+    current_work.execution_state = {**current_work.execution_state, "request_ids": ["request-current"]}
+    db_session.add(current_work)
+    await db_session.commit()
+
+    if input_stage == "absorb":
+        claimed_current_work = await crud.claim_next(db_session, worker_id=current_worker_id, lease_seconds=300)
+        assert claimed_current_work is not None
+        assert claimed_current_work.id == current_work.id
+        current_work = claimed_current_work
+        current_frozen_result = await manager.freeze_foreground_input(
+            db_session,
+            work=current_work,
+            worker_id=current_worker_id,
+        )
+        assert current_frozen_result == ("current user input", [], [current_message.id])
+
+    before_boundary_message = await add_message(db_session, 170, "before resumed work")
+    before_boundary_work = await enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=before_boundary_message.id,
+        dedupe_key="foreground-message:170",
+    )
+    before_boundary_work.execution_state = {**before_boundary_work.execution_state, "request_ids": ["request-before"]}
+    db_session.add(before_boundary_work)
+
+    resumed_execution_state = {**old_execution_state, "external_resume_pending": True}
+    assert await external_work_crud.wake_waiting(
+        db_session,
+        work=old_work,
+        execution_state=resumed_execution_state,
+        commit=False,
+    )
+
+    after_boundary_message = await add_message(db_session, 171, "after resumed work")
+    after_boundary_work = await enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=after_boundary_message.id,
+        dedupe_key="foreground-message:171",
+    )
+    after_boundary_work.execution_state = {**after_boundary_work.execution_state, "request_ids": ["request-after"]}
+    db_session.add(after_boundary_work)
+    await db_session.commit()
+    await db_session.refresh(old_work)
+
+    if input_stage == "freeze":
+        claimed_current_work = await crud.claim_next(db_session, worker_id=current_worker_id, lease_seconds=300)
+        assert claimed_current_work is not None
+        assert claimed_current_work.id == current_work.id
+        current_work = claimed_current_work
+        current_input_result = await manager.freeze_foreground_input(
+            db_session,
+            work=current_work,
+            worker_id=current_worker_id,
+        )
+        assert current_input_result == ("current user input\nbefore resumed work", [], [current_message.id, before_boundary_message.id])
+    else:
+        current_input_batch = await manager.absorb_contiguous_foreground_messages(
+            db_session,
+            work_id=current_work.id,
+            worker_id=current_worker_id,
+        )
+        assert current_input_batch is not None
+        assert current_input_batch[0].content == "before resumed work"
+        assert current_input_batch.source_message_ids == (before_boundary_message.id,)
+
+    await db_session.refresh(current_work)
+    await db_session.refresh(before_boundary_work)
+    await db_session.refresh(old_work)
+    await db_session.refresh(after_boundary_work)
+    await db_session.refresh(old_message)
+    await db_session.refresh(current_message)
+    await db_session.refresh(before_boundary_message)
+    await db_session.refresh(after_boundary_message)
+
+    assert current_work.input_message_ids == [current_message.id, before_boundary_message.id]
+    assert current_work.execution_state["request_ids"] == ["request-current", "request-before"]
+    assert before_boundary_work.status == SessionReplyWorkStatus.MERGED
+    assert before_boundary_work.merged_into_id == current_work.id
+    assert old_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert old_work.input_message_ids == [old_message.id]
+    assert old_work.merged_into_id is None
+    assert old_work.execution_state == resumed_execution_state
+    assert old_work.execution_state["request_ids"] == ["request-old"]
+    assert old_work.execution_state["external_resume_pending"] is True
+    assert await crud.get_checkpoint(db_session, old_work.id) == old_checkpoint
+    assert after_boundary_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert after_boundary_work.merged_into_id is None
+    assert old_message.is_processed is True
+    assert current_message.is_processed is True
+    assert before_boundary_message.is_processed is True
+    assert after_boundary_message.is_processed is False
+
+    assert await crud.mark_terminal(
+        db_session,
+        work_id=current_work.id,
+        worker_id=current_worker_id,
+        status=SessionReplyWorkStatus.SUCCEEDED,
+    )
+    resumed_work = await crud.claim_next(db_session, worker_id="worker-resume", lease_seconds=300)
+    assert resumed_work is not None
+    assert resumed_work.id == old_work.id
+    resumed_result = await manager.freeze_foreground_input(
+        db_session,
+        work=resumed_work,
+        worker_id="worker-resume",
+    )
+    assert resumed_result == ("old frozen input", [], [old_message.id])
+    await db_session.refresh(resumed_work)
+    assert resumed_work.input_message_ids == [old_message.id]
+    assert resumed_work.execution_state == resumed_execution_state
+    assert await crud.get_checkpoint(db_session, resumed_work.id) == old_checkpoint
+    await db_session.refresh(after_boundary_work)
+    await db_session.refresh(after_boundary_message)
+    assert after_boundary_work.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert after_boundary_message.is_processed is False
 
 
 @pytest.mark.asyncio
