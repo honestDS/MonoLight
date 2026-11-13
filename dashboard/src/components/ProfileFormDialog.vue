@@ -20,20 +20,42 @@
                     <el-option v-for="item in ownerPromptOptions" :key="item.id" :label="item.name" :value="item.id"></el-option>
                   </el-select>
                 </el-form-item>
-                <el-form-item>
-                  <template #label>
-                    {{ $t('profiles.context_summary_threshold') }}
-                    <HelpTooltip :content="$t('profiles.context_summary_threshold_hint')" />
-                  </template>
-                  <el-select v-model="form.configs.other.context_summary_threshold_percent" class="full-width-input">
-                    <el-option
-                      v-for="percent in contextSummaryThresholdOptions"
-                      :key="percent"
-                      :label="`${percent}%`"
-                      :value="percent"
-                    ></el-option>
-                  </el-select>
-                </el-form-item>
+                <el-row :gutter="20" align="bottom">
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.context_summary_threshold') }}
+                        <HelpTooltip :content="$t('profiles.context_summary_threshold_hint')" />
+                      </template>
+                      <el-select v-model="form.configs.other.context_summary_threshold_percent" class="full-width-input">
+                        <el-option
+                          v-for="percent in contextSummaryThresholdOptions"
+                          :key="percent"
+                          :label="`${percent}%`"
+                          :value="percent"
+                        ></el-option>
+                      </el-select>
+                    </el-form-item>
+                  </el-col>
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.context_summary_max_concurrency') }}
+                        <HelpTooltip :content="$t('profiles.context_summary_max_concurrency_hint')" />
+                      </template>
+                      <el-input-number
+                        v-model="form.configs.other.context_summary_max_concurrency"
+                        :min="1"
+                        :max="20"
+                        :precision="0"
+                        :step="1"
+                        step-strictly
+                        controls-position="right"
+                        :aria-label="$t('profiles.context_summary_max_concurrency')"
+                      />
+                    </el-form-item>
+                  </el-col>
+                </el-row>
               </div>
             </div>
           </el-tab-pane>

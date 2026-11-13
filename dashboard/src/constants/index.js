@@ -76,7 +76,8 @@ export const defaultProfileConfigs = (defaults = {}) => ({
     file_send_blocked_extensions: []
   },
   other: {
-    context_summary_threshold_percent: 90
+    context_summary_threshold_percent: 90,
+    context_summary_max_concurrency: 4
   },
   memory: {
     enabled: false,

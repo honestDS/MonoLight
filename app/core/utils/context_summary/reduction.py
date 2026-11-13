@@ -42,6 +42,7 @@ from app.core.utils.context_summary.model_call import (
     estimate_context_summary_text_tokens,
 )
 from app.core.utils.context_summary.pipeline import (
+    CONTEXT_SUMMARY_REORDER_WINDOW,
     SummaryFragmentInput,
     SummaryFragmentResult,
     run_bounded_fragment_pipeline,
@@ -222,6 +223,7 @@ async def execute_reduction_stage(
     lower_stage: ContextSummaryStage,
     model: ContextSummaryModelSnapshot,
     refinement_index: int,
+    concurrency: int,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
 ) -> ContextSummaryStage:
     from app.core.utils.context_summary.stage import (
@@ -324,6 +326,8 @@ async def execute_reduction_stage(
                 expected_fragment_count=expected_fragment_count,
                 process_fragment=process_group,
                 first_fragment_index=first_fragment_index,
+                concurrency=concurrency,
+                reorder_window=max(CONTEXT_SUMMARY_REORDER_WINDOW, concurrency - 1),
                 persist_fragment=lambda result: write_summary_fragment(
                     stage=stage,
                     result=result,
@@ -399,6 +403,7 @@ async def reduce_completed_summary_stage_result(
                     lower_stage=lower_stage,
                     model=model,
                     refinement_index=refinement_index,
+                    concurrency=cfg.other.context_summary_max_concurrency,
                     work_validity_checker=work_validity_checker,
                 )
                 break

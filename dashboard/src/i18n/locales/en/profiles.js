@@ -115,6 +115,8 @@ export default {
   memory_settings_unavailable: 'Auto organization settings failed to load, so this profile cannot be saved right now.',
   context_summary_threshold: 'Context Summary Threshold',
   context_summary_threshold_hint: 'Older conversation content is summarized automatically when context usage reaches the selected percentage of the model\'s input budget. Default: 90%.',
+  context_summary_max_concurrency: 'Compression Concurrency Limit',
+  context_summary_max_concurrency_hint: 'Maximum simultaneous summary model requests per context compression. Range: 1–20; default: 4. Set to 1 to process fragments one at a time. Conversations have separate limits.',
   chat_channel: 'Chat Channel',
   chat_channel_label: 'Chat Models',
   chat_model: 'Chat Model',

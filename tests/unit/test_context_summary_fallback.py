@@ -162,6 +162,7 @@ async def test_failed_layer_is_invalidated_and_resplit_for_fallback_model(monkey
         profile=SimpleNamespace(id=9),
         cfg=SimpleNamespace(
             channel=SimpleNamespace(context_summary_channel=object()),
+            other=SimpleNamespace(context_summary_max_concurrency=4),
         ),
         snapshot=snapshot,
         existing_summary=None,

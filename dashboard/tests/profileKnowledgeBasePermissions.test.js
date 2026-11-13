@@ -2024,3 +2024,95 @@ test('reconfirmation displays fresh impact data and uses each fresh token', asyn
     [enCommon.delete_success],
   )
 })
+
+test('ordinary profile editor preserves context summary concurrency defaults and isolation', async t => {
+  const harness = await createHarness(t, { superuser: false, currentUid: 'user-a' })
+
+  harness.module.showDialog('create')
+  await flush()
+  assert.equal(harness.module.form.configs.other.context_summary_max_concurrency, 4)
+
+  harness.module.form.name = 'custom context summary concurrency profile'
+  harness.module.form.configs.other.context_summary_max_concurrency = 1
+  await harness.module.submitForm()
+  await flush()
+
+  const firstPayload = harness.api.creates[0]
+  const firstPayloadSnapshot = normalize(firstPayload)
+  assert.equal(firstPayload.configs.other.context_summary_max_concurrency, 1)
+
+  harness.module.showDialog('create')
+  await flush()
+  assert.equal(harness.module.form.configs.other.context_summary_max_concurrency, 4)
+  assert.deepEqual(normalize(firstPayload), firstPayloadSnapshot)
+
+  const legacyRow = {
+    id: 127,
+    uid: 'user-a',
+    name: 'legacy context summary profile',
+    prompt_id: null,
+    knowledge_base_ids: [],
+    configs: {
+      other: { context_summary_threshold_percent: 80 },
+      tool: { image_compression_threshold_kb: 1234 },
+    },
+  }
+  const originalLegacyRow = normalize(legacyRow)
+  harness.module.showDialog('edit', legacyRow)
+  await flush()
+  assert.equal(harness.module.form.configs.other.context_summary_max_concurrency, 4)
+  assert.equal(harness.module.form.configs.other.context_summary_threshold_percent, 80)
+  assert.equal(harness.module.form.configs.tool.image_compression_threshold_kb, 1234)
+  harness.module.form.configs.other.context_summary_max_concurrency = 20
+  assert.deepEqual(normalize(legacyRow), originalLegacyRow)
+
+  for (const scenario of [
+    { id: 128, concurrency: 1 },
+    { id: 129, concurrency: 20 },
+  ]) {
+    const row = {
+      id: scenario.id,
+      uid: 'user-a',
+      name: `configured context summary profile ${scenario.concurrency}`,
+      prompt_id: null,
+      knowledge_base_ids: [],
+      configs: {
+        other: {
+          context_summary_threshold_percent: 70,
+          context_summary_max_concurrency: scenario.concurrency,
+        },
+        tool: {
+          image_compression_enabled: false,
+          image_compression_threshold_kb: 1536,
+        },
+      },
+    }
+    const originalRow = normalize(row)
+
+    harness.module.showDialog('edit', row)
+    await flush()
+    assert.equal(harness.module.form.configs.other.context_summary_max_concurrency, scenario.concurrency)
+    assert.equal(harness.module.form.configs.other.context_summary_threshold_percent, 70)
+    assert.equal(harness.module.form.configs.tool.image_compression_enabled, false)
+    assert.equal(harness.module.form.configs.tool.image_compression_threshold_kb, 1536)
+
+    await harness.module.submitForm()
+    await flush()
+
+    const update = harness.api.updates[scenario.concurrency === 1 ? 0 : 1]
+    assert.equal(update.id, scenario.id)
+    assert.equal(update.payload.configs.other.context_summary_max_concurrency, scenario.concurrency)
+    assert.equal(update.payload.configs.other.context_summary_threshold_percent, 70)
+    assert.equal(update.payload.configs.tool.image_compression_enabled, false)
+    assert.equal(update.payload.configs.tool.image_compression_threshold_kb, 1536)
+    assert.deepEqual(normalize(row), originalRow)
+
+    const savedRow = { ...row, configs: normalize(update.payload.configs) }
+    harness.module.showDialog('edit', savedRow)
+    await flush()
+    assert.equal(harness.module.form.configs.other.context_summary_max_concurrency, scenario.concurrency)
+    assert.equal(harness.module.form.configs.other.context_summary_threshold_percent, 70)
+    assert.equal(harness.module.form.configs.tool.image_compression_enabled, false)
+    assert.equal(harness.module.form.configs.tool.image_compression_threshold_kb, 1536)
+  }
+})

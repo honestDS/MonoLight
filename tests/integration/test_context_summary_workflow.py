@@ -54,7 +54,7 @@ from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage, ContextSummaryStageStatus
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
-from app.models.profile import ProfileConfig, ToolConfig
+from app.models.profile import OtherConfig, ProfileConfig, ToolConfig
 from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
@@ -241,7 +241,7 @@ async def test_real_summary_stage_persists_fragment_and_completion(
             session_id="summary-session",
             uid="summary-user",
             profile=SimpleNamespace(id=1),
-            cfg=SimpleNamespace(channel=SimpleNamespace(context_summary_channel=object())),
+            cfg=ProfileConfig.model_validate({}),
             snapshot=snapshot,
             existing_summary=None,
             existing_summary_revision=0,
@@ -465,7 +465,7 @@ async def test_checkpoint_summary_threshold_uses_persisted_provider_usage_not_lo
         ],
     ]
     cfg = SimpleNamespace(
-        other=SimpleNamespace(context_summary_threshold_percent=50),
+        other=OtherConfig(context_summary_threshold_percent=50),
     )
 
     async with context_summary_database() as db:
@@ -843,7 +843,7 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
             "recovery-session",
             "recovery-user",
             SimpleNamespace(id=1),
-            SimpleNamespace(other=SimpleNamespace(context_summary_threshold_percent=90)),
+            SimpleNamespace(other=OtherConfig(context_summary_threshold_percent=90)),
             None,
             "",
             False,
@@ -855,7 +855,7 @@ async def test_provider_overflow_persists_summary_before_same_channel_retry(
             uid="recovery-user",
             session_id="recovery-session",
             profile=SimpleNamespace(id=1),
-            cfg=SimpleNamespace(tool=ToolConfig(), other=SimpleNamespace(context_summary_threshold_percent=90)),
+            cfg=SimpleNamespace(tool=ToolConfig(), other=OtherConfig(context_summary_threshold_percent=90)),
             messages=messages,
             checkpoint_state=SimpleNamespace(
                 upper_message_id=3,
@@ -1130,7 +1130,7 @@ async def test_context_summary_local_request_rejection_invalidates_stage_without
                 session_id="summary-session",
                 uid="summary-user",
                 profile=SimpleNamespace(id=1),
-                cfg=SimpleNamespace(channel=SimpleNamespace(context_summary_channel=object())),
+                cfg=ProfileConfig.model_validate({}),
                 snapshot=snapshot,
                 existing_summary=None,
                 existing_summary_revision=0,
@@ -1197,7 +1197,7 @@ async def test_context_summary_upstream_request_rejection_exhausts_channels(
                 session_id="summary-session",
                 uid="summary-user",
                 profile=SimpleNamespace(id=1),
-                cfg=SimpleNamespace(channel=SimpleNamespace(context_summary_channel=object())),
+                cfg=ProfileConfig.model_validate({}),
                 snapshot=snapshot,
                 existing_summary=None,
                 existing_summary_revision=0,
@@ -1269,7 +1269,7 @@ async def test_context_summary_upstream_rejection_falls_back_to_completed_summar
             session_id="summary-session",
             uid="summary-user",
             profile=SimpleNamespace(id=1),
-            cfg=SimpleNamespace(channel=SimpleNamespace(context_summary_channel=object())),
+            cfg=ProfileConfig.model_validate({}),
             snapshot=snapshot,
             existing_summary=None,
             existing_summary_revision=0,
@@ -1583,7 +1583,7 @@ async def test_context_summary_output_budget_failure_preserves_saved_summary_and
     profile = SimpleNamespace(id=1)
     cfg = SimpleNamespace(
         channel=SimpleNamespace(context_summary_channel=object()),
-        other=SimpleNamespace(context_summary_threshold_percent=50),
+        other=OtherConfig(context_summary_threshold_percent=50),
     )
     ensure_kwargs = {
         "session_id": "summary-session",
@@ -1754,7 +1754,7 @@ async def test_context_summary_reduction_budget_failure_invalidates_and_falls_ba
     monkeypatch.setattr(LLMClient, "generate", generate_model)
 
     profile = SimpleNamespace(id=1)
-    cfg = SimpleNamespace(channel=SimpleNamespace(context_summary_channel=object()))
+    cfg = ProfileConfig.model_validate({})
     result = None
     if fallback_succeeds:
         async with context_summary_database() as db:
@@ -1895,7 +1895,7 @@ async def test_context_summary_reduction_splits_repeated_range_and_completes(
     monkeypatch.setattr(LLMClient, "generate", generate_model)
 
     profile = SimpleNamespace(id=1)
-    cfg = SimpleNamespace(channel=SimpleNamespace(context_summary_channel=object()))
+    cfg = ProfileConfig.model_validate({})
     async with context_summary_database() as db:
         result = await context_summary_reduction.reduce_completed_summary_stage_result(
             db,
@@ -2055,7 +2055,7 @@ async def test_context_summary_checkpoint_refines_against_complete_request_budge
         "profile": SimpleNamespace(id=1),
         "cfg": SimpleNamespace(
             channel=SimpleNamespace(context_summary_channel=object()),
-            other=SimpleNamespace(context_summary_threshold_percent=50),
+            other=OtherConfig(context_summary_threshold_percent=50),
         ),
         "messages": [system_message, current_message],
         "trigger_mode": ContextSummaryTriggerMode.USER_MESSAGE,
@@ -2292,7 +2292,7 @@ async def test_context_summary_chunks_tool_results_and_preserves_continuation(
 
     cfg = SimpleNamespace(
         channel=SimpleNamespace(context_summary_channel=object()),
-        other=SimpleNamespace(context_summary_threshold_percent=90),
+        other=OtherConfig(context_summary_threshold_percent=90),
     )
     profile = SimpleNamespace(id=1)
 
@@ -2841,7 +2841,7 @@ async def test_context_summary_first_layer_uses_complete_request_budget_for_esca
             session_id=session_id,
             uid=uid,
             profile=SimpleNamespace(id=1),
-            cfg=SimpleNamespace(channel=SimpleNamespace(context_summary_channel=object())),
+            cfg=ProfileConfig.model_validate({}),
             snapshot=snapshot,
             existing_summary=None,
             existing_summary_revision=0,
@@ -3112,6 +3112,7 @@ async def test_context_summary_reduction_uses_complete_request_budget_and_reuses
         lower_stage=lower_stage,
         model=summary_model,
         refinement_index=0,
+        concurrency=4,
     )
 
     async with context_summary_database() as db:
@@ -3173,6 +3174,7 @@ async def test_context_summary_reduction_uses_complete_request_budget_and_reuses
         lower_stage=lower_stage,
         model=summary_model,
         refinement_index=0,
+        concurrency=4,
     )
     assert len(model_prompts) == prompt_count
     assert second_stage.stage_key == completed_stage.stage_key
@@ -3340,3 +3342,313 @@ async def test_context_summary_reduction_different_budgets_do_not_reuse_saved_pr
     assert reduction_stages[first_stage.stage_key].succeeded_fragment_count == 1
     assert reduction_stages[second_stage.stage_key].succeeded_fragment_count == 0
     assert reduction_stages[first_stage.stage_key].model_key == reduction_stages[second_stage.stage_key].model_key
+
+
+async def _seed_summary_concurrency_history(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    source_marker: str,
+) -> None:
+    def long_content(message_id: int) -> str:
+        return "".join(f"{source_marker}-{message_id} " + "fact " * 10 for _ in range(70))
+
+    messages = [
+        Message(
+            id=message_id,
+            session_id="summary-session",
+            uid="summary-user",
+            profile_id=1,
+            role=MessageRole.USER if message_id % 2 else MessageRole.ASSISTANT,
+            content=long_content(message_id) if message_id <= 48 else ("tail question" if message_id == 49 else "tail answer"),
+        )
+        for message_id in range(1, 51)
+    ]
+    async with session_factory() as db:
+        db.add(ChatSession(session_id="summary-session", uid="summary-user"))
+        db.add_all(messages)
+        await db.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile_values", "expected_concurrency"),
+    [
+        pytest.param({}, 4, id="default-4"),
+        pytest.param({"context_summary_max_concurrency": 1}, 1, id="configured-1"),
+        pytest.param({"context_summary_max_concurrency": 20}, 20, id="configured-20"),
+    ],
+)
+async def test_context_summary_raw_fragments_respect_configured_model_concurrency(
+    context_summary_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    profile_values: dict[str, int],
+    expected_concurrency: int,
+) -> None:
+    source_marker = f"raw-summary-source-{expected_concurrency}"
+    await _seed_summary_concurrency_history(
+        context_summary_database,
+        source_marker=source_marker,
+    )
+
+    summary_model = replace(
+        _summary_rejection_models()[1],
+        context_window_tokens=2_000,
+        max_output_tokens=768,
+        input_budget_tokens=1_232,
+    )
+    cfg = ProfileConfig.model_validate(profile_values)
+    profile = SimpleNamespace(id=1)
+    raw_release = asyncio.Event()
+    raw_active = 0
+    raw_max_active = 0
+    raw_call_count = 0
+
+    async def select_model(*_args, **_kwargs) -> ContextSummaryModelSnapshot:
+        return summary_model
+
+    async def generate_model(**kwargs) -> InternalResponse:
+        nonlocal raw_active, raw_call_count, raw_max_active
+        prompt = kwargs["messages"][0].content
+        assert isinstance(prompt, str)
+        if source_marker in prompt:
+            raw_call_count += 1
+            raw_active += 1
+            raw_max_active = max(raw_max_active, raw_active)
+            if raw_active >= expected_concurrency:
+                raw_release.set()
+            try:
+                await raw_release.wait()
+                await asyncio.sleep(0.01)
+            finally:
+                raw_active -= 1
+        else:
+            await asyncio.sleep(0.001)
+        return InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="short summary"),
+            model=kwargs["model_id"],
+            usage={"completion_tokens": 1},
+            finish_reason="stop",
+        )
+
+    monkeypatch.setattr(context_summary_stage, "select_context_summary_model", select_model)
+    monkeypatch.setattr(context_summary_reduction, "select_context_summary_model", select_model)
+    monkeypatch.setattr(LLMClient, "generate", generate_model)
+
+    async with context_summary_database() as db:
+        snapshot = await build_context_summary_snapshot(
+            db,
+            session_id="summary-session",
+            uid="summary-user",
+            expected_summary_message_id=None,
+            before_id=51,
+            target_message_id=48,
+            content_revision=0,
+        )
+        generated = await asyncio.wait_for(
+            context_summary_stage.generate_snapshot_summary_with_model(
+                db,
+                session_id="summary-session",
+                uid="summary-user",
+                profile=profile,
+                cfg=cfg,
+                snapshot=snapshot,
+                existing_summary=None,
+                existing_summary_revision=0,
+                safety_margin_tokens=0,
+                model=summary_model,
+            ),
+            timeout=10,
+        )
+
+    async with context_summary_database() as db:
+        stages = list((await db.execute(select(ContextSummaryStage).order_by(ContextSummaryStage.id))).scalars().all())
+        fragments = list((await db.execute(select(ContextSummaryFragment).order_by(ContextSummaryFragment.stage_key, ContextSummaryFragment.fragment_index))).scalars().all())
+
+    raw_stage = next(stage for stage in stages if stage.lower_stage_key is None)
+    raw_fragments = sorted(
+        (fragment for fragment in fragments if fragment.stage_key == raw_stage.stage_key),
+        key=lambda fragment: fragment.fragment_index,
+    )
+    assert cfg.other.context_summary_max_concurrency == expected_concurrency
+    assert raw_max_active == expected_concurrency
+    assert raw_stage.status == ContextSummaryStageStatus.COMPLETED
+    assert raw_stage.expected_fragment_count >= 20
+    assert raw_stage.expected_fragment_count == raw_stage.succeeded_fragment_count == len(raw_fragments) == raw_call_count
+    assert [fragment.fragment_index for fragment in raw_fragments] == list(range(len(raw_fragments)))
+    assert raw_fragments[0].message_start_id == 1
+    assert raw_fragments[-1].message_end_id == 48
+    assert all(1 <= fragment.message_start_id <= fragment.message_end_id <= 48 for fragment in raw_fragments)
+    assert all(left.message_start_id <= right.message_start_id and left.message_end_id <= right.message_end_id for left, right in zip(raw_fragments, raw_fragments[1:]))
+    assert {message_id for fragment in raw_fragments for message_id in range(fragment.message_start_id, fragment.message_end_id + 1)} == set(range(1, 49))
+    assert all(fragment.content == "short summary" and source_marker not in fragment.content for fragment in raw_fragments)
+    assert generated.completed_stage is not None
+    assert generated.content and source_marker not in generated.content
+    assert all(stage.status == ContextSummaryStageStatus.COMPLETED for stage in stages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile_values", "expected_concurrency"),
+    [
+        pytest.param({}, 4, id="default-4"),
+        pytest.param({"context_summary_max_concurrency": 1}, 1, id="configured-1"),
+        pytest.param({"context_summary_max_concurrency": 20}, 20, id="configured-20"),
+    ],
+)
+async def test_context_summary_reduction_respects_configured_model_concurrency(
+    context_summary_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    profile_values: dict[str, int],
+    expected_concurrency: int,
+) -> None:
+    source_marker = f"lower-summary-source-{expected_concurrency}"
+    await _seed_summary_concurrency_history(
+        context_summary_database,
+        source_marker=source_marker,
+    )
+
+    work_dedupe_key = f"merge-summary-concurrency-{expected_concurrency}"
+    lower_stage_key = f"merge-summary-concurrency-lower-{expected_concurrency}"
+    lower_model_key = f"merge-summary-concurrency-lower-model-{expected_concurrency}"
+    lower_ranges = [(2 * fragment_index + 1, 2 * fragment_index + 2) for fragment_index in range(24)]
+    lower_contents = ["".join(f"{source_marker}-{fragment_index} " + "fact " * 10 for _ in range(70)) for fragment_index in range(24)]
+    lower_stage = make_stage(
+        work_dedupe_key=work_dedupe_key,
+        stage_key=lower_stage_key,
+        model_key=lower_model_key,
+        expected_fragment_count=len(lower_contents),
+        persistent_summary_target_id=48,
+    )
+    lower_stage.uid = "summary-user"
+    lower_stage.session_id = "summary-session"
+    lower_stage.snapshot_max_message_id = 50
+
+    async with context_summary_database() as db:
+        persisted_lower_stage, stage_created = await context_summary_stage_crud.create_stage(
+            db,
+            stage=lower_stage,
+        )
+        assert stage_created is True
+        for fragment_index, (message_range, content) in enumerate(zip(lower_ranges, lower_contents)):
+            message_start_id, message_end_id = message_range
+            fragment = make_fragment(
+                fragment_index=fragment_index,
+                work_dedupe_key=work_dedupe_key,
+                stage_key=persisted_lower_stage.stage_key,
+                model_key=persisted_lower_stage.model_key,
+                message_start_id=message_start_id,
+                message_end_id=message_end_id,
+            )
+            fragment.uid = persisted_lower_stage.uid
+            fragment.session_id = persisted_lower_stage.session_id
+            fragment.model_id = persisted_lower_stage.model_id
+            fragment.content = content
+            fragment.token_count = max(1, estimate_tokens(content))
+            persisted_fragment, fragment_created = await context_summary_fragment_crud.write_ordered(
+                db,
+                fragment=fragment,
+            )
+            assert persisted_fragment is not None
+            assert fragment_created is True
+        await db.refresh(persisted_lower_stage)
+        assert await context_summary_stage_crud.mark_completed(
+            db,
+            work_dedupe_key=work_dedupe_key,
+            stage_key=persisted_lower_stage.stage_key,
+            model_key=persisted_lower_stage.model_key,
+        )
+
+    async with context_summary_database() as db:
+        lower_stage = (await db.execute(select(ContextSummaryStage).where(ContextSummaryStage.work_dedupe_key == work_dedupe_key, ContextSummaryStage.stage_key == lower_stage_key))).scalar_one()
+        lower_fragments = list((await db.execute(select(ContextSummaryFragment).where(ContextSummaryFragment.work_dedupe_key == work_dedupe_key, ContextSummaryFragment.stage_key == lower_stage_key).order_by(ContextSummaryFragment.fragment_index))).scalars())
+    lower_stage_before = lower_stage.model_dump()
+    lower_fragments_before = [fragment.model_dump() for fragment in lower_fragments]
+
+    summary_model = replace(
+        _summary_rejection_models()[1],
+        context_window_tokens=2_000,
+        max_output_tokens=768,
+        input_budget_tokens=1_232,
+    )
+    cfg = ProfileConfig.model_validate(profile_values)
+    profile = SimpleNamespace(id=1)
+    merge_release = asyncio.Event()
+    merge_active = 0
+    merge_max_active = 0
+    merge_call_count = 0
+
+    async def select_model(*_args, **_kwargs) -> ContextSummaryModelSnapshot:
+        return summary_model
+
+    async def generate_model(**kwargs) -> InternalResponse:
+        nonlocal merge_active, merge_call_count, merge_max_active
+        prompt = kwargs["messages"][0].content
+        assert isinstance(prompt, str)
+        if source_marker in prompt:
+            merge_call_count += 1
+            merge_active += 1
+            merge_max_active = max(merge_max_active, merge_active)
+            if merge_active >= expected_concurrency:
+                merge_release.set()
+            try:
+                await merge_release.wait()
+                await asyncio.sleep(0.01)
+            finally:
+                merge_active -= 1
+        else:
+            await asyncio.sleep(0.001)
+        return InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="short summary"),
+            model=kwargs["model_id"],
+            usage={"completion_tokens": 1},
+            finish_reason="stop",
+        )
+
+    monkeypatch.setattr(context_summary_reduction, "select_context_summary_model", select_model)
+    monkeypatch.setattr(LLMClient, "generate", generate_model)
+
+    async with context_summary_database() as db:
+        result = await asyncio.wait_for(
+            context_summary_reduction.reduce_completed_summary_stage_result(
+                db,
+                profile=profile,
+                cfg=cfg,
+                initial_stage=lower_stage,
+                safety_margin_tokens=0,
+            ),
+            timeout=10,
+        )
+
+    async with context_summary_database() as db:
+        stages = list((await db.execute(select(ContextSummaryStage).where(ContextSummaryStage.work_dedupe_key == work_dedupe_key).order_by(ContextSummaryStage.id))).scalars())
+        fragments = list((await db.execute(select(ContextSummaryFragment).where(ContextSummaryFragment.work_dedupe_key == work_dedupe_key).order_by(ContextSummaryFragment.stage_key, ContextSummaryFragment.fragment_index))).scalars())
+
+    reduction_stages = [stage for stage in stages if stage.lower_stage_key == lower_stage.stage_key]
+    assert len(reduction_stages) == 1
+    first_merge_stage = reduction_stages[0]
+    first_merge_fragments = [fragment for fragment in fragments if fragment.stage_key == first_merge_stage.stage_key]
+    assert merge_max_active == expected_concurrency
+    assert merge_call_count == first_merge_stage.expected_fragment_count
+    assert first_merge_stage.expected_fragment_count >= 20
+    assert first_merge_stage.succeeded_fragment_count == first_merge_stage.expected_fragment_count
+    assert first_merge_stage.status == ContextSummaryStageStatus.COMPLETED
+    assert len(first_merge_fragments) == first_merge_stage.expected_fragment_count
+    assert [fragment.fragment_index for fragment in first_merge_fragments] == list(range(len(first_merge_fragments)))
+    assert first_merge_fragments[0].message_start_id == 1
+    assert first_merge_fragments[-1].message_end_id == 48
+    assert all(1 <= fragment.message_start_id <= fragment.message_end_id <= 48 for fragment in first_merge_fragments)
+    assert all(left.message_start_id <= right.message_start_id and left.message_end_id <= right.message_end_id for left, right in zip(first_merge_fragments, first_merge_fragments[1:]))
+    assert {message_id for fragment in first_merge_fragments for message_id in range(fragment.message_start_id, fragment.message_end_id + 1)} == set(range(1, 49))
+    assert all(fragment.content == "short summary" for fragment in first_merge_fragments)
+
+    assert result.content and source_marker not in result.content
+    for stage in stages:
+        assert stage.status == ContextSummaryStageStatus.COMPLETED
+        stage_fragments = [fragment for fragment in fragments if fragment.stage_key == stage.stage_key]
+        assert stage_fragments
+        assert all(fragment.content for fragment in stage_fragments)
+
+    final_lower_stage = next(stage for stage in stages if stage.stage_key == lower_stage.stage_key)
+    final_lower_fragments = [fragment for fragment in fragments if fragment.stage_key == lower_stage.stage_key]
+    assert final_lower_stage.model_dump() == lower_stage_before
+    assert [fragment.model_dump() for fragment in final_lower_fragments] == lower_fragments_before

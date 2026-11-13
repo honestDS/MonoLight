@@ -115,6 +115,8 @@ export default {
   memory_settings_unavailable: '自动整理设置加载失败，当前无法保存配置。',
   context_summary_threshold: '上下文摘要触发阈值',
   context_summary_threshold_hint: '上下文用量达到所选比例时，自动总结较早的对话。默认 90%。',
+  context_summary_max_concurrency: '压缩并发上限',
+  context_summary_max_concurrency_hint: '单次上下文压缩同时调用总结模型的上限，范围 1–20，默认 4；设为 1 时逐片处理。不同会话分别计算。',
   chat_channel: '对话渠道',
   chat_channel_label: '对话模型',
   chat_model: '对话模型',

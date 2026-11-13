@@ -177,6 +177,7 @@ class OtherConfig(BaseModel):
         90,
         description="触发上下文摘要的可用输入窗口占用百分比",
     )
+    context_summary_max_concurrency: StrictInt = PydanticField(4, ge=1, le=20, description="单次上下文压缩允许同时发送的模型请求上限，设为 1 时逐片处理")
 
 
 class ChatHistoryRecallConfig(BaseModel):
@@ -314,7 +315,7 @@ class ProfileConfig(BaseModel):
                 "file_send_blocked_extensions",
                 "executor_max_workers",
             ],
-            "other": ["context_summary_threshold_percent"],
+            "other": ["context_summary_threshold_percent", "context_summary_max_concurrency"],
             "memory": [
                 "enabled",
                 "precheck_enabled",
@@ -451,6 +452,7 @@ PROFILE_EXAMPLE = {
         },
         "other": {
             "context_summary_threshold_percent": 90,
+            "context_summary_max_concurrency": 4,
         },
         "memory": {
             "enabled": False,

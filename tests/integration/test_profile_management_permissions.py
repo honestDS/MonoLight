@@ -1534,15 +1534,164 @@ async def test_profile_subagent_channel_create_and_update_persists_rules(
             client,
             _token("user-a"),
             profile_id,
-            {
-                "configs": {
-                    "channel": {
-                        "subagent_channel": {
-                            "rules": [{"channel_id": channel_id, "model_id": "chat-model", "priority": 0, "weight": 1}]
-                        }
-                    }
-                }
-            },
+            {"configs": {"channel": {"subagent_channel": {"rules": [{"channel_id": channel_id, "model_id": "chat-model", "priority": 0, "weight": 1}]}}}},
         )
         _assert_standard(invalid_config_response, 422)
         assert await _profile_snapshot(session_factory) == before_invalid_update
+
+
+@pytest.mark.asyncio
+async def test_regular_user_context_summary_max_concurrency_persists_across_profile_operations(
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
+) -> None:
+    app, session_factory, _profile_ids = api_context
+    before = await _profile_snapshot(session_factory)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        create_response = await _create_profile(
+            client,
+            _token("user-a"),
+            {
+                "name": "context-summary-concurrency-configured",
+                "configs": {"other": {"context_summary_max_concurrency": 1}},
+            },
+        )
+        created_data = _assert_profile_success(create_response)
+        profile_id = created_data["id"]
+        assert created_data["configs"]["other"]["context_summary_max_concurrency"] == 1
+
+        after_create = await _profile_snapshot(session_factory)
+        persisted = next(row for row in after_create if row["id"] == profile_id)
+        assert persisted["configs"] == created_data["configs"]
+        assert persisted["configs"]["other"]["context_summary_max_concurrency"] == 1
+        assert tuple(row for row in after_create if row["id"] != profile_id) == before
+
+        expected_configs = deepcopy(created_data["configs"])
+        expected_configs["other"]["context_summary_max_concurrency"] = 20
+        update_response = await _update_profile(
+            client,
+            _token("user-a"),
+            profile_id,
+            {"configs": {"other": {"context_summary_max_concurrency": 20}}},
+        )
+        updated_data = _assert_profile_success(update_response)
+        assert updated_data["configs"] == expected_configs
+
+        after_update = await _profile_snapshot(session_factory)
+        persisted = next(row for row in after_update if row["id"] == profile_id)
+        assert persisted["configs"] == expected_configs
+        assert tuple(row for row in after_update if row["id"] != profile_id) == before
+
+        default_response = await _create_profile(
+            client,
+            _token("user-a"),
+            {"name": "context-summary-concurrency-default", "configs": {}},
+        )
+        default_data = _assert_profile_success(default_response)
+        default_id = default_data["id"]
+        assert default_data["configs"]["other"]["context_summary_max_concurrency"] == 4
+
+        after_default = await _profile_snapshot(session_factory)
+        persisted_default = next(row for row in after_default if row["id"] == default_id)
+        assert persisted_default["configs"] == default_data["configs"]
+        assert persisted_default["configs"]["other"]["context_summary_max_concurrency"] == 4
+        assert next(row for row in after_default if row["id"] == profile_id)["configs"] == expected_configs
+        assert tuple(row for row in after_default if row["id"] != default_id) == after_update
+
+        before_threshold = await _profile_snapshot(session_factory)
+        threshold_response = await _update_profile(
+            client,
+            _token("user-a"),
+            profile_id,
+            {"configs": {"other": {"context_summary_threshold_percent": 80}}},
+        )
+        threshold_data = _assert_profile_success(threshold_response)
+        threshold_configs = deepcopy(expected_configs)
+        threshold_configs["other"]["context_summary_threshold_percent"] = 80
+        assert threshold_data["configs"] == threshold_configs
+        assert threshold_data["configs"]["other"]["context_summary_max_concurrency"] == 20
+
+        after_threshold = await _profile_snapshot(session_factory)
+        persisted = next(row for row in after_threshold if row["id"] == profile_id)
+        assert persisted["configs"] == threshold_configs
+        assert persisted["configs"]["other"]["context_summary_max_concurrency"] == 20
+        assert tuple(row for row in after_threshold if row["id"] != profile_id) == tuple(row for row in before_threshold if row["id"] != profile_id)
+
+        before_name = await _profile_snapshot(session_factory)
+        name_response = await _update_profile(
+            client,
+            _token("user-a"),
+            profile_id,
+            {"name": "context-summary-concurrency-renamed"},
+        )
+        name_data = _assert_profile_success(name_response)
+        assert name_data["name"] == "context-summary-concurrency-renamed"
+        assert name_data["configs"] == threshold_configs
+        assert name_data["configs"]["other"]["context_summary_max_concurrency"] == 20
+
+        after_name = await _profile_snapshot(session_factory)
+        persisted = next(row for row in after_name if row["id"] == profile_id)
+        assert persisted["name"] == "context-summary-concurrency-renamed"
+        assert persisted["configs"] == threshold_configs
+        assert tuple(row for row in after_name if row["id"] != profile_id) == tuple(row for row in before_name if row["id"] != profile_id)
+
+        list_response = await client.get(
+            "/api/v1/profiles/list",
+            headers={"Authorization": f"Bearer {_token('user-a')}"},
+        )
+
+    assert list_response.status_code == 200
+    listed_items = {item["id"]: item for item in list_response.json()["data"]["items"]}
+    assert listed_items[profile_id]["configs"] == threshold_configs
+    assert listed_items[profile_id]["configs"]["other"]["context_summary_max_concurrency"] == 20
+    assert listed_items[default_id]["configs"]["other"]["context_summary_max_concurrency"] == 4
+    final_snapshot = await _profile_snapshot(session_factory)
+    assert next(row for row in final_snapshot if row["id"] == profile_id)["configs"] == listed_items[profile_id]["configs"]
+    assert next(row for row in final_snapshot if row["id"] == default_id)["configs"] == listed_items[default_id]["configs"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(0, id="zero"),
+        pytest.param(-1, id="negative"),
+        pytest.param(21, id="above-maximum"),
+        pytest.param(True, id="boolean"),
+        pytest.param(1.5, id="float"),
+        pytest.param("4", id="string"),
+        pytest.param(None, id="null"),
+    ],
+)
+async def test_regular_user_context_summary_max_concurrency_invalid_values_return_422_without_mutation(
+    value: Any,
+    api_context: tuple[FastAPI, async_sessionmaker[AsyncSession], dict[str | None, dict[str, int]]],
+) -> None:
+    app, session_factory, profile_ids = api_context
+    target_id = profile_ids["user-a"]["target"]
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        before_create = await _profile_snapshot(session_factory)
+        create_response = await _create_profile(
+            client,
+            _token("user-a"),
+            {
+                "name": "context-summary-concurrency-invalid-create",
+                "configs": {"other": {"context_summary_max_concurrency": value}},
+            },
+        )
+        _assert_standard(create_response, 422)
+        assert await _profile_snapshot(session_factory) == before_create
+
+        before_update = await _profile_snapshot(session_factory)
+        update_response = await _update_profile(
+            client,
+            _token("user-a"),
+            target_id,
+            {
+                "name": "context-summary-concurrency-invalid-update",
+                "configs": {"other": {"context_summary_max_concurrency": value}},
+            },
+        )
+        _assert_standard(update_response, 422)
+        assert await _profile_snapshot(session_factory) == before_update

@@ -26,7 +26,10 @@ def _summary_cfg(threshold_percent: int = 90) -> SimpleNamespace:
             chat_channel=object(),
             context_summary_channel=object(),
         ),
-        other=SimpleNamespace(context_summary_threshold_percent=threshold_percent),
+        other=SimpleNamespace(
+            context_summary_threshold_percent=threshold_percent,
+            context_summary_max_concurrency=4,
+        ),
     )
 
 

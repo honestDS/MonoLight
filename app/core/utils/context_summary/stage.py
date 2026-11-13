@@ -49,6 +49,7 @@ from app.core.utils.context_summary.model_call import (
     estimate_context_summary_text_tokens,
 )
 from app.core.utils.context_summary.pipeline import (
+    CONTEXT_SUMMARY_REORDER_WINDOW,
     SummaryFragmentInput,
     SummaryFragmentPlan,
     SummaryFragmentResult,
@@ -556,11 +557,14 @@ async def generate_snapshot_summary_with_model(
         )
 
     try:
+        concurrency = cfg.other.context_summary_max_concurrency
         stats = await run_bounded_fragment_pipeline(
             fragments=fragments,
             expected_fragment_count=expected_fragment_count,
             process_fragment=process_fragment,
             first_fragment_index=first_fragment_index,
+            concurrency=concurrency,
+            reorder_window=max(CONTEXT_SUMMARY_REORDER_WINDOW, concurrency - 1),
             persist_fragment=lambda result: write_summary_fragment(
                 stage=persisted_stage,
                 result=result,
