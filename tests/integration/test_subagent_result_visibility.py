@@ -501,15 +501,41 @@ async def test_subagent_tool_context_isolated_from_parent_and_sibling_terminal_s
             )
             persisted_shell_calls = [tool_call for row in shell_call_rows for tool_call in (InternalMessage.model_validate_json(row.content or "{}").tool_calls or []) if tool_call.name == child_shell_call.name and tool_call.arguments == child_shell_call.arguments]
             assert len(persisted_shell_calls) == 1
-            child_tool_row = next(row for row in tool_rows if json.loads(row.content or "{}").get("tool_call_id") == persisted_shell_calls[0].id)
+            persisted_shell_call_id = persisted_shell_calls[0].id
+            assert isinstance(persisted_shell_call_id, str) and persisted_shell_call_id
+            child_tool_row = next(row for row in tool_rows if json.loads(row.content or "{}").get("tool_call_id") == persisted_shell_call_id)
+            persisted_tool_result_message = InternalMessage.model_validate_json(child_tool_row.content or "{}")
+            assert persisted_tool_result_message.tool_call_id == persisted_shell_call_id
+            assert isinstance(persisted_tool_result_message.content, str)
+            persisted_tool_result = json.loads(persisted_tool_result_message.content)
+            assert isinstance(persisted_tool_result, dict)
+            assert persisted_tool_result.get("terminal_session_id") == child_terminal_id
             child_suffix = child_tool_row.model_context_suffix
             assert isinstance(child_suffix, str) and child_suffix
-            assert "<current_session_todo_snapshot>" not in child_suffix
-            assert main_todo_secret not in child_suffix
-            assert child_terminal_id in child_suffix
-            assert child_command in child_suffix
+            child_suffix_payload = json.loads(child_suffix)
+            assert isinstance(child_suffix_payload, dict)
+            assert "current_session_todo" not in child_suffix_payload
+            child_watch_snapshot = child_suffix_payload.get("current_terminal_watch")
+            assert isinstance(child_watch_snapshot, dict)
+            child_snapshot_terminals = child_watch_snapshot.get("terminals")
+            assert isinstance(child_snapshot_terminals, list)
+            matching_child_terminals = [terminal for terminal in child_snapshot_terminals if isinstance(terminal, dict) and terminal.get("terminal_session_id") == child_terminal_id]
+            assert len(matching_child_terminals) == 1
+            assert matching_child_terminals[0]["terminal_session_id"] == child_terminal_id
+            assert matching_child_terminals[0]["command"] == child_command
+
+            def _contains_text(value, needle: str) -> bool:
+                if isinstance(value, str):
+                    return needle in value
+                if isinstance(value, dict):
+                    return any(_contains_text(nested, needle) for nested in value.values())
+                if isinstance(value, list):
+                    return any(_contains_text(nested, needle) for nested in value)
+                return False
+
+            assert not _contains_text(child_suffix_payload, main_todo_secret)
             for forbidden in (main_terminal_id, main_command, main_context_secret, main_purpose, sibling_terminal_id, sibling_command, sibling_context_secret, sibling_purpose):
-                assert forbidden not in child_suffix
+                assert not _contains_text(child_suffix_payload, forbidden)
 
             child_terminal.status = TerminalSessionStatus.EXITED
             child_terminal.exit_code = 0
@@ -575,19 +601,36 @@ async def test_subagent_tool_context_isolated_from_parent_and_sibling_terminal_s
         child_resume_payloads = runtime.provider_payloads[child_resume_start:]
         assert child_resume_payloads
         child_resume_dump = json.dumps(child_resume_payloads, ensure_ascii=False)
+        provider_tool_result_payloads = []
+        for payload in child_resume_payloads:
+            for item in _provider_items(payload, protocol):
+                if protocol == "OPENAI":
+                    if item.get("role") != MessageRole.TOOL.value:
+                        continue
+                    raw_result = item.get("content")
+                    provider_call_id = item.get("tool_call_id")
+                else:
+                    if item.get("type") != "function_call_output":
+                        continue
+                    raw_result = item.get("output")
+                    provider_call_id = item.get("call_id")
+                if not isinstance(raw_result, str):
+                    continue
+                try:
+                    output_payload = json.loads(raw_result)
+                except (TypeError, ValueError):
+                    continue
+                tool_result = output_payload.get("tool_result") if isinstance(output_payload, dict) else None
+                if not isinstance(output_payload, dict) or not isinstance(tool_result, dict) or tool_result != persisted_tool_result:
+                    continue
+                if provider_call_id != persisted_shell_call_id and tool_result.get("terminal_session_id") != child_terminal_id:
+                    continue
+                provider_tool_result_payloads.append(output_payload)
 
-        def _contains_suffix(value) -> bool:
-            if isinstance(value, str):
-                return child_suffix in value
-            if isinstance(value, dict):
-                return any(_contains_suffix(nested) for nested in value.values())
-            if isinstance(value, list):
-                return any(_contains_suffix(nested) for nested in value)
-            return False
-
-        assert any(_contains_suffix(payload) for payload in child_resume_payloads)
-        assert child_terminal_id in child_resume_dump
-        assert child_command in child_resume_dump
+        assert provider_tool_result_payloads
+        for output_payload in provider_tool_result_payloads:
+            assert output_payload["tool_result"] == persisted_tool_result
+            assert output_payload["current_terminal_watch"] == child_watch_snapshot
         for forbidden in (main_todo_secret, main_terminal_id, main_command, main_context_secret, main_purpose, sibling_terminal_id, sibling_command, sibling_context_secret, sibling_purpose):
             assert forbidden not in child_resume_dump
 

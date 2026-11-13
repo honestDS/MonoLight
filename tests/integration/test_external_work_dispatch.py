@@ -256,7 +256,7 @@ async def test_shell_external_work_resumes_same_work_with_latest_processed_histo
             tool_call_id = tool_result.get("tool_call_id")
             assert isinstance(tool_call_id, str)
             assert original_tool_result_message_id is not None
-            assert json.loads(tool_result["content"]) == queued_tool_payload
+            assert json.loads(tool_result["content"])["tool_result"] == queued_tool_payload
             tool_call_messages = [item for item in messages if item.get("role") == "assistant" and item.get("tool_calls")]
             assert len(tool_call_messages) == 1
             assert tool_call_messages[0]["tool_calls"][0]["id"] == tool_call_id

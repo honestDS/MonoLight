@@ -472,7 +472,7 @@ def _assert_end_session_model_pair(
     control_result = control_results[0]
     assert control_result.content is not None
     assert control_result.reasoning_content is None
-    assert json.loads(control_result.content) == {
+    assert json.loads(control_result.content)["tool_result"] == {
         "status": "completed",
         "skip_reply": skip_reply,
         "received_result_task_ids": [],
@@ -1403,10 +1403,10 @@ async def test_text_only_final_reply_never_executes_provider_tool_calls(
         assert {message.tool_call_id for message in correction_tool_results} == set(earlier_call_ids)
         assert len(correction_tool_results) == len(earlier_call_ids)
         for tool_result in correction_tool_results:
-            feedback = json.loads(tool_result.content or "{}")
+            feedback = json.loads(tool_result.content or "{}")["tool_result"]
             assert feedback["status"] == "rejected"
             assert feedback["executed"] is False
-            assert TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT in (tool_result.content or "")
+            assert feedback["instruction"] == TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
     assert response["choices"][0]["message"]["content"] == "纠正后的最终回复"
     public_result = json.dumps(result, ensure_ascii=False)
     assert all(text not in public_result for text in forbidden_texts)
@@ -1512,10 +1512,10 @@ async def test_text_only_final_reply_stops_after_three_failed_corrections(
         assert {message.tool_call_id for message in correction_tool_results} == set(earlier_call_ids)
         assert len(correction_tool_results) == len(earlier_call_ids)
         for tool_result in correction_tool_results:
-            feedback = json.loads(tool_result.content or "{}")
+            feedback = json.loads(tool_result.content or "{}")["tool_result"]
             assert feedback["status"] == "rejected"
             assert feedback["executed"] is False
-            assert TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT in (tool_result.content or "")
+            assert feedback["instruction"] == TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
     if stream:
         assert all(text not in json.dumps(result, ensure_ascii=False) for text in forbidden_texts)
     else:

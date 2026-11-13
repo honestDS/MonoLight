@@ -247,19 +247,19 @@ def test_external_wait_response_accepts_queued_tool_result_with_todo_snapshot_su
         name="execute_shell",
         arguments={"command": "echo fixture"},
     )
-    todo_snapshot = '<current_session_todo_snapshot>{"revision":2,"todos":[{"content":"finish","status":"in_progress"}]}</current_session_todo_snapshot>'
-    watch_snapshot = '<current_terminal_watch_snapshot>{"type":"terminal_watch_state","terminals":[]}</current_terminal_watch_snapshot>'
+    todo_snapshot = {
+        "revision": 2,
+        "todos": [{"content": "finish", "status": "in_progress"}],
+    }
+    watch_snapshot = {"type": "terminal_watch_state", "terminals": []}
     queued_content = json.dumps({"status": "queued", "task_id": 42})
-    snapshots = []
-    if include_todo:
-        snapshots.append(todo_snapshot)
-    if include_watch:
-        snapshots.append(watch_snapshot)
     tool_result = InternalMessage(
         id=17,
         role=MessageRole.TOOL,
         tool_call_id=tool_call.id,
-        content="\n\n".join([queued_content, *snapshots]),
+        content=queued_content,
+        current_session_todo=todo_snapshot if include_todo else None,
+        current_terminal_watch=watch_snapshot if include_watch else None,
     )
     tool_result_before = tool_result.model_dump(mode="json")
 

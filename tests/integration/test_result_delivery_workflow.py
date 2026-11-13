@@ -299,7 +299,7 @@ async def test_result_delivery_merges_two_suspended_sources_into_latest_foregrou
             call_messages = [message for message in request_messages if message.role == MessageRole.ASSISTANT and any(tool_call.id == source["call_id"] for tool_call in message.tool_calls or [])]
             result_messages = [message for message in request_messages if message.role == MessageRole.TOOL and message.tool_call_id == source["call_id"]]
             assert len(call_messages) == 1 and len(result_messages) == 1
-            assert json.loads(result_messages[0].content or "{}")["status"] == "queued"
+            assert json.loads(result_messages[0].content or "{}")["tool_result"]["status"] == "queued"
         if saved_input:
             assert frozen_message_ids is not None
             assert [message.id for message in request_messages[: len(frozen_message_ids)]] == frozen_message_ids

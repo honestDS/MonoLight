@@ -28,7 +28,6 @@ from app.core.utils.dispatcher.markdown_instruction import materialize_user_envi
 from app.core.utils.dispatcher.session_todo_snapshot import (
     load_current_session_todo_snapshot,
     parse_session_todo_snapshot,
-    strip_session_todo_snapshot,
 )
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.llm_request_params import build_memory_recall_precheck_generation_params
@@ -46,26 +45,6 @@ from app.providers.llm.client import LLMClient
 from .types import MemoryRecallContext
 
 MEMORY_RECALL_REQUEST_PURPOSE = "memory_recall"
-
-
-def _extract_precheck_todo(content: Any) -> tuple[dict[str, object] | None, str | None]:
-    if not isinstance(content, str):
-        return None, None
-
-    payload = parse_session_todo_snapshot(content)
-    if payload is not None:
-        return payload, None
-
-    stripped = strip_session_todo_snapshot(content)
-    if not isinstance(stripped, str) or stripped == content:
-        return None, None
-    suffix = content[len(stripped) :]
-    if not suffix.startswith("\n\n"):
-        return None, None
-    payload = parse_session_todo_snapshot(suffix[2:])
-    if payload is None:
-        return None, None
-    return payload, stripped
 
 
 def _precheck_message_text(message: InternalMessage) -> str:
@@ -97,7 +76,7 @@ def get_precheck_user_input(messages: list[InternalMessage]) -> tuple[int, str] 
 def build_precheck_request_messages(
     messages: list[InternalMessage],
     *,
-    todo_snapshot: str | None = None,
+    todo_snapshot: dict[str, object] | None = None,
 ) -> list[InternalMessage]:
     precheck_user_input = get_precheck_user_input(messages)
     if precheck_user_input is None:
@@ -106,29 +85,25 @@ def build_precheck_request_messages(
 
     latest_summary: InternalConversationSummary | None = None
     latest_summary_user_text: str | None = None
-    latest_embedded_todo: dict[str, object] | None = None
+    latest_todo: dict[str, object] | None = None
     for message in messages[: current_index + 1]:
         if is_context_summary_message(message):
             summary = message.conversation_summary.model_copy(deep=True)
-            summary_content = summary.content
-            embedded_todo, stripped_content = _extract_precheck_todo(summary_content)
-            if embedded_todo is not None:
-                latest_embedded_todo = embedded_todo
-                if stripped_content is not None:
-                    summary_content = stripped_content
-            summary.content = summary_content
             latest_summary = summary
             latest_summary_user_text = None
             if message.content is not None:
                 latest_summary_user_text = _precheck_message_text(message)
+            message_todo = parse_session_todo_snapshot(message.current_session_todo)
+            if message_todo is not None:
+                latest_todo = message_todo
         elif message.role == MessageRole.TOOL:
-            embedded_todo, _ = _extract_precheck_todo(message.content)
-            if embedded_todo is not None:
-                latest_embedded_todo = embedded_todo
+            message_todo = parse_session_todo_snapshot(message.current_session_todo)
+            if message_todo is not None:
+                latest_todo = message_todo
 
     selected_todo = parse_session_todo_snapshot(todo_snapshot)
     if selected_todo is None:
-        selected_todo = latest_embedded_todo
+        selected_todo = latest_todo
 
     current_message = InternalMessage(
         role=MessageRole.USER,
@@ -416,11 +391,15 @@ def build_correction_messages(
     if isinstance(response_message, InternalMessage) and (_has_content(response_message.content) or response_message.tool_calls):
         correction_messages.append(response_message.model_copy(deep=True))
         for tool_call in response_message.tool_calls or []:
-            correction_messages.append(
-                InternalMessage(
-                    role=MessageRole.TOOL,
-                    tool_call_id=tool_call.id,
-                    content='{"status":"ignored"}',
+            correction_messages.extend(
+                materialize_user_environment_prompts(
+                    [
+                        InternalMessage(
+                            role=MessageRole.TOOL,
+                            tool_call_id=tool_call.id,
+                            content='{"status":"ignored"}',
+                        )
+                    ]
                 )
             )
     correction_messages.append(

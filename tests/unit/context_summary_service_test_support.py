@@ -1,7 +1,6 @@
 import json
 from types import SimpleNamespace
 
-from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT, CONTEXT_SUMMARY_PROMPT
 from app.core.utils.context_summary import common as common_module
 from app.core.utils.context_summary import history as history_module
 from app.core.utils.context_summary import reduction as reduction_module
@@ -9,6 +8,8 @@ from app.core.utils.context_summary import service as service_module
 from app.core.utils.context_summary import stage as stage_module
 from app.core.utils.context_summary.common import (
     ContextSummaryState,
+    build_context_summary_compress_prompt,
+    build_context_summary_prompt,
     join_messages,
     serialize_message,
 )
@@ -183,10 +184,9 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
             snapshot=snapshot,
         ):
             conversation_messages.extend(round_messages)
-        prompt = CONTEXT_SUMMARY_PROMPT.format(
-            existing_summary=existing_summary or "(none)",
-            recent_dialogue="(none)",
-            conversation=join_messages(conversation_messages),
+        prompt = build_context_summary_prompt(
+            message_chunks=json.loads(join_messages(conversation_messages))["message_chunks"],
+            existing_summary=existing_summary,
         )
         generated = await generate_with_input_tokens(
             db,
@@ -216,9 +216,7 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
             db,
             profile=profile,
             cfg=cfg,
-            prompt=CONTEXT_SUMMARY_COMPRESS_PROMPT.format(
-                summary=lower_stage.content,
-            ),
+            prompt=build_context_summary_compress_prompt(lower_stage.content),
             input_tokens=max(
                 1,
                 service_module.estimate_tokens(lower_stage.content),

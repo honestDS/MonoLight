@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -268,7 +269,7 @@ async def test_merge_groups_follow_budget_and_keep_message_ranges():
     fragments = [_completed_fragment(index) for index in range(5)]
 
     def count_tokens(content: str) -> int:
-        return content.count("<summary_fragment") * 4
+        return len(json.loads(content)["summary_fragments"]) * 4
 
     groups = [
         group
@@ -282,10 +283,16 @@ async def test_merge_groups_follow_budget_and_keep_message_ranges():
     assert [group.fragment_index for group in groups] == [0, 1, 2]
     assert [(group.message_start_id, group.message_end_id) for group in groups] == [(1, 20), (21, 40), (41, 50)]
     assert [group.token_count for group in groups] == [8, 8, 4]
-    assert [group.content.count("<summary_fragment") for group in groups] == [
-        2,
-        2,
-        1,
+    assert [json.loads(group.content)["summary_fragments"] for group in groups] == [
+        [
+            {"index": 0, "from_message_id": 1, "through_message_id": 10, "content": "summary-0"},
+            {"index": 1, "from_message_id": 11, "through_message_id": 20, "content": "summary-1"},
+        ],
+        [
+            {"index": 2, "from_message_id": 21, "through_message_id": 30, "content": "summary-2"},
+            {"index": 3, "from_message_id": 31, "through_message_id": 40, "content": "summary-3"},
+        ],
+        [{"index": 4, "from_message_id": 41, "through_message_id": 50, "content": "summary-4"}],
     ]
 
 
@@ -294,7 +301,7 @@ async def test_merge_groups_resume_without_yielding_completed_prefix():
     fragments = [_completed_fragment(index) for index in range(5)]
 
     def count_tokens(content: str) -> int:
-        return content.count("<summary_fragment") * 4
+        return len(json.loads(content)["summary_fragments"]) * 4
 
     groups = [
         group
@@ -345,11 +352,12 @@ async def test_merge_group_count_reuses_paginated_group_stream(
 
 @pytest.mark.asyncio
 async def test_merge_groups_split_oversized_fragment_into_same_range_parts():
+    fragment_content = ('中文第一行\n包含 "引号"，以及类似 XML 的文本：<summary_fragment index="0">正文</summary_fragment>\n第二行仍属于同一个摘要分片。\n') * 20
     fragment = CompletedSummaryFragment(
         fragment_index=0,
         message_start_id=1,
         message_end_id=10,
-        content="summary-content-" * 40,
+        content=fragment_content,
     )
 
     groups = [
@@ -365,7 +373,14 @@ async def test_merge_groups_split_oversized_fragment_into_same_range_parts():
     assert [group.fragment_index for group in groups] == list(range(len(groups)))
     assert all((group.message_start_id, group.message_end_id) == (1, 10) for group in groups)
     assert all(group.token_count <= 180 for group in groups)
-    assert [int(group.content.split(' part="', 1)[1].split('"', 1)[0]) for group in groups] == list(range(len(groups)))
+    assert all(len(group.content) <= 180 for group in groups)
+
+    parts = [json.loads(group.content)["summary_fragments"][0] for group in groups]
+    assert [part["part"] for part in parts] == list(range(len(parts)))
+    assert all(part["index"] == 0 for part in parts)
+    assert all(part["from_message_id"] == 1 for part in parts)
+    assert all(part["through_message_id"] == 10 for part in parts)
+    assert "".join(part["content"] for part in sorted(parts, key=lambda part: part["part"])) == fragment.content
 
 
 @pytest.mark.asyncio
@@ -410,8 +425,10 @@ async def test_merge_groups_allow_adjacent_ranges_with_shared_boundary():
     ]
 
     assert [(group.message_start_id, group.message_end_id) for group in groups] == [(1, 20)]
-    assert "first-fragment" in groups[0].content
-    assert "second-fragment" in groups[0].content
+    assert json.loads(groups[0].content)["summary_fragments"] == [
+        {"index": 0, "from_message_id": 1, "through_message_id": 10, "content": "first-fragment"},
+        {"index": 1, "from_message_id": 10, "through_message_id": 20, "content": "second-fragment"},
+    ]
 
 
 @pytest.mark.asyncio

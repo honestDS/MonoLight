@@ -1,10 +1,14 @@
 import json
+from copy import deepcopy
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit.visibility import obscure_audit_tool_result
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.session import session_crud
+from app.core.utils import context_messages
+from app.core.utils.assistant_files import model_visible_message_content
 from app.core.utils.system import get_full_system_context
 from app.models.message import InternalMessage, MessageRole, TextPart
 
@@ -74,6 +78,31 @@ def materialize_user_environment_prompts(messages: list[InternalMessage]) -> lis
     latest_platform_constraints: str | None = None
 
     for index, message in enumerate(request_messages):
+        if message.role == MessageRole.TOOL:
+            message.content = model_visible_message_content(message)
+            tool_result: Any = message.content
+            if isinstance(tool_result, str):
+                try:
+                    tool_result = json.loads(tool_result)
+                except json.JSONDecodeError:
+                    pass
+            visible_tool_result = obscure_audit_tool_result(tool_result)
+            if visible_tool_result is not tool_result:
+                message.reasoning_content = None
+                message.refusal = None
+                message.provider_metadata = None
+                message.current_session_todo = None
+                message.current_terminal_watch = None
+            payload = {"tool_result": context_messages.to_jsonable(visible_tool_result)}
+            if message.current_session_todo is not None:
+                payload["current_session_todo"] = message.current_session_todo
+            if message.current_terminal_watch is not None:
+                payload["current_terminal_watch"] = message.current_terminal_watch
+            message.content = _serialize_environment_snapshot(payload)
+            message.current_session_todo = None
+            message.current_terminal_watch = None
+            continue
+
         if message.role != MessageRole.USER:
             continue
 
@@ -109,6 +138,10 @@ def materialize_user_environment_prompts(messages: list[InternalMessage]) -> lis
         payload: dict[str, Any] = {"user_message": user_message}
         if message.conversation_summary is not None:
             payload["conversation_summary"] = message.conversation_summary.content
+        if message.current_session_todo is not None:
+            payload["current_session_todo"] = message.current_session_todo
+        if message.current_terminal_watch is not None:
+            payload["current_terminal_watch"] = message.current_terminal_watch
         if message.attachments:
             payload["attachment_paths"] = list(message.attachments)
         for field in ("environment", "response_settings", "platform_constraints"):
@@ -132,6 +165,8 @@ def materialize_user_environment_prompts(messages: list[InternalMessage]) -> lis
         else:
             message.content = materialized_content
         message.conversation_summary = None
+        message.current_session_todo = None
+        message.current_terminal_watch = None
     return request_messages
 
 
@@ -173,7 +208,13 @@ def apply_platform_constraints_to_message(message: InternalMessage, platform_con
 def inherit_user_request_context(replacement: InternalMessage, covered_messages: list[InternalMessage]) -> None:
     last_user: InternalMessage | None = None
     latest_platform_constraints: str | None = None
+    latest_current_session_todo: dict[str, Any] | None = None
+    latest_current_terminal_watch: dict[str, Any] | None = None
     for message in covered_messages:
+        if message.current_session_todo is not None:
+            latest_current_session_todo = message.current_session_todo
+        if message.current_terminal_watch is not None:
+            latest_current_terminal_watch = message.current_terminal_watch
         if message.role != MessageRole.USER:
             continue
         last_user = message
@@ -182,14 +223,16 @@ def inherit_user_request_context(replacement: InternalMessage, covered_messages:
         if isinstance(platform_constraints, str) and platform_constraints:
             latest_platform_constraints = platform_constraints
 
-    if last_user is None:
-        return
-
-    replacement.environment_prompt = last_user.environment_prompt
-    replacement.guidance_prompt = last_user.guidance_prompt
-    replacement.execution_guidance = last_user.execution_guidance
-    if latest_platform_constraints is not None:
-        apply_platform_constraints_to_message(replacement, latest_platform_constraints)
+    if last_user is not None:
+        replacement.environment_prompt = last_user.environment_prompt
+        replacement.guidance_prompt = last_user.guidance_prompt
+        replacement.execution_guidance = last_user.execution_guidance
+        if latest_platform_constraints is not None:
+            apply_platform_constraints_to_message(replacement, latest_platform_constraints)
+    if latest_current_session_todo is not None:
+        replacement.current_session_todo = deepcopy(latest_current_session_todo)
+    if latest_current_terminal_watch is not None:
+        replacement.current_terminal_watch = deepcopy(latest_current_terminal_watch)
 
 
 async def ensure_user_runtime_instructions(

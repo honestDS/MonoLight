@@ -14,7 +14,6 @@ from app.core.crud.session.session import session_crud
 from app.core.exceptions import LLMException, LLMRequestRejectedException, find_llm_request_rejection
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT
 from app.core.utils.context_budget import (
     calculate_context_summary_trigger_tokens,
     measure_context_request_usage,
@@ -32,9 +31,11 @@ from app.core.utils.context_summary.common import (
     ContextSummaryState,
     ContextSummaryWorkInvalidError,
     ContextSummaryWorkValidityChecker,
+    build_context_summary_compress_prompt,
     calc_token_usage,
     contains_context_summary_work_invalid,
     ensure_context_summary_work_valid,
+    estimate_summary_tokens,
     find_context_summary_output_budget_error,
 )
 from app.core.utils.context_summary.engine import refine_context_summary_to_fit
@@ -51,24 +52,18 @@ from app.core.utils.context_summary.stage import (
     generate_snapshot_summary_result,
     release_db_session,
 )
-from app.core.utils.context_summary.user_message_block import (
-    append_covered_user_message,
-    split_covered_user_message,
-)
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.dispatcher.markdown_instruction import inherit_user_request_context, materialize_user_environment_prompts
 from app.core.utils.dispatcher.session_todo_snapshot import (
     load_current_session_todo_snapshot,
     measure_session_todo_snapshot_tokens,
-    strip_session_todo_snapshot,
 )
 from app.core.utils.dispatcher.terminal_watch_snapshot import (
     load_current_terminal_watch_snapshot,
     measure_terminal_watch_snapshot_tokens,
-    strip_terminal_watch_snapshot,
 )
 from app.core.utils.tokenizer import estimate_tokens
-from app.models.message import InternalMessage, MessageRole, MessageType
+from app.models.message import InternalMessage, MessageRole, MessageType, StoredConversationSummary
 from app.models.profile import Profile, ProfileConfig
 from app.providers.database import AsyncSessionLocal
 from app.providers.llm.client import estimate_request_context_tokens
@@ -200,14 +195,15 @@ async def get_context_summary_state(
         return ContextSummaryState(content=None, message_id=None)
     covered_user_request = None
     summary_message_id = session.context_summary_message_id
-    if summary_message_id is not None:
-        _, covered_user_message = split_covered_user_message(session.context_summary)
-        if covered_user_message is not None and covered_user_message.message_id <= summary_message_id:
+    if session.context_summary and summary_message_id is not None:
+        stored_summary = StoredConversationSummary.model_validate_json(session.context_summary)
+        covered_user_message_id = stored_summary.covered_user_message_id
+        if covered_user_message_id is not None and covered_user_message_id <= summary_message_id:
             covered_user_request = await _load_covered_user_request(
                 db,
                 session_id=session_id,
                 uid=uid,
-                message_id=covered_user_message.message_id,
+                message_id=covered_user_message_id,
             )
     return ContextSummaryState(
         content=session.context_summary,
@@ -400,10 +396,16 @@ async def _ensure_context_summary(
         await release_db_session(db)
         return state
 
-    existing_model_summary, existing_user_message = split_covered_user_message(state.content)
-    existing_model_summary = strip_session_todo_snapshot(strip_terminal_watch_snapshot(existing_model_summary))
-    covered_user_message_id = existing_user_message.message_id if existing_user_message is not None else None
-    covered_user_message_content = existing_user_message.content if existing_user_message is not None else None
+    if state.content:
+        stored_summary = StoredConversationSummary.model_validate_json(state.content)
+    else:
+        stored_summary = StoredConversationSummary(conversation_summary="")
+    if stored_summary.conversation_summary:
+        existing_model_summary = stored_summary.conversation_summary
+    else:
+        existing_model_summary = None
+    covered_user_message_id = stored_summary.covered_user_message_id
+    covered_user_message_content = stored_summary.user_message
     covered_user_request = state.covered_user_request
     if boundary is not None and boundary.trigger_mode == ContextSummaryTriggerMode.TOOL_RESULT and boundary.covered_user_message_id is not None:
         covered_user_message_id = boundary.covered_user_message_id
@@ -437,7 +439,6 @@ async def _ensure_context_summary(
             profile_id=profile.id,
         )
     reserved_tokens_before_snapshots = reserved_tokens
-    fixed_snapshot = "\n\n".join(snapshot for snapshot in (todo_snapshot, watch_snapshot) if snapshot)
     reserved_tokens += measure_session_todo_snapshot_tokens(todo_snapshot)
     reserved_tokens += measure_terminal_watch_snapshot_tokens(watch_snapshot)
     model_excluded_message_ids = [boundary.covered_user_message_id] if boundary is not None and boundary.trigger_mode == ContextSummaryTriggerMode.TOOL_RESULT and boundary.covered_user_message_id is not None else None
@@ -610,15 +611,14 @@ async def _ensure_context_summary(
 
     recent_messages = list(snapshot.recent_messages)
 
-    def build_summary_content(candidate: str) -> str | None:
-        summary_content: str | None = candidate
-        if fixed_snapshot:
-            summary_content = f"{summary_content}\n\n{fixed_snapshot}" if summary_content else fixed_snapshot
-        return append_covered_user_message(
-            summary_content,
-            message_id=covered_user_message_id,
-            content=covered_user_message_content,
-        )
+    def build_summary_content(candidate: str) -> str:
+        return StoredConversationSummary(
+            conversation_summary=candidate,
+            user_message=covered_user_message_content,
+            covered_user_message_id=covered_user_message_id,
+            current_session_todo=todo_snapshot,
+            current_terminal_watch=watch_snapshot,
+        ).model_dump_json(exclude_none=True)
 
     def measure_final_request_tokens(candidate: str) -> int:
         summary_content = build_summary_content(candidate)
@@ -705,7 +705,7 @@ async def _ensure_context_summary(
             db,
             profile=profile,
             cfg=cfg,
-            prompt=CONTEXT_SUMMARY_COMPRESS_PROMPT.format(summary=candidate),
+            prompt=build_context_summary_compress_prompt(candidate),
             safety_margin_tokens=safety_margin_tokens,
             uid=uid,
             session_id=session_id,
@@ -748,7 +748,7 @@ async def _ensure_context_summary(
     if not candidate_summary:
         await release_db_session(db)
         return state
-    candidate_tokens = estimate_tokens(
+    candidate_tokens = estimate_summary_tokens(
         candidate_summary,
         model_id=model_id,
         protocol=protocol,

@@ -1,3 +1,4 @@
+import json
 from typing import (
     Any,
 )
@@ -66,7 +67,9 @@ async def prepare_messages(
             properties = parameters.get("properties", {})
             operation = properties.get("operation", {})
             if "create" in operation.get("enum", []):
-                system_prompt = f"{system_prompt}\n\n{SUBAGENT_DELEGATION_SYSTEM_PROMPT}"
+                payload = json.loads(system_prompt)
+                payload["subagent_delegation_rules"] = SUBAGENT_DELEGATION_SYSTEM_PROMPT
+                system_prompt = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
             break
     cleaned_platform_constraints = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
     current_msg = initial_msg.model_copy(deep=True) if is_first_iter and initial_msg is not None else None

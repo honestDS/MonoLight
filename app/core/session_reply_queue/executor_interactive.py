@@ -33,8 +33,6 @@ from app.core.session_reply_queue.executor_common import (
 from app.core.session_reply_queue.executor_metadata import _persist_interactive_work_request_metadata
 from app.core.session_reply_queue.manager import get_work_request_ids, session_reply_queue_manager
 from app.core.session_reply_queue.manager_common import is_scheduled_task_work, resolve_work_tool_workflow
-from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
-from app.core.utils.dispatcher.terminal_watch_snapshot import strip_terminal_watch_snapshot
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.llm_request_params import build_session_cache_key
 from app.core.utils.message_parser import parse_db_messages_to_internal
@@ -369,7 +367,7 @@ async def _register_observed_child_work_slots(
         tool_result_message_id = message.get("id")
         if not isinstance(tool_result_message_id, int) or isinstance(tool_result_message_id, bool) or tool_result_message_id <= 0:
             continue
-        content = strip_session_todo_snapshot(strip_terminal_watch_snapshot(message.get("content")))
+        content = message.get("content")
         try:
             payload = json.loads(content or "")
         except (TypeError, ValueError):

@@ -466,7 +466,8 @@ async def test_background_image_results_resume_real_chat_with_paired_tools(
 
         def output_payload(item: dict) -> tuple[str, dict]:
             assert isinstance(output := item.get("output"), str) and isinstance(parsed := json.loads(output), dict)
-            return output, parsed
+            assert isinstance(result := parsed["tool_result"], dict)
+            return output, result
 
         history_calls = [InternalToolCall(id="history-image-call", name="generate_image", arguments={"prompt": "history image"}), InternalToolCall(id="history-file-call", name="file_tool", arguments={"operation": "read", "path": str(history_path.resolve())})]
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=history_calls))

@@ -176,11 +176,11 @@ def _provider_function_call_output_payloads(payload: dict, *, name: str, argumen
         if not isinstance(output, str):
             continue
         try:
-            output_payload, _ = json.JSONDecoder().raw_decode(output)
+            output_payload = json.loads(output)
         except json.JSONDecodeError:
             continue
-        if isinstance(output_payload, dict):
-            output_payloads.append(output_payload)
+        if isinstance(output_payload, dict) and isinstance(output_payload.get("tool_result"), dict):
+            output_payloads.append(output_payload["tool_result"])
     return output_payloads
 
 
@@ -1680,7 +1680,7 @@ async def test_send_message_board_review_query_result_does_not_rewake_parent(
                 send_result = await db.get(Message, send_result_message_id)
                 assert send_result is not None
                 send_result_message = InternalMessage.model_validate_json(send_result.content or "{}")
-                send_result_payload, _ = json.JSONDecoder().raw_decode(send_result_message.content or "")
+                send_result_payload = json.loads(send_result_message.content or "")
                 assert send_result_message.tool_call_id == actual_send_call_id
                 assert send_result_message.tool_execution_status == "succeeded"
                 assert send_result_payload == {
@@ -1699,7 +1699,7 @@ async def test_send_message_board_review_query_result_does_not_rewake_parent(
                 assert len(query_messages) == 1
                 query_message = query_messages[0]
                 query_content = query_message.content or ""
-                query_payload, query_payload_end = json.JSONDecoder().raw_decode(query_content)
+                query_payload = json.loads(query_content)
                 assert query_message.tool_execution_status == "succeeded"
                 assert query_payload == {
                     "subagent_id": child["subagent_id"],
@@ -1707,7 +1707,10 @@ async def test_send_message_board_review_query_result_does_not_rewake_parent(
                     "status": "succeeded",
                     "content": child_final,
                 }
-                assert query_content[query_payload_end:] == '\n\n<current_session_todo_snapshot>{"revision":1,"todos":[{"content":"verify-send-result","status":"in_progress"}]}</current_session_todo_snapshot>'
+                assert query_message.current_session_todo == {
+                    "revision": 1,
+                    "todos": [{"content": "verify-send-result", "status": "in_progress"}],
+                }
 
                 final_message = await db.get(Message, parent.result_message_id)
                 assert final_message is not None
@@ -2654,7 +2657,7 @@ async def test_cancel_queued_child_during_parent_review_does_not_rewake_parent(
         cancel_outputs = [item for item in final_input if isinstance(item, dict) and item.get("type") == "function_call_output" and item.get("call_id") == actual_cancel_call_id]
         assert len(cancel_outputs) == 1
         assert isinstance(cancel_outputs[0].get("output"), str)
-        cancel_payload = json.loads(cancel_outputs[0]["output"])
+        cancel_payload = json.loads(cancel_outputs[0]["output"])["tool_result"]
         assert cancel_payload == {
             "subagent_id": second_child["subagent_id"],
             "work_id": second_child["work_id"],

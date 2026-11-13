@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,13 +11,22 @@ from app.core.constants import (
 from app.core.crud.session.message import message_crud
 from app.core.i18n import t
 from app.core.utils.context_messages import message_token_text
+from app.core.utils.context_summary import common
 from app.core.utils.context_summary.common import join_messages, serialize_message
 from app.core.utils.context_summary.pipeline import SummaryFragmentInput, SummaryFragmentPlan, build_balanced_fragment_plan
 from app.core.utils.context_summary.snapshot import CONTEXT_SUMMARY_SCAN_PAGE_SIZE, ContextSummarySnapshot, iter_persistent_summary_rounds
 from app.core.utils.context_summary.split import SummarySourceUnit, iter_round_source_units
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshots
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.tokenizer import estimate_tokens
+from app.models.message import InternalMessage, MessageRole
+
+
+def _request_message_token_text(message: InternalMessage) -> str:
+    if message.role == MessageRole.TOOL:
+        message = materialize_user_environment_prompts([message])[0]
+    return message_token_text(message)
 
 
 async def measure_snapshot_history(
@@ -29,7 +39,7 @@ async def measure_snapshot_history(
     model_id: str | None = None,
     protocol: str | None = None,
 ) -> tuple[int, int]:
-    token_text = message_token_text if use_request_token_text else serialize_message
+    token_text = _request_message_token_text if use_request_token_text else serialize_message
     history_tokens = sum(
         estimate_tokens(
             token_text(message),
@@ -68,8 +78,8 @@ async def measure_complete_replacement_input(
     model_id: str | None = None,
     protocol: str | None = None,
 ) -> int:
-    total_tokens = estimate_tokens(
-        existing_summary or "",
+    total_tokens = common.estimate_summary_tokens(
+        existing_summary,
         model_id=model_id,
         protocol=protocol,
     )
@@ -95,7 +105,7 @@ async def measure_complete_replacement_input(
         parsed_page = strip_session_todo_snapshots(parse_db_messages_to_internal(page))
         total_tokens += sum(
             estimate_tokens(
-                message_token_text(message),
+                _request_message_token_text(message),
                 model_id=model_id,
                 protocol=protocol,
             )
@@ -245,12 +255,19 @@ async def iter_grouped_summary_source_units(
     planned_unit_count = plan.unit_counts[0] if plan.unit_counts else 0
 
     def build_fragment() -> SummaryFragmentInput:
+        chunks = []
+        for unit in pending_units:
+            chunks.extend(json.loads(unit.content)["message_chunks"])
         return SummaryFragmentInput(
             fragment_index=fragment_index,
             message_start_id=pending_units[0].message_start_id,
             message_end_id=pending_units[-1].message_end_id,
             token_count=pending_tokens,
-            content="\n".join(unit.content for unit in pending_units),
+            content=json.dumps(
+                {"message_chunks": chunks},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
             existing_summary=existing_summary if fragment_index == 0 else None,
         )
 

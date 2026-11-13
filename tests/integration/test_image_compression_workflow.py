@@ -160,7 +160,7 @@ async def test_image_compression_across_real_dialogue_entrypoints(
                     id=CHANNEL_ID,
                     name="image-compression-channel",
                     base_url="https://example.invalid/v1",
-                    api_key="test-encrypted-key",
+                    api_key="enc:v1:test-encrypted-key",
                     is_active=True,
                     model_ids=[
                         {
@@ -324,7 +324,7 @@ async def test_image_compression_across_real_dialogue_entrypoints(
         assert request_urls[0] == []
         assert len(request_urls[1]) == 1
         tool_result = next(message for message in records[1]["messages"] if message.role == MessageRole.TOOL and message.tool_call_id == "read-image-call")
-        tool_payload = json.loads(tool_result.content)
+        tool_payload = json.loads(tool_result.content)["tool_result"]
         assert tool_payload["type"] == "multimodal_file_read"
         assert tool_payload["status"] == "success"
         assert tool_payload["path"] == source_path

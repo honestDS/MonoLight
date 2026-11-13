@@ -12,8 +12,6 @@ from app.core.crud.session.subagent import subagent_crud
 from app.core.exceptions import ParameterException
 from app.core.session_reply_queue.child_work import build_subagent_queued_result
 from app.core.utils.dispatcher.save_message import save_message
-from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
-from app.core.utils.dispatcher.terminal_watch_snapshot import strip_terminal_watch_snapshot
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem
 from app.models.subagent import SubagentToolCall
@@ -146,7 +144,7 @@ async def _recover_result(db: AsyncSession, work: SessionReplyWorkItem, call: Su
     if result.tool_call_id != call.tool_call_id:
         _bad()
     try:
-        payload = json.loads(strip_session_todo_snapshot(strip_terminal_watch_snapshot(result.content)) or "{}")
+        payload = json.loads(result.content or "{}")
     except (TypeError, ValueError):
         _bad()
     if not isinstance(payload, dict):

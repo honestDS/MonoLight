@@ -1,8 +1,17 @@
+import json
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.pool import StaticPool
 
 from app.api.v1.profile import PROFILE_TOOL_OPTIONS
+from app.core.prompts import (
+    KNOWLEDGE_BASES_POLICY,
+    SESSION_TODO_SYSTEM_PROMPT,
+    SYSTEM_INSTRUCTIONS_POLICY,
+    SYSTEM_RUNTIME_CONTEXT_POLICY,
+    UNIFIED_KNOWLEDGE_BASES_POLICY,
+)
 from app.core.tools import get_tools_for_profile
 from app.core.utils.dispatcher import inject_system_prompt as inject_system_prompt_module
 from app.models.knowledge_base import (
@@ -14,7 +23,10 @@ from app.models.knowledge_base import (
     KnowledgeBaseType,
     ManagedKnowledgeItem,
 )
+from app.models.message import InternalMessage, MessageRole
 from app.models.profile import PROFILE_EXAMPLE, Profile, ToolConfig
+from app.models.prompt import PromptLibrary
+from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 
 def _profile(*, memory_enabled: bool, enabled_tools: list[str] | None = None) -> Profile:
@@ -87,6 +99,7 @@ async def _add_knowledge_base(
 @pytest.fixture
 async def db_session(database_factory):
     tables = (
+        PromptLibrary.__table__,
         KnowledgeBase.__table__,
         KnowledgeBaseCollectionOwner.__table__,
         KnowledgeBaseProfileBinding.__table__,
@@ -270,3 +283,59 @@ async def test_memory_disabled_empty_catalog_does_not_prompt_query_tool(db_sessi
 
     assert "query_knowledge_base" not in prompt
     assert "user-empty" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("memory_enabled", [False, True])
+@pytest.mark.parametrize(
+    "transformer",
+    [OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer],
+    ids=["chat-completions", "responses"],
+)
+async def test_provider_system_prompt_preserves_policy_values_and_order(
+    db_session: AsyncSession,
+    memory_enabled: bool,
+    transformer,
+) -> None:
+    prompt_content = "Use this ordinary XML example as data: <example><item>value</item></example>."
+    prompt = PromptLibrary(
+        uid="user-1",
+        name="system-prompt-order",
+        content=prompt_content,
+    )
+    db_session.add(prompt)
+    await db_session.flush()
+
+    profile = _profile(memory_enabled=memory_enabled)
+    profile.prompt_id = prompt.id
+    knowledge_base = await _add_knowledge_base(
+        db_session,
+        name="published-user-knowledge",
+        knowledge_base_type=KnowledgeBaseType.USER,
+        index_status=KnowledgeBaseIndexStatus.READY,
+        with_document=True,
+    )
+
+    system_prompt = await inject_system_prompt_module.build_system_prompt(db_session, profile)
+    provider_messages = transformer.to_provider([InternalMessage(role=MessageRole.SYSTEM, content=system_prompt)])
+    provider_system = next(message for message in provider_messages if message["role"] == MessageRole.SYSTEM.value)
+    payload = json.loads(provider_system["content"])
+
+    assert payload["system_instructions"]["policy"] == SYSTEM_INSTRUCTIONS_POLICY
+    assert payload["system_instructions"]["content"] == prompt_content
+    assert payload["message_contract"] == SYSTEM_RUNTIME_CONTEXT_POLICY
+    assert payload["session_todo_rules"] == SESSION_TODO_SYSTEM_PROMPT
+    expected_knowledge_base_policy = UNIFIED_KNOWLEDGE_BASES_POLICY if memory_enabled else KNOWLEDGE_BASES_POLICY
+    assert payload["knowledge_base_policy"] == expected_knowledge_base_policy
+    assert payload["available_knowledge_bases"] == [
+        {
+            "id": knowledge_base.id,
+            "name": "published-user-knowledge",
+            "description": "",
+            "kind": "user_knowledge_base",
+        }
+    ]
+
+    payload_keys = list(payload)
+    assert payload_keys.index("system_instructions") < payload_keys.index("session_todo_rules")
+    assert payload_keys.index("knowledge_base_policy") < payload_keys.index("available_knowledge_bases")

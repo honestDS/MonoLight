@@ -80,7 +80,7 @@ def _provider_function_call_output(
     assert len(outputs) == 1
     raw_output = outputs[0].get("output")
     assert isinstance(raw_output, str)
-    output_payload, _ = json.JSONDecoder().raw_decode(raw_output)
+    output_payload = json.loads(raw_output)
     assert isinstance(output_payload, dict)
     return output_payload
 
@@ -283,20 +283,28 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
         final_payloads = [payload for payload in parent_payloads if summary_b in json.dumps(payload, ensure_ascii=False)]
         assert len(query_payloads) == 1
         assert len(final_payloads) == 1
+        expected_todo_snapshot = {
+            "revision": 1,
+            "todos": [{"content": "verify-child-delivery", "status": "in_progress"}],
+        }
         final_payload_dump = json.dumps(final_payloads[0], ensure_ascii=False)
         query_output_payload = _provider_function_call_output(
             final_payloads[0],
             name=query_call.name,
             arguments=query_arguments,
         )
-        _assert_completed_subagent_result(query_output_payload, subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
+        _assert_completed_subagent_result(query_output_payload["tool_result"], subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
+        if with_todo_snapshot:
+            assert query_output_payload["current_session_todo"] == expected_todo_snapshot
+        else:
+            assert "current_session_todo" not in query_output_payload
         assert summary_b in final_payload_dump
         b_create_output = _provider_function_call_output(
             final_payloads[0],
             name=AGENT_WORK_TOOL_NAME,
             arguments=b_create_arguments,
         )
-        _assert_completed_subagent_result(b_create_output, subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
+        _assert_completed_subagent_result(b_create_output["tool_result"], subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
@@ -329,15 +337,13 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
             actual_query_call_id = persisted_query_calls[0].id
             query_messages = [message for message in checkpoint_messages if message.role == MessageRole.TOOL and message.tool_call_id == actual_query_call_id]
             assert len(query_messages) == 1
-            query_content = query_messages[0].content or ""
-            query_payload, query_payload_end = json.JSONDecoder().raw_decode(query_content)
-            query_snapshot = query_content[query_payload_end:]
+            query_payload = json.loads(query_messages[0].content or "")
+            assert isinstance(query_payload, dict)
             _assert_completed_subagent_result(query_payload, subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
             if with_todo_snapshot:
-                expected_snapshot = '\n\n<current_session_todo_snapshot>{"revision":1,"todos":[{"content":"verify-child-delivery","status":"in_progress"}]}</current_session_todo_snapshot>'
-                assert query_snapshot == expected_snapshot
+                assert query_messages[0].current_session_todo == expected_todo_snapshot
             else:
-                assert query_snapshot == ""
+                assert query_messages[0].current_session_todo is None
             checkpoint_message_lists = [checkpoint_messages]
             turn_messages = checkpoint.get("turn_messages")
             if isinstance(turn_messages, list):

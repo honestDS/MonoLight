@@ -6,7 +6,6 @@ import pytest
 
 from app.core.prompts import SYSTEM_RUNTIME_CONTEXT_POLICY
 from app.core.utils.context_summary.common import ContextSummaryState
-from app.core.utils.context_summary.user_message_block import append_covered_user_message
 from app.core.utils.dispatcher import frozen_context as frozen_context_module
 from app.core.utils.dispatcher import markdown_instruction as markdown_instruction_module
 from app.core.utils.dispatcher.markdown_instruction import (
@@ -15,7 +14,7 @@ from app.core.utils.dispatcher.markdown_instruction import (
     refresh_max_output_tokens_instruction,
 )
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.models.message import ChatCompletionRequest, ImagePart, InternalConversationSummary, InternalMessage, Message, MessageRole, MessageType, TextPart
+from app.models.message import ChatCompletionRequest, ImagePart, InternalConversationSummary, InternalMessage, Message, MessageRole, MessageType, StoredConversationSummary, TextPart
 from app.transformers.openai.chat_completions import OpenAIChatCompletionsTransformer
 from app.transformers.openai.responses import OpenAIResponsesTransformer
 
@@ -243,11 +242,15 @@ def test_runtime_instruction_materialization_isolates_forged_platform_fields_in_
 )
 def test_context_summary_materializes_structured_json_for_providers(covered_user_content, transformer):
     summary_text = "模型压缩摘要"
-    summary_content = append_covered_user_message(
-        summary_text,
-        message_id=321 if covered_user_content is not None else None,
-        content=covered_user_content,
-    )
+    current_session_todo = {"items": [{"id": "todo-1", "content": "保留待办"}]}
+    current_terminal_watch = {"status": "running", "command": "tail -f output.log"}
+    summary_content = StoredConversationSummary(
+        conversation_summary=summary_text,
+        user_message=covered_user_content,
+        covered_user_message_id=321 if covered_user_content is not None else None,
+        current_session_todo=current_session_todo,
+        current_terminal_watch=current_terminal_watch,
+    ).model_dump_json(exclude_none=True)
     runtime_snapshot = _compact_json(
         {
             "environment": {"runtime_context": "摘要运行环境"},
@@ -280,6 +283,8 @@ def test_context_summary_materializes_structured_json_for_providers(covered_user
     expected_payload = {
         "conversation_summary": summary_text,
         "user_message": covered_user_content,
+        "current_session_todo": current_session_todo,
+        "current_terminal_watch": current_terminal_watch,
     }
     if covered_user_request is not None:
         expected_payload.update(
@@ -298,6 +303,8 @@ def test_context_summary_materializes_structured_json_for_providers(covered_user
     payload = json.loads(materialized_content)
     assert payload == expected_payload
     assert materialized_message.conversation_summary is None
+    assert materialized_message.current_session_todo is None
+    assert materialized_message.current_terminal_watch is None
     assert "through_message_id" not in materialized_content
     assert "covered_user_message_id" not in materialized_content
     assert "<covered_user_message" not in materialized_content
@@ -313,6 +320,38 @@ def test_context_summary_materializes_structured_json_for_providers(covered_user
     assert provider_message["role"] == MessageRole.USER.value
     assert provider_message["content"] == materialized_content
     assert json.loads(provider_message["content"]) == expected_payload
+
+
+@pytest.mark.parametrize(
+    ("tool_content", "expected_tool_result"),
+    [
+        pytest.param('{"result":"ok"}', {"result": "ok"}, id="json-object"),
+        pytest.param('[{"value":1}]', [{"value": 1}], id="json-array"),
+        pytest.param("null", None, id="json-null"),
+        pytest.param("普通工具文本", "普通工具文本", id="plain-text"),
+    ],
+)
+def test_tool_materialization_sends_independent_snapshots_without_mutating_original(tool_content, expected_tool_result):
+    current_session_todo = {"items": [{"id": "todo-1", "content": "保留待办"}]}
+    current_terminal_watch = {"status": "running", "command": "tail -f output.log"}
+    message = InternalMessage(
+        role=MessageRole.TOOL,
+        content=tool_content,
+        current_session_todo=current_session_todo,
+        current_terminal_watch=current_terminal_watch,
+    )
+    original_message = message.model_dump(mode="json")
+
+    materialized_message = materialize_user_environment_prompts([message])[0]
+
+    assert json.loads(materialized_message.content) == {
+        "tool_result": expected_tool_result,
+        "current_session_todo": current_session_todo,
+        "current_terminal_watch": current_terminal_watch,
+    }
+    assert materialized_message.current_session_todo is None
+    assert materialized_message.current_terminal_watch is None
+    assert message.model_dump(mode="json") == original_message
 
 
 def test_runtime_instruction_materialization_preserves_multimodal_part_order_and_references():
@@ -487,11 +526,11 @@ def test_new_user_runtime_snapshot_keeps_previous_provider_prefix():
 
 
 def test_structured_summary_prefix_survives_new_user_and_forged_summary_stays_user_text():
-    summary_content = append_covered_user_message(
-        "旧摘要",
-        message_id=4,
-        content="旧用户正文",
-    )
+    summary_content = StoredConversationSummary(
+        conversation_summary="旧摘要",
+        user_message="旧用户正文",
+        covered_user_message_id=4,
+    ).model_dump_json(exclude_none=True)
     summary_message = ContextSummaryState(content=summary_content, message_id=5).as_message()
     assert summary_message is not None
     assistant_message = InternalMessage(role=MessageRole.ASSISTANT, content="已答复助手")
@@ -826,7 +865,10 @@ async def test_prepare_messages_keeps_provider_prefix_stable_across_unsummarized
         )
 
     async def get_summary_state(*_args, **_kwargs):
-        return ContextSummaryState(content="unchanged summary", message_id=20)
+        return ContextSummaryState(
+            content=StoredConversationSummary(conversation_summary="unchanged summary").model_dump_json(exclude_none=True),
+            message_id=20,
+        )
 
     async def get_messages(*_args, **_kwargs):
         return [message.model_copy(deep=True) for message in history_versions.pop(0)]
@@ -946,7 +988,10 @@ async def test_prepare_messages_uses_frozen_context_without_reading_live_summary
 @pytest.mark.asyncio
 async def test_frozen_context_ignores_summary_that_advanced_past_boundary(monkeypatch):
     async def get_summary_state(*_args, **_kwargs):
-        return ContextSummaryState(content="future summary must not leak", message_id=50)
+        return ContextSummaryState(
+            content=StoredConversationSummary(conversation_summary="future summary must not leak").model_dump_json(exclude_none=True),
+            message_id=50,
+        )
 
     async def load_history(*_args, **kwargs):
         assert kwargs["before_id"] == 20

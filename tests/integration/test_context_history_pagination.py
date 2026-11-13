@@ -564,7 +564,7 @@ async def test_persisted_audit_tool_feedback_is_obscured_from_provider_request(
     tool_result = next(message for message in messages if message.role == MessageRole.TOOL)
     assert tool_call.tool_calls[0].id == tool_result.tool_call_id == tool_call_id
 
-    provider_messages = transformer.to_provider(messages)
+    provider_messages = transformer.to_provider(materialize_user_environment_prompts(messages))
     provider_request = json.dumps(provider_messages, ensure_ascii=False)
     assert "current input" in provider_request
     assert provider_request.count(tool_call_id) == 2
@@ -577,7 +577,7 @@ async def test_persisted_audit_tool_feedback_is_obscured_from_provider_request(
     else:
         provider_tool_result = next(item for item in provider_messages if item.get("type") == "function_call_output")
         provider_result_content = provider_tool_result["output"]
-    provider_audit_payload = json.loads(provider_result_content)
+    provider_audit_payload = json.loads(provider_result_content)["tool_result"]
     assert set(provider_audit_payload) == {"status", "error"}
     assert provider_audit_payload["status"] == audit_status
     if audit_status == "audit_failed":
@@ -613,6 +613,8 @@ def test_prepare_messages_for_model_request_obscures_legacy_audit_checkpoint_cop
         "confirmation_status": "reject",
         "confirmation_decision": "拒绝",
     }
+    audit_todo = {"revision": 7, "todos": [{"content": "audit-only todo", "status": "in_progress"}]}
+    audit_watch = {"type": "terminal_watch_state", "terminals": [{"terminal_session_id": "audit-only-terminal"}]}
     if include_rejection_source:
         audit_payload["rejection_source"] = "user"
     messages = [
@@ -622,6 +624,8 @@ def test_prepare_messages_for_model_request_obscures_legacy_audit_checkpoint_cop
             role=MessageRole.TOOL,
             tool_call_id="call-audit",
             content=json.dumps(audit_payload, ensure_ascii=False),
+            current_session_todo=audit_todo,
+            current_terminal_watch=audit_watch,
             reasoning_content="AUDIT_MESSAGE_REASONING_PRIVATE_MARKER",
             refusal="AUDIT_MESSAGE_REFUSAL_PRIVATE_MARKER",
             provider_metadata={"private": "AUDIT_MESSAGE_PROVIDER_METADATA_PRIVATE_MARKER"},
@@ -692,6 +696,31 @@ def test_prepare_messages_for_model_request_obscures_legacy_audit_checkpoint_cop
     provider_audit_payload = json.loads(provider_result_content)
     assert provider_audit_payload == prepared_audit_payload
 
+    materialized_messages = materialize_user_environment_prompts(messages)
+    materialized_audit = next(message for message in materialized_messages if message.role == MessageRole.TOOL and message.tool_call_id == "call-audit")
+    materialized_audit_payload = json.loads(materialized_audit.content)
+    assert materialized_audit_payload["tool_result"] == prepared_audit_payload
+    assert set(materialized_audit_payload) == {"tool_result"}
+    assert materialized_audit.reasoning_content is None
+    assert materialized_audit.refusal is None
+    assert materialized_audit.provider_metadata is None
+    assert materialized_audit.current_session_todo is None
+    assert materialized_audit.current_terminal_watch is None
+
+    materialized_provider_messages = transformer.to_provider(materialized_messages)
+    if transformer is OpenAIChatCompletionsTransformer:
+        materialized_provider_tool_result = next(item for item in materialized_provider_messages if item.get("role") == "tool")
+        materialized_provider_result_content = materialized_provider_tool_result["content"]
+    else:
+        materialized_provider_tool_result = next(item for item in materialized_provider_messages if item.get("type") == "function_call_output")
+        materialized_provider_result_content = materialized_provider_tool_result["output"]
+    materialized_provider_payload = json.loads(materialized_provider_result_content)
+    assert materialized_provider_payload["tool_result"] == prepared_audit_payload
+    materialized_provider_json = json.dumps(materialized_provider_messages, ensure_ascii=False)
+    assert "current_session_todo" not in materialized_provider_json
+    assert "current_terminal_watch" not in materialized_provider_json
+    assert messages == originals
+
     prepared_json = json.dumps([message.model_dump(mode="json") for message in prepared], ensure_ascii=False)
     provider_json = json.dumps(provider_messages, ensure_ascii=False)
     for marker in (
@@ -708,6 +737,7 @@ def test_prepare_messages_for_model_request_obscures_legacy_audit_checkpoint_cop
     ):
         assert marker not in prepared_json
         assert marker not in provider_json
+        assert marker not in materialized_provider_json
     assert "BUSINESS_SUCCESS_MARKER" in prepared_json
     assert "BUSINESS_FAILURE_MARKER" in prepared_json
     assert "BUSINESS_FAILURE_REASON_MARKER" in prepared_json
@@ -886,7 +916,7 @@ async def test_sent_file_history_isolated_across_same_work_reload_and_frozen_con
             assert "assistant_files" not in provider_json
             assert sent_token not in provider_json
             assert sent_download_url not in provider_json
-            visible_tool_result = json.loads(provider_tool_result(payload))
+            visible_tool_result = json.loads(provider_tool_result(payload))["tool_result"]
             assert visible_tool_result["status"] == "success"
             assert visible_tool_result["files"][0]["name"] == file_name
             assert "type" not in visible_tool_result

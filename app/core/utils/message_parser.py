@@ -3,7 +3,6 @@ import json
 from app.core.audit.visibility import obscure_audit_tool_result
 from app.core.prompts import EXTERNAL_RESULT_REPLY_GUIDANCE_PROMPT, SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
 from app.core.utils.assistant_files import model_visible_message_content
-from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
 from app.models.message import (
     InternalMessage,
     InternalToolCall,
@@ -74,6 +73,8 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
             suppress_tool_result_metadata = False
             provider_metadata = msg.provider_metadata if isinstance(msg.provider_metadata, dict) else None
             execution_guidance = None
+            current_session_todo = None
+            current_terminal_watch = None
 
             # 直接检测：仅在需要的消息类型中尝试解析 JSON
             if m_type in {MessageType.AUDIT_CONFIRMATION, MessageType.AUDIT_DECISION}:
@@ -94,6 +95,9 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                         if "tool_call_id" in parsed:
                             tool_call_id = parsed["tool_call_id"]
                             content = parsed.get("content")
+                            if m_type == MessageType.TOOL_RESULT:
+                                current_session_todo = parsed.get("current_session_todo")
+                                current_terminal_watch = parsed.get("current_terminal_watch")
                         if m_type == MessageType.TOOL_RESULT:
                             tool_execution_status = parsed.get("tool_execution_status")
                         if isinstance(parsed.get("refusal"), str):
@@ -118,10 +122,13 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                             refusal = None
                             provider_metadata = None
                             suppress_tool_result_metadata = True
-                    if not suppress_tool_result_metadata:
-                        content = strip_session_todo_snapshot(content)
-                        if isinstance(msg.model_context_suffix, str) and msg.model_context_suffix:
-                            content = f"{content}\n\n{msg.model_context_suffix}"
+                    if suppress_tool_result_metadata:
+                        current_session_todo = None
+                        current_terminal_watch = None
+                    elif msg.model_context_suffix is not None:
+                        context_suffix = json.loads(msg.model_context_suffix)
+                        current_session_todo = context_suffix.get("current_session_todo")
+                        current_terminal_watch = context_suffix.get("current_terminal_watch")
             elif m_type == MessageType.TEXT:
                 content = decode_message_content(msg.content or "", msg.content_format)
 
@@ -146,6 +153,8 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                 "tool_calls": tool_calls,
                 "tool_call_id": tool_call_id,
                 "tool_execution_status": tool_execution_status,
+                "current_session_todo": current_session_todo,
+                "current_terminal_watch": current_terminal_watch,
             }
             if role == MessageRole.USER and m_type == MessageType.TEXT:
                 parsed_history.append(InternalMessage.from_user_input(**message_kwargs))

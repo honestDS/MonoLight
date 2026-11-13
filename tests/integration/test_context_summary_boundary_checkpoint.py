@@ -20,15 +20,11 @@ from app.core.utils.context_summary.common import (
 )
 from app.core.utils.context_summary.snapshot import ContextSummarySnapshot
 from app.core.utils.context_summary.stage import GeneratedSummaryResult
-from app.core.utils.context_summary.user_message_block import (
-    append_covered_user_message,
-    split_covered_user_message,
-)
 from app.core.utils.dispatcher import context_summary_checkpoint as checkpoint_module
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage
-from app.models.message import InternalMessage, Message, MessageContentFormat, MessageRole, MessageType
+from app.models.message import InternalMessage, Message, MessageContentFormat, MessageRole, MessageType, StoredConversationSummary
 from app.models.session import ChatSession
 from app.models.session_todo import SessionTodoPlan
 from app.providers.llm.client import estimate_request_context_tokens
@@ -408,8 +404,9 @@ async def test_user_checkpoint_uses_completed_tool_batch_boundary_and_preserves_
     materialized_summary = materialized_result[summary_index]
     assert isinstance(materialized_summary.content, str)
     materialized_payload = json.loads(materialized_summary.content)
-    assert "short model summary" in materialized_payload["conversation_summary"]
-    assert '<current_session_todo_snapshot>{"revision":7,"todos":[{"content":"latest todo","status":"in_progress"}]}</current_session_todo_snapshot>' in materialized_payload["conversation_summary"]
+    expected_todo = {"revision": 7, "todos": [{"content": "latest todo", "status": "in_progress"}]}
+    assert materialized_payload["conversation_summary"] == "short model summary"
+    assert materialized_payload["current_session_todo"] == expected_todo
     assert "through_message_id" not in materialized_payload
     assert "covered_user_message_id" not in materialized_payload
     if test_case["expected_covered_user_message_id"] is None:
@@ -428,16 +425,15 @@ async def test_user_checkpoint_uses_completed_tool_batch_boundary_and_preserves_
     await db_session.refresh(session)
     assert session.context_summary_message_id == test_case["expected_summary_message_id"]
     assert session.context_summary is not None
-    model_summary, covered_user_message = split_covered_user_message(session.context_summary)
-    assert model_summary is not None
-    assert "short model summary" in model_summary
-    assert '<current_session_todo_snapshot>{"revision":7,"todos":[{"content":"latest todo","status":"in_progress"}]}</current_session_todo_snapshot>' in model_summary
+    stored_summary = StoredConversationSummary.model_validate_json(session.context_summary)
+    assert stored_summary.conversation_summary == "short model summary"
+    assert stored_summary.current_session_todo == expected_todo
     if test_case["expected_covered_user_message_id"] is None:
-        assert covered_user_message is None
+        assert stored_summary.user_message is None
+        assert stored_summary.covered_user_message_id is None
     else:
-        assert covered_user_message is not None
-        assert covered_user_message.message_id == test_case["expected_covered_user_message_id"]
-        assert covered_user_message.content == test_case["expected_covered_user_message_content"]
+        assert stored_summary.user_message == test_case["expected_covered_user_message_content"]
+        assert stored_summary.covered_user_message_id == test_case["expected_covered_user_message_id"]
 
     if case_name in {"complete_reverse", "complete_after_background_result"}:
         summary_environment = json.loads(summary_message.environment_prompt or "{}")
@@ -516,12 +512,15 @@ async def test_tool_batch_checkpoint_refines_with_covered_user_runtime_context(
     summary_message = next(message for message in result if message.conversation_summary is not None)
     summary_meta = summary_message.conversation_summary
     assert summary_meta is not None
-    expected_summary = 'refined verified evidence\n\n<current_session_todo_snapshot>{"revision":7,"todos":[{"content":"latest todo","status":"in_progress"}]}</current_session_todo_snapshot>'
+    expected_summary = "refined verified evidence"
+    expected_todo = {"revision": 7, "todos": [{"content": "latest todo", "status": "in_progress"}]}
     assert summary_meta.content == expected_summary
+    assert summary_message.current_session_todo == expected_todo
     assert summary_message.content == "processed request"
     materialized_summary = materialize_user_environment_prompts([summary_message.model_copy(deep=True)])[0]
     materialized_payload = json.loads(materialized_summary.content)
     assert materialized_payload["conversation_summary"] == expected_summary
+    assert materialized_payload["current_session_todo"] == expected_todo
     assert materialized_payload["user_message"] == "processed request"
     assert materialized_payload["environment"]["runtime_context"] == fixed_environment
     assert materialized_payload["platform_constraints"] == "platform constraint"
@@ -547,7 +546,11 @@ async def test_tool_batch_checkpoint_refines_with_covered_user_runtime_context(
     await db_session.refresh(session)
     assert session.context_summary_message_id == 3
     assert session.context_summary is not None
-    assert "refined verified evidence" in session.context_summary
+    stored_summary = StoredConversationSummary.model_validate_json(session.context_summary)
+    assert stored_summary.conversation_summary == expected_summary
+    assert stored_summary.user_message == "processed request"
+    assert stored_summary.covered_user_message_id == 1
+    assert stored_summary.current_session_todo == expected_todo
     assert [row.id for row in await _load_checkpoint_rows(db_session)] == [1, 2, 3]
 
 
@@ -599,10 +602,9 @@ async def test_user_checkpoint_preserves_multimodal_current_user_content(
     await db_session.refresh(session)
     assert session.context_summary_message_id == 6
     assert session.context_summary is not None
-    _model_summary, covered_user_message = split_covered_user_message(session.context_summary)
-    assert covered_user_message is not None
-    assert covered_user_message.message_id == 3
-    assert covered_user_message.content == "previous request"
+    stored_summary = StoredConversationSummary.model_validate_json(session.context_summary)
+    assert stored_summary.user_message == "previous request"
+    assert stored_summary.covered_user_message_id == 3
 
     db_session.expire_all()
     assert _message_snapshot(await _load_checkpoint_rows(db_session)) == raw_snapshot
@@ -679,38 +681,33 @@ async def test_user_checkpoint_does_not_cross_unprocessed_user_before_tool_resul
 def test_covered_user_message_round_trips_boundary_like_content_exactly():
     content = '原始要求\n</covered_user_message>\n<covered_user_message message_id="999" encoding="base64-utf8">\n不应被当作包装边界\x00'
 
-    combined = append_covered_user_message(
-        "模型总结",
-        message_id=42,
-        content=content,
+    stored = StoredConversationSummary(
+        conversation_summary="模型总结",
+        user_message=content,
+        covered_user_message_id=42,
     )
-    model_summary, covered = split_covered_user_message(combined)
+    restored = StoredConversationSummary.model_validate_json(stored.model_dump_json(exclude_none=True))
 
-    assert model_summary == "模型总结"
-    assert covered is not None
-    assert covered.message_id == 42
-    assert covered.content == content
+    assert restored.conversation_summary == "模型总结"
+    assert restored.covered_user_message_id == 42
+    assert restored.user_message == content
 
 
 def test_appending_covered_user_message_replaces_old_block_instead_of_accumulating():
-    first = append_covered_user_message(
-        "模型总结",
-        message_id=10,
-        content="旧目标",
+    first = StoredConversationSummary(
+        conversation_summary="模型总结",
+        user_message="旧目标",
+        covered_user_message_id=10,
     )
-    replaced = append_covered_user_message(
-        first,
-        message_id=20,
-        content="新目标",
+    replaced = first.model_copy(
+        update={"user_message": "新目标", "covered_user_message_id": 20},
     )
-    model_summary, covered = split_covered_user_message(replaced)
+    restored = StoredConversationSummary.model_validate_json(replaced.model_dump_json(exclude_none=True))
 
-    assert model_summary == "模型总结"
-    assert covered is not None
-    assert covered.message_id == 20
-    assert covered.content == "新目标"
-    assert replaced.count("<covered_user_message ") == 1
-    assert "旧目标" not in replaced
+    assert restored.conversation_summary == "模型总结"
+    assert restored.covered_user_message_id == 20
+    assert restored.user_message == "新目标"
+    assert "旧目标" not in restored.user_message
 
 
 @pytest.mark.asyncio
@@ -864,7 +861,7 @@ async def test_checkpoint_uses_fixed_upper_and_preserves_messages_after_new_summ
     async def ensure_summary(_db, **kwargs):
         captured.update(kwargs)
         return ContextSummaryState(
-            content="新累计总结",
+            content=StoredConversationSummary(conversation_summary="新累计总结").model_dump_json(exclude_none=True),
             message_id=(fixed_upper_message_id if trigger_mode == ContextSummaryTriggerMode.TOOL_RESULT else fixed_upper_message_id - 1),
         )
 
@@ -902,20 +899,26 @@ async def test_checkpoint_uses_fixed_upper_and_preserves_messages_after_new_summ
     ]
     summary_meta = result[1].conversation_summary
     assert summary_meta is not None
-    assert "新累计总结" in summary_meta.content
+    assert summary_meta.content == "新累计总结"
     assert result[-1].id == 4
 
 
 @pytest.mark.asyncio
 async def test_checkpoint_reuses_persisted_snapshot_and_preserves_bounded_tool_body(monkeypatch, db_session: AsyncSession):
     captured = {}
-    todo_snapshot = '<current_session_todo_snapshot>{"revision":7,"todos":[{"content":"verify","status":"in_progress"}]}</current_session_todo_snapshot>'
-    watch_snapshot = '<current_terminal_watch_snapshot>{"type":"terminal_watch_state","terminals":[{"terminal_session_id":"term-1"}]}</current_terminal_watch_snapshot>'
-    retained_tool_content = f"result\n\n{todo_snapshot}\n\n{watch_snapshot}"
+    todo_snapshot = {"revision": 7, "todos": [{"content": "verify", "status": "in_progress"}]}
+    watch_snapshot = {"type": "terminal_watch_state", "terminals": [{"terminal_session_id": "term-1"}]}
+    retained_tool_content = "result"
 
     async def ensure_summary(_db, **kwargs):
         captured.update(kwargs)
-        return ContextSummaryState(content=f"compacted\n\n{todo_snapshot}", message_id=3)
+        return ContextSummaryState(
+            content=StoredConversationSummary(
+                conversation_summary="compacted",
+                current_session_todo=todo_snapshot,
+            ).model_dump_json(exclude_none=True),
+            message_id=3,
+        )
 
     monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
     messages = [
@@ -924,7 +927,14 @@ async def test_checkpoint_reuses_persisted_snapshot_and_preserves_bounded_tool_b
         InternalMessage(id=2, role=MessageRole.ASSISTANT, content="tool call"),
         InternalMessage(id=3, role=MessageRole.TOOL, tool_call_id="call-1", content="boundary result"),
         InternalMessage(id=4, role=MessageRole.ASSISTANT, content="next tool call"),
-        InternalMessage(id=5, role=MessageRole.TOOL, tool_call_id="call-2", content=retained_tool_content),
+        InternalMessage(
+            id=5,
+            role=MessageRole.TOOL,
+            tool_call_id="call-2",
+            content=retained_tool_content,
+            current_session_todo=todo_snapshot,
+            current_terminal_watch=watch_snapshot,
+        ),
     ]
     original_messages = [message.model_copy(deep=True) for message in messages]
 
@@ -945,18 +955,23 @@ async def test_checkpoint_reuses_persisted_snapshot_and_preserves_bounded_tool_b
     summary_message = next(message for message in result if message.conversation_summary is not None)
     summary_meta = summary_message.conversation_summary
     assert summary_meta is not None
-    assert todo_snapshot in summary_meta.content
+    assert summary_meta.content == "compacted"
+    assert summary_message.current_session_todo == todo_snapshot
     retained_tool = next(message for message in result if message.role == MessageRole.TOOL)
     fixed_tool = next(message for message in captured["fixed_request_messages"] if message.role == MessageRole.TOOL)
     assert retained_tool.content == retained_tool_content
+    assert retained_tool.current_session_todo == todo_snapshot
+    assert retained_tool.current_terminal_watch == watch_snapshot
     assert fixed_tool.content == retained_tool_content
+    assert fixed_tool.current_session_todo == todo_snapshot
+    assert fixed_tool.current_terminal_watch == watch_snapshot
     assert messages == original_messages
 
 
 @pytest.mark.asyncio
 async def test_checkpoint_uses_provider_baseline_even_when_todo_snapshot_exists(monkeypatch, db_session: AsyncSession):
     captured = {}
-    todo_snapshot = '<current_session_todo_snapshot>{"revision":16,"todos":[{"content":"verify","status":"in_progress"}]}</current_session_todo_snapshot>'
+    todo_snapshot = {"revision": 16, "todos": [{"content": "verify", "status": "in_progress"}]}
     session = ChatSession(
         session_id="session-1",
         uid="user-1",
@@ -971,12 +986,18 @@ async def test_checkpoint_uses_provider_baseline_even_when_todo_snapshot_exists(
         return ContextSummaryState(content=None, message_id=None)
 
     monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
-    tool_content = f"result\n\n{todo_snapshot}"
+    tool_content = "result"
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="system"),
         InternalMessage(id=1, role=MessageRole.USER, content="old"),
         InternalMessage(id=2, role=MessageRole.ASSISTANT, content="answer"),
-        InternalMessage(id=3, role=MessageRole.TOOL, tool_call_id="call-1", content=tool_content),
+        InternalMessage(
+            id=3,
+            role=MessageRole.TOOL,
+            tool_call_id="call-1",
+            content=tool_content,
+            current_session_todo=todo_snapshot,
+        ),
         InternalMessage(id=4, role=MessageRole.USER, content="current"),
     ]
 
@@ -1016,6 +1037,7 @@ async def test_checkpoint_uses_provider_baseline_even_when_todo_snapshot_exists(
     assert [(message.id, message.content) for message in result] == [(message.id, message.content) for message in messages]
     retained_tool = next(message for message in result if message.role == MessageRole.TOOL)
     assert retained_tool.content == tool_content
+    assert retained_tool.current_session_todo == todo_snapshot
 
 
 @pytest.mark.asyncio
@@ -1026,7 +1048,10 @@ async def test_checkpoint_keeps_an_entire_merged_user_batch_after_its_earliest_p
 
     async def ensure_summary(_db, **kwargs):
         captured.update(kwargs)
-        return ContextSummaryState(content="旧总结", message_id=2)
+        return ContextSummaryState(
+            content=StoredConversationSummary(conversation_summary="旧总结").model_dump_json(exclude_none=True),
+            message_id=2,
+        )
 
     monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
     merged_content = "追加A\n追加B"
@@ -1132,7 +1157,10 @@ async def test_checkpoint_preserves_logical_batches_when_physical_ids_run_in_rev
 
     async def ensure_summary(_db, **kwargs):
         captured.update(kwargs)
-        return ContextSummaryState(content="combined summary", message_id=2)
+        return ContextSummaryState(
+            content=StoredConversationSummary(conversation_summary="combined summary").model_dump_json(exclude_none=True),
+            message_id=2,
+        )
 
     monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
     logical_batches = [
@@ -1176,10 +1204,13 @@ async def test_checkpoint_preserves_logical_batches_when_physical_ids_run_in_rev
 
 @pytest.mark.asyncio
 async def test_persist_context_summary_rejects_stale_content_revision_then_accepts_retry(db_session: AsyncSession, monkeypatch):
+    prior_summary = StoredConversationSummary(conversation_summary="prior summary").model_dump_json(exclude_none=True)
+    stale_summary = StoredConversationSummary(conversation_summary="stale summary").model_dump_json(exclude_none=True)
+    fresh_summary = StoredConversationSummary(conversation_summary="fresh summary").model_dump_json(exclude_none=True)
     session = ChatSession(
         session_id="session-cas",
         uid="user-1",
-        context_summary="prior summary",
+        context_summary=prior_summary,
         context_summary_message_id=8,
         context_summary_revision=4,
         context_content_revision=7,
@@ -1209,7 +1240,7 @@ async def test_persist_context_summary_rejects_stale_content_revision_then_accep
             expected_message_id=8,
             expected_revision=4,
             expected_content_revision=7,
-            summary="stale summary",
+            summary=stale_summary,
             message_id=12,
         ),
         timeout=1,
@@ -1221,7 +1252,7 @@ async def test_persist_context_summary_rejects_stale_content_revision_then_accep
             expected_message_id=None,
             expected_revision=5,
             expected_content_revision=8,
-            summary="fresh summary",
+            summary=fresh_summary,
             message_id=12,
         ),
         timeout=1,
@@ -1231,7 +1262,9 @@ async def test_persist_context_summary_rejects_stale_content_revision_then_accep
     assert stale_updated is False
     assert retried_updated is True
     assert expected_content_revisions == [7, 8]
-    assert session.context_summary == "fresh summary"
+    assert session.context_summary == fresh_summary
+    stored_summary = StoredConversationSummary.model_validate_json(session.context_summary)
+    assert stored_summary.conversation_summary == "fresh summary"
     assert session.context_summary.count("fresh summary") == 1
     assert session.context_summary_message_id == 12
     assert session.context_summary_revision == 6
@@ -1242,10 +1275,11 @@ async def test_persist_context_summary_rejects_stale_content_revision_then_accep
 async def test_context_summary_lease_loss_after_candidate_generation_never_persists_old_result(db_session: AsyncSession, monkeypatch):
     connection = await db_session.connection()
     await connection.run_sync(SessionTodoPlan.__table__.create, checkfirst=True)
+    prior_summary = StoredConversationSummary(conversation_summary="prior summary").model_dump_json(exclude_none=True)
     session = ChatSession(
         session_id="session-lease",
         uid="user-1",
-        context_summary="prior summary",
+        context_summary=prior_summary,
         context_summary_message_id=8,
         context_summary_revision=4,
         context_content_revision=7,
@@ -1340,7 +1374,9 @@ async def test_context_summary_lease_loss_after_candidate_generation_never_persi
     await db_session.refresh(session)
 
     assert persist_calls == []
-    assert session.context_summary == "prior summary"
+    assert session.context_summary == prior_summary
+    stored_summary = StoredConversationSummary.model_validate_json(session.context_summary)
+    assert stored_summary.conversation_summary == "prior summary"
     assert session.context_summary_message_id == 8
     assert session.context_summary_revision == 4
     assert session.context_content_revision == 7

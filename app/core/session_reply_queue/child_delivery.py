@@ -407,10 +407,7 @@ async def acknowledge_observed_child_results(
         if stored.role != MessageRole.TOOL or stored.tool_call_id != observed_message.tool_call_id:
             continue
 
-        content_matches = stored.content == observed_message.content
-        if not content_matches and isinstance(stored.content, str) and isinstance(observed_message.content, str) and isinstance(persisted.model_context_suffix, str) and persisted.model_context_suffix:
-            content_matches = observed_message.content == f"{stored.content}\n\n{persisted.model_context_suffix}"
-        if not content_matches:
+        if stored.content != observed_message.content:
             continue
 
         try:

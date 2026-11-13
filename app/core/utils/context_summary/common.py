@@ -9,11 +9,16 @@ from app.core.constants import (
 )
 from app.core.exceptions import LLMException
 from app.core.i18n import t
+from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT, CONTEXT_SUMMARY_PROMPT
 from app.core.utils import context_messages
 from app.core.utils.assistant_files import model_visible_message_content
-from app.core.utils.context_summary.user_message_block import split_covered_user_message
 from app.core.utils.tokenizer import estimate_tokens
-from app.models.message import InternalConversationSummary, InternalMessage, MessageRole
+from app.models.message import (
+    InternalConversationSummary,
+    InternalMessage,
+    MessageRole,
+    StoredConversationSummary,
+)
 
 ContextSummaryWorkValidityChecker = Callable[[], Awaitable[bool]]
 
@@ -68,15 +73,17 @@ class ContextSummaryState:
     def as_message(self) -> InternalMessage | None:
         if not self.content or self.message_id is None:
             return None
-        model_summary, covered = split_covered_user_message(self.content)
+        stored = StoredConversationSummary.model_validate_json(self.content)
         message = InternalMessage(
             role=MessageRole.USER,
-            content=covered.content if covered is not None else None,
+            content=stored.user_message,
             conversation_summary=InternalConversationSummary(
                 through_message_id=self.message_id,
-                content=model_summary or "",
-                covered_user_message_id=covered.message_id if covered is not None else None,
+                content=stored.conversation_summary,
+                covered_user_message_id=stored.covered_user_message_id,
             ),
+            current_session_todo=stored.current_session_todo,
+            current_terminal_watch=stored.current_terminal_watch,
         )
         if self.covered_user_request is not None:
             message.environment_prompt = self.covered_user_request.environment_prompt
@@ -105,9 +112,39 @@ def serialize_message(message: InternalMessage) -> str:
 
 
 def join_messages(messages: list[InternalMessage]) -> str:
-    if not messages:
-        return "(none)"
-    return "\n".join(serialize_message(message) for message in messages)
+    return json.dumps(
+        {"message_chunks": [json.loads(serialize_message(message)) for message in messages]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def build_context_summary_prompt(
+    *,
+    message_chunks: list[dict] | None = None,
+    summary_fragments: list[dict] | None = None,
+    existing_summary: str | None = None,
+) -> str:
+    payload: dict[str, object] = {
+        "instructions": CONTEXT_SUMMARY_PROMPT,
+        "conversation_summary": existing_summary,
+    }
+    if message_chunks is not None:
+        payload["message_chunks"] = message_chunks
+    if summary_fragments is not None:
+        payload["summary_fragments"] = summary_fragments
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def build_context_summary_compress_prompt(summary: str) -> str:
+    return json.dumps(
+        {
+            "instructions": CONTEXT_SUMMARY_COMPRESS_PROMPT,
+            "conversation_summary": summary,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def estimate_summary_tokens(

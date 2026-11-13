@@ -2525,7 +2525,7 @@ async def test_confirmation_audit_decision_continues_without_forced_memory_recal
         captured_messages = captured_requests[0]["messages"]
         assert isinstance(captured_messages, list)
         original_shell_call_ids = {"original-shell-call-1", "original-shell-call-2"}
-        original_shell_results = {message.tool_call_id: json.loads(message.content or "{}") for message in captured_messages if isinstance(message, InternalMessage) and message.tool_call_id in original_shell_call_ids}
+        original_shell_results = {message.tool_call_id: json.loads(message.content or "{}")["tool_result"] for message in captured_messages if isinstance(message, InternalMessage) and message.tool_call_id in original_shell_call_ids}
         assert set(original_shell_results) == original_shell_call_ids
         for result in original_shell_results.values():
             assert result["status"] == "rejected"
@@ -3404,7 +3404,7 @@ async def test_confirmed_file_reaudit_rebinds_source_and_resumes_without_reexecu
                     ModelChannel(
                         id=1,
                         name="confirmation-reaudit-channel",
-                        api_key="test-api-key",
+                        api_key="enc:v1:test-api-key",
                         base_url="https://llm.invalid",
                         model_ids=[
                             {

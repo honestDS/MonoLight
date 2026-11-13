@@ -382,8 +382,6 @@ async def test_terminal_auto_watch_background_survives_snapshot_and_renewal(
     request_content = "Run the terminal command and keep watching it."
     later_request_content = "A later unrelated request must not replace the terminal context."
     purpose = "Keep watching this terminal until the process exits."
-    expected_snapshot_open = "<current_terminal_watch_snapshot>"
-    expected_snapshot_close = "</current_terminal_watch_snapshot>"
 
     async with terminal_auto_watch_database() as db:
         request_message = await save_message(
@@ -451,8 +449,7 @@ async def test_terminal_auto_watch_background_survives_snapshot_and_renewal(
             profile_id=PROFILE_ID,
         )
         assert snapshot is not None
-        snapshot_payload = json.loads(snapshot[len(expected_snapshot_open) : -len(expected_snapshot_close)])
-        terminal = next(item for item in snapshot_payload["terminals"] if item["terminal_session_id"] == TERMINAL_SESSION_ID)
+        terminal = next(item for item in snapshot["terminals"] if item["terminal_session_id"] == TERMINAL_SESSION_ID)
         assert terminal["terminal_session_id"] == TERMINAL_SESSION_ID
         assert terminal["status"] == TerminalSessionStatus.RUNNING.value
         assert terminal["command"] == "test-terminal-command"
@@ -504,8 +501,7 @@ async def test_terminal_auto_watch_background_survives_snapshot_and_renewal(
             profile_id=PROFILE_ID,
         )
         assert renewed_snapshot is not None
-        renewed_payload = json.loads(renewed_snapshot[len(expected_snapshot_open) : -len(expected_snapshot_close)])
-        renewed_terminal = next(item for item in renewed_payload["terminals"] if item["terminal_session_id"] == TERMINAL_SESSION_ID)
+        renewed_terminal = next(item for item in renewed_snapshot["terminals"] if item["terminal_session_id"] == TERMINAL_SESSION_ID)
         assert renewed_terminal["request_context"] == expected_request_context
         assert renewed_terminal["purpose"] == purpose
         assert later_request_content not in json.dumps(renewed_terminal, ensure_ascii=False)
@@ -531,11 +527,11 @@ async def test_terminal_auto_watch_background_survives_snapshot_and_renewal(
 
         summary_meta = compressed_messages[1].conversation_summary
         assert summary_meta is not None
-        assert summary_meta.content == f"{summary_base}\n\n{renewed_snapshot}"
+        assert summary_meta.content == summary_base
+        assert compressed_messages[0].current_terminal_watch is None
+        assert compressed_messages[1].current_terminal_watch == renewed_snapshot
 
-        compressed_snapshot = summary_meta.content[len(summary_base) + 2 :]
-        compressed_payload = json.loads(compressed_snapshot[len(expected_snapshot_open) : -len(expected_snapshot_close)])
-        compressed_terminal = next(item for item in compressed_payload["terminals"] if item["terminal_session_id"] == TERMINAL_SESSION_ID)
+        compressed_terminal = next(item for item in compressed_messages[1].current_terminal_watch["terminals"] if item["terminal_session_id"] == TERMINAL_SESSION_ID)
         assert compressed_terminal["request_context"] == expected_request_context
         assert compressed_terminal["purpose"] == purpose
 

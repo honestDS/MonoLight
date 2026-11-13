@@ -2104,7 +2104,7 @@ async def test_overlapping_image_rounds_keep_limits_and_replies_isolated(
                 if isinstance(resume, dict) and resume.get("type") == "external_work_resume":
                     external_tasks.extend(item for item in resume.get("tasks", []) if isinstance(item, dict))
             calls_by_id, outputs_by_id = _responses_function_item_maps(payload)
-            image_pairs.extend((call, json.loads(outputs_by_id[call_id]["output"])) for call_id, call in calls_by_id.items() if call.get("name") == "generate_image")
+            image_pairs.extend((call, json.loads(outputs_by_id[call_id]["output"])["tool_result"]) for call_id, call in calls_by_id.items() if call.get("name") == "generate_image")
             assert {item.get("task_id") for item in external_tasks} == set(task_by_id) and len(external_tasks) == len(task_by_id)
             for item in external_tasks:
                 task = task_by_id[item["task_id"]]

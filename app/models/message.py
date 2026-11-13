@@ -151,12 +151,22 @@ class InternalConversationSummary(BaseModel):
     covered_user_message_id: int | None = PyField(default=None, gt=0)
 
 
+class StoredConversationSummary(BaseModel):
+    conversation_summary: str
+    user_message: str | None = None
+    covered_user_message_id: int | None = PyField(default=None, gt=0)
+    current_session_todo: dict[str, Any] | None = None
+    current_terminal_watch: dict[str, Any] | None = None
+
+
 class InternalMessage(BaseModel):
     id: int | None = None
     role: MessageRole
     type: MessageType | None = None
     content: str | list[VoiceTextPart | TextPart | ImagePart | AudioPart | FilePart | MessagePart] | None = None
     conversation_summary: InternalConversationSummary | None = None
+    current_session_todo: dict[str, Any] | None = None
+    current_terminal_watch: dict[str, Any] | None = None
     reasoning_content: str | None = None
     refusal: str | None = None
     provider_metadata: dict[str, Any] | None = None

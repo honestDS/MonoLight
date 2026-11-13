@@ -1,3 +1,5 @@
+"""仅供一次性迁移读取历史用户原文包装。"""
+
 import base64
 import re
 from dataclasses import dataclass
@@ -35,20 +37,3 @@ def split_covered_user_message(summary: str | None) -> tuple[str | None, Covered
             content=decoded,
         ),
     )
-
-
-def append_covered_user_message(
-    model_summary: str | None,
-    *,
-    message_id: int | None,
-    content: str | None,
-) -> str | None:
-    clean_summary, _ = split_covered_user_message(model_summary)
-    if message_id is None or content is None:
-        return clean_summary
-
-    payload = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    block = f'<covered_user_message message_id="{message_id}" encoding="base64-utf8">\n{payload}\n</covered_user_message>'
-    if not clean_summary:
-        return block
-    return f"{clean_summary}\n\n{block}"

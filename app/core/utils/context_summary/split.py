@@ -1,3 +1,4 @@
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -29,7 +30,20 @@ def _message_chunk_content(
 ) -> str:
     if message.id is None:
         raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MESSAGE_ID_REQUIRED))
-    return f'<message_chunk message_id="{message.id}" role="{message.role.value}" part="{part_index}">\n{payload}\n</message_chunk>'
+    return json.dumps(
+        {
+            "message_chunks": [
+                {
+                    "message_id": message.id,
+                    "role": message.role.value,
+                    "part": part_index,
+                    "content": payload,
+                }
+            ]
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _largest_fitting_prefix(
@@ -73,16 +87,21 @@ def split_oversized_message(
         raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MESSAGE_ID_REQUIRED))
 
     serialized = serialize_message(message)
+    content = json.dumps(
+        {"message_chunks": [json.loads(serialized)]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     serialized_tokens = max(
         1,
-        estimate_tokens(serialized, model_id=model_id, protocol=protocol),
+        estimate_tokens(content, model_id=model_id, protocol=protocol),
     )
     if serialized_tokens <= max_unit_tokens:
         yield SummarySourceUnit(
             message_start_id=message.id,
             message_end_id=message.id,
             token_count=serialized_tokens,
-            content=serialized,
+            content=content,
         )
         return
 

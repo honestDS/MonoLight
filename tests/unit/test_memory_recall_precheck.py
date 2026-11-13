@@ -292,7 +292,7 @@ async def test_precheck_invalid_then_valid_corrects_once_without_polluting_main_
     ]
     assert requests[1][0][1].content == "unexpected body"
     assert requests[1][0][2].tool_call_id == "invalid-call"
-    assert json.loads(requests[1][0][2].content) == {"status": "ignored"}
+    assert json.loads(requests[1][0][2].content) == {"tool_result": {"status": "ignored"}}
     assert requests[1][0][3].role == MessageRole.USER
     correction = requests[1][0][3].content
     assert LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT in correction
@@ -313,21 +313,13 @@ async def test_precheck_invalid_then_valid_corrects_once_without_polluting_main_
 
 @pytest.mark.asyncio
 async def test_precheck_retry_reuses_clean_request_prefix_before_appending_correction(monkeypatch):
-    todo_snapshot = (
-        "<current_session_todo_snapshot>"
-        + json.dumps(
-            {
-                "revision": 7,
-                "todos": [
-                    {"content": "send yellow image", "status": "completed"},
-                    {"content": "find other colors", "status": "pending"},
-                ],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        + "</current_session_todo_snapshot>"
-    )
+    todo_snapshot = {
+        "revision": 7,
+        "todos": [
+            {"content": "send yellow image", "status": "completed"},
+            {"content": "find other colors", "status": "pending"},
+        ],
+    }
     context = _context(
         messages=[
             InternalMessage(
@@ -375,7 +367,8 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
                 id=6,
                 role=MessageRole.TOOL,
                 tool_call_id="history-tool",
-                content=f"TOOL_RESULT_PRIVATE_MARKER\n\n{todo_snapshot}",
+                content="TOOL_RESULT_PRIVATE_MARKER",
+                current_session_todo=todo_snapshot,
             ),
             InternalMessage(
                 id=7,
@@ -490,7 +483,7 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
     assert second_request[-3].model_dump(mode="json") == invalid.model_dump(mode="json")
     assert second_request[-2].role == MessageRole.TOOL
     assert second_request[-2].tool_call_id == "invalid-call"
-    assert json.loads(second_request[-2].content) == {"status": "ignored"}
+    assert json.loads(second_request[-2].content) == {"tool_result": {"status": "ignored"}}
     assert second_request[-1].role == MessageRole.USER
     assert second_request[-1].content == LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
     assert [message.model_dump(mode="json") for message in context.messages] == original_messages

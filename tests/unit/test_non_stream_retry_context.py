@@ -695,7 +695,7 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
         assert json.loads(request_messages[0].content)["user_message"] == "original request"
         assert request_messages[1].tool_calls[0].id == "tool-1"
         assert request_messages[2].tool_call_id == "tool-1"
-        assert request_messages[2].content == "1"
+        assert json.loads(request_messages[2].content) == {"tool_result": 1}
     assert all("用户消息" not in message and "User message" not in message for message in logger.info_messages)
     assert LLMResponse.model_validate(response).choices[0] == LLMChoice(
         message=LLMChoiceMessage(
@@ -1612,7 +1612,12 @@ async def test_stream_emits_todo_update_even_when_tool_output_is_hidden(monkeypa
         assert uid == "user-1"
         assert session_id == "session-1"
         assert len(tool_results) == 1
-        return '<current_session_todo_snapshot>{"revision":2,"todos":[{"content":"verify","status":"in_progress"}]}</current_session_todo_snapshot>'
+        snapshot = {
+            "revision": 2,
+            "todos": [{"content": "verify", "status": "in_progress"}],
+        }
+        tool_results[-1].current_session_todo = snapshot
+        return snapshot
 
     events, _unknown_calls = await _run_audited_interactive_dispatch(
         monkeypatch,

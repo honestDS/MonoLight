@@ -11,7 +11,7 @@ from app.core.tools.longterm_memory import (
 )
 from app.core.utils.context_summary.common import ContextSummaryState
 from app.models.channel import ChannelConfig
-from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole, MessageType
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole, MessageType, StoredConversationSummary
 from tests.memory_recall_support import memory_recall_payload
 
 
@@ -305,7 +305,10 @@ async def test_generate_commits_before_network_and_discards_stream_content(monke
 
 @pytest.mark.asyncio
 async def test_prepare_request_messages_exposes_only_memory_tool_without_triggering_new_summary(monkeypatch):
-    summary_message = ContextSummaryState(content="summary result", message_id=5).as_message()
+    summary_message = ContextSummaryState(
+        content=StoredConversationSummary(conversation_summary="summary result").model_dump_json(exclude_none=True),
+        message_id=5,
+    ).as_message()
     current_message = InternalMessage(id=10, role=MessageRole.USER, content="memory query secret")
     context = _context(messages=[summary_message, current_message])
     trim_calls = []

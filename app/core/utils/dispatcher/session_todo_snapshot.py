@@ -1,3 +1,4 @@
+import copy
 import json
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,26 +16,15 @@ __all__ = [
     "measure_session_todo_snapshot_tokens",
     "parse_session_todo_snapshot",
     "persist_session_todo_snapshot_on_tool_results",
-    "strip_session_todo_snapshot",
     "strip_session_todo_snapshots",
 ]
 
-_SNAPSHOT_OPEN = "<current_session_todo_snapshot>"
-_SNAPSHOT_CLOSE = "</current_session_todo_snapshot>"
 
-
-def parse_session_todo_snapshot(snapshot: str | None) -> dict[str, object] | None:
-    if not isinstance(snapshot, str) or not snapshot.startswith(_SNAPSHOT_OPEN) or not snapshot.endswith(_SNAPSHOT_CLOSE):
+def parse_session_todo_snapshot(snapshot: object) -> dict[str, object] | None:
+    if not isinstance(snapshot, dict):
         return None
-    payload_text = snapshot[len(_SNAPSHOT_OPEN) : -len(_SNAPSHOT_CLOSE)]
-    try:
-        payload = json.loads(payload_text)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    revision = payload.get("revision")
-    todos = payload.get("todos")
+    revision = snapshot.get("revision")
+    todos = snapshot.get("todos")
     if not isinstance(revision, int) or isinstance(revision, bool) or revision <= 0 or not isinstance(todos, list):
         return None
     normalized_todos: list[dict[str, str]] = []
@@ -49,7 +39,7 @@ def parse_session_todo_snapshot(snapshot: str | None) -> dict[str, object] | Non
     return {"revision": revision, "todos": normalized_todos}
 
 
-def _serialize_todo_snapshot(plan: SessionTodoPlan) -> str | None:
+def _build_todo_snapshot(plan: SessionTodoPlan) -> dict[str, object] | None:
     revision = plan.revision
     todos = plan.todos
     if not isinstance(revision, int) or isinstance(revision, bool) or revision <= 0 or not isinstance(todos, list):
@@ -65,16 +55,10 @@ def _serialize_todo_snapshot(plan: SessionTodoPlan) -> str | None:
             return None
         snapshot_todos.append({"content": content, "status": status})
 
-    payload = json.dumps(
-        {
-            "revision": revision,
-            "todos": snapshot_todos,
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    payload = payload.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
-    return f"{_SNAPSHOT_OPEN}{payload}{_SNAPSHOT_CLOSE}"
+    return {
+        "revision": revision,
+        "todos": snapshot_todos,
+    }
 
 
 async def load_current_session_todo_snapshot(
@@ -82,7 +66,7 @@ async def load_current_session_todo_snapshot(
     *,
     uid: str,
     session_id: str,
-) -> str | None:
+) -> dict[str, object] | None:
     session_exists, plan = await session_todo_crud.read(
         db,
         uid=uid,
@@ -90,63 +74,37 @@ async def load_current_session_todo_snapshot(
     )
     if not session_exists or plan is None:
         return None
-    return _serialize_todo_snapshot(plan)
-
-
-def strip_session_todo_snapshot(content: str | None) -> str | None:
-    if not isinstance(content, str) or not content.endswith(_SNAPSHOT_CLOSE):
-        return content
-
-    marker_index = content.rfind(f"\n\n{_SNAPSHOT_OPEN}")
-    if marker_index < 0:
-        return content
-
-    payload_start = marker_index + 2 + len(_SNAPSHOT_OPEN)
-    payload_end = len(content) - len(_SNAPSHOT_CLOSE)
-    try:
-        payload = json.loads(content[payload_start:payload_end])
-    except (TypeError, ValueError):
-        return content
-
-    if not isinstance(payload, dict) or not isinstance(payload.get("revision"), int) or not isinstance(payload.get("todos"), list):
-        return content
-    return content[:marker_index]
+    return _build_todo_snapshot(plan)
 
 
 def strip_session_todo_snapshots(messages: list[InternalMessage]) -> list[InternalMessage]:
     stripped: list[InternalMessage] = []
     for message in messages:
-        if message.role == MessageRole.TOOL and isinstance(message.content, str):
-            stripped.append(
-                message.model_copy(
-                    deep=True,
-                    update={"content": strip_session_todo_snapshot(terminal_watch_snapshot.strip_terminal_watch_snapshot(message.content))},
-                )
-            )
-        else:
-            stripped.append(message.model_copy(deep=True))
+        stripped_message = message.model_copy(deep=True)
+        stripped_message.current_session_todo = None
+        stripped_message.current_terminal_watch = None
+        stripped.append(stripped_message)
     return stripped
 
 
 def append_session_todo_snapshot(
     messages: list[InternalMessage],
-    snapshot: str | None,
+    snapshot: dict[str, object] | None,
 ) -> list[InternalMessage]:
     updated = [message.model_copy(deep=True) for message in messages]
-    if not snapshot:
+    for message in updated:
+        message.current_session_todo = None
+    if snapshot is None:
         return updated
 
     target = None
     for message in reversed(updated):
         if message.role != MessageRole.TOOL:
             continue
-        if not isinstance(message.content, str):
-            continue
         target = message
         break
     if target is not None:
-        base_content = strip_session_todo_snapshot(target.content) or ""
-        target.content = f"{base_content}\n\n{snapshot}" if base_content else snapshot
+        target.current_session_todo = copy.deepcopy(snapshot)
     else:
         for message in updated:
             if message.conversation_summary is not None:
@@ -155,16 +113,19 @@ def append_session_todo_snapshot(
         if target is None:
             return updated
 
-        base_content = strip_session_todo_snapshot(target.conversation_summary.content) or ""
-        target.conversation_summary.content = f"{base_content}\n\n{snapshot}" if base_content else snapshot
+        target.current_session_todo = copy.deepcopy(snapshot)
     return updated
 
 
-def measure_session_todo_snapshot_tokens(snapshot: str | None) -> int:
-    if not snapshot:
+def measure_session_todo_snapshot_tokens(snapshot: dict[str, object] | None) -> int:
+    if snapshot is None:
         return 0
-    # 独立估算追加片段会略偏保守，最终模型请求仍会按完整拼接后的消息再次做硬窗口校验。
-    return estimate_tokens(f"\n\n{snapshot}")
+    serialized = json.dumps(
+        {"current_session_todo": snapshot},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return estimate_tokens(serialized)
 
 
 async def persist_session_todo_snapshot_on_tool_results(
@@ -174,7 +135,7 @@ async def persist_session_todo_snapshot_on_tool_results(
     session_id: str,
     tool_results: list[InternalMessage],
     commit: bool = True,
-) -> str | None:
+) -> dict[str, object] | None:
     target = None
     for message in reversed(tool_results):
         if message.role != MessageRole.TOOL:
@@ -212,7 +173,12 @@ async def persist_session_todo_snapshot_on_tool_results(
             profile_id=stored.profile_id,
             message_work_id=stored.work_id,
         )
-        suffix = "\n\n".join(snapshot for snapshot in (todo_snapshot, watch_snapshot) if snapshot)
+        snapshot_payload: dict[str, object] = {}
+        if todo_snapshot is not None:
+            snapshot_payload["current_session_todo"] = todo_snapshot
+        if watch_snapshot is not None:
+            snapshot_payload["current_terminal_watch"] = watch_snapshot
+        suffix = json.dumps(snapshot_payload, ensure_ascii=False, separators=(",", ":"))
         await message_crud.update_model_context_suffix(
             db,
             message_id=stored.id,
@@ -231,8 +197,8 @@ async def persist_session_todo_snapshot_on_tool_results(
     parsed_messages = parse_db_messages_to_internal([stored])
     if not parsed_messages:
         return None
-    target.content = parsed_messages[0].content
-
-    suffix = stored.model_context_suffix
-    todo_snapshot = suffix.split("\n\n", 1)[0] if isinstance(suffix, str) else None
-    return todo_snapshot if parse_session_todo_snapshot(todo_snapshot) is not None else None
+    parsed_message = parsed_messages[0]
+    target.content = parsed_message.content
+    target.current_session_todo = copy.deepcopy(parsed_message.current_session_todo)
+    target.current_terminal_watch = copy.deepcopy(parsed_message.current_terminal_watch)
+    return target.current_session_todo

@@ -24,11 +24,12 @@ from app.core.constants import (
 from app.core.crud.context_summary.stage import context_summary_stage_crud
 from app.core.exceptions import LLMRequestRejectedException, find_llm_request_rejection
 from app.core.i18n import t
-from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT, CONTEXT_SUMMARY_PROMPT
 from app.core.utils.context_summary.common import (
     ContextSummaryOutputBudgetError,
     ContextSummaryWorkInvalidError,
     ContextSummaryWorkValidityChecker,
+    build_context_summary_compress_prompt,
+    build_context_summary_prompt,
     contains_context_summary_work_invalid,
     ensure_context_summary_work_valid,
     find_context_summary_output_budget_error,
@@ -68,10 +69,8 @@ class CompletedSummaryResult:
 
 
 def merge_fragment_prompt(fragment: SummaryFragmentInput) -> str:
-    return CONTEXT_SUMMARY_PROMPT.format(
-        existing_summary="(none)",
-        recent_dialogue="(none)",
-        conversation=fragment.content,
+    return build_context_summary_prompt(
+        summary_fragments=json.loads(fragment.content)["summary_fragments"],
     )
 
 
@@ -241,7 +240,11 @@ async def execute_reduction_stage(
             message_start_id=lower_stage.expected_summary_message_id or 1,
             message_end_id=lower_stage.persistent_summary_target_id,
             token_count=1,
-            content="(none)",
+            content=json.dumps(
+                {"summary_fragments": []},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
         )
     )
     max_group_tokens = model.input_budget_tokens - estimate_context_summary_prompt_tokens(model, empty_prompt) - 32
@@ -449,9 +452,7 @@ async def execute_refinement_stage(
     if lower_fragment is None or await anext(lower_fragments, None) is not None:
         raise RuntimeError(t(ERR_CONTEXT_SUMMARY_REFINEMENT_LOWER_INVALID))
 
-    prompt = CONTEXT_SUMMARY_COMPRESS_PROMPT.format(
-        summary=lower_fragment.content,
-    )
+    prompt = build_context_summary_compress_prompt(lower_fragment.content)
     prompt_tokens = estimate_context_summary_prompt_tokens(model, prompt)
     if not model.accepts_prompt_tokens(prompt_tokens):
         raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_INPUT_OVER_WINDOW, stage="refinement"))

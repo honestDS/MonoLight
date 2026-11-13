@@ -3,6 +3,7 @@ import json
 from app.models.message import (
     InternalMessage,
     MessagePart,
+    MessageRole,
     TextPart,
 )
 
@@ -42,15 +43,25 @@ def merge_user_message_contents(
 def message_token_text(msg: InternalMessage) -> str:
     if msg.tool_calls:
         return msg.model_dump_json(exclude_none=True)
-    if msg.conversation_summary is not None:
-        return json.dumps(
-            {
-                "conversation_summary": msg.conversation_summary.content,
-                "user_message": to_jsonable(msg.content),
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+    if msg.conversation_summary is not None or msg.current_session_todo is not None or msg.current_terminal_watch is not None:
+        payload: dict[str, object] = {}
+        if msg.role == MessageRole.TOOL:
+            tool_result = msg.content
+            if isinstance(tool_result, str):
+                try:
+                    tool_result = json.loads(tool_result)
+                except json.JSONDecodeError:
+                    pass
+            payload["tool_result"] = tool_result
+        else:
+            payload["user_message"] = to_jsonable(msg.content)
+        if msg.conversation_summary is not None:
+            payload["conversation_summary"] = msg.conversation_summary.content
+        if msg.current_session_todo is not None:
+            payload["current_session_todo"] = msg.current_session_todo
+        if msg.current_terminal_watch is not None:
+            payload["current_terminal_watch"] = msg.current_terminal_watch
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     if isinstance(msg.content, str):
         return msg.content
     if msg.content is None:

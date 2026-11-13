@@ -29,11 +29,11 @@ from app.core.crud.context_summary.stage import context_summary_stage_crud
 from app.core.exceptions import LLMRequestRejectedException, find_llm_request_rejection
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.prompts import CONTEXT_SUMMARY_PROMPT
 from app.core.utils.context_summary.common import (
     ContextSummaryOutputBudgetError,
     ContextSummaryWorkInvalidError,
     ContextSummaryWorkValidityChecker,
+    build_context_summary_prompt,
     contains_context_summary_work_invalid,
     ensure_context_summary_work_valid,
     find_context_summary_output_budget_error,
@@ -176,10 +176,10 @@ async def call_fixed_summary_model(
 
 
 def fragment_prompt(fragment: SummaryFragmentInput) -> str:
-    return CONTEXT_SUMMARY_PROMPT.format(
-        existing_summary=fragment.existing_summary or "(none)",
-        recent_dialogue="(none)",
-        conversation=fragment.content,
+    payload = json.loads(fragment.content)
+    return build_context_summary_prompt(
+        message_chunks=payload["message_chunks"],
+        existing_summary=fragment.existing_summary,
     )
 
 
@@ -372,10 +372,9 @@ async def generate_snapshot_summary_with_model(
             message_count=summarized_message_count,
         )
 
-    empty_prompt = CONTEXT_SUMMARY_PROMPT.format(
-        existing_summary=existing_summary or "(none)",
-        recent_dialogue="(none)",
-        conversation="(none)",
+    empty_prompt = build_context_summary_prompt(
+        message_chunks=[],
+        existing_summary=existing_summary,
     )
     prompt_overhead_tokens = estimate_context_summary_prompt_tokens(model, empty_prompt)
     max_fragment_tokens = model.input_budget_tokens - prompt_overhead_tokens - 32

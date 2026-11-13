@@ -293,7 +293,9 @@ class BackgroundDispatcherMixin:
             else:
                 system_prompt = await build_system_prompt(db, profile, include_longterm_memory=False)
                 if cleaned_platform_constraints:
-                    system_prompt = f"{system_prompt}\n\n{cleaned_platform_constraints}" if system_prompt.strip() else cleaned_platform_constraints
+                    system_prompt = json.loads(system_prompt)
+                    system_prompt["platform_constraints"] = cleaned_platform_constraints
+                    system_prompt = json.dumps(system_prompt, ensure_ascii=False, separators=(",", ":"))
                 messages = inject_system_prompt_text(
                     [message.model_copy(deep=True) for message in submission_context],
                     system_prompt,

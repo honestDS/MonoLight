@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -53,14 +54,6 @@ async def test_summary_recompresses_until_configured_threshold_goal(monkeypatch)
             return 400
         if "short summary" in content:
             return 20
-        if content.startswith("<conversation_summary>"):
-            if "long summary" in content:
-                return 450
-            if "medium summary" in content:
-                return 400
-            if "short summary" in content:
-                return 20
-            return 100
         return 50
 
     _patch_token_counter(monkeypatch, estimate_tokens)
@@ -80,14 +73,18 @@ async def test_summary_recompresses_until_configured_threshold_goal(monkeypatch)
         force=True,
     )
 
-    assert state.content == "short summary"
+    assert json.loads(state.content)["conversation_summary"] == "short summary"
     assert state.message_id == 4
     assert len(generated_calls) == 3
     assert len(update_calls) == 1
-    assert update_calls[0]["summary"] == "short summary"
-    assert "Further compress the summary below" in generated_calls[1]["messages"][0].content
-    assert "Further compress the summary below" in generated_calls[2]["messages"][0].content
-    assert "Conversation segment to compress" not in generated_calls[1]["messages"][0].content
+    assert json.loads(update_calls[0]["summary"])["conversation_summary"] == "short summary"
+    compression_requests = [json.loads(generated_calls[index]["messages"][0].content) for index in (1, 2)]
+    assert "Further compress the summary below" in compression_requests[0]["instructions"]
+    assert "Further compress the summary below" in compression_requests[1]["instructions"]
+    assert compression_requests[0]["conversation_summary"] == "long summary " * 40
+    assert compression_requests[1]["conversation_summary"] == "medium summary " * 10
+    assert "message_chunks" not in compression_requests[0]
+    assert "message_chunks" not in compression_requests[1]
     assert len(selected_calls) >= 1
 
 

@@ -1032,8 +1032,7 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
             assert json.loads(stored.content or "{}") == unknown and stored.tool_execution_status == "execution_unknown"
             recovered = checkpoint_tool_maps[0][call_id]
             assert recovered.id == row_id
-            if scenario != "missing_with_snapshots":
-                assert json.loads(recovered.content or "{}") == unknown
+            assert json.loads(recovered.content or "{}") == unknown
             assert recovered.tool_execution_status == "execution_unknown"
 
         if scenario == "missing_with_snapshots":
@@ -1047,12 +1046,19 @@ async def test_foreground_reply_restores_tool_results_before_dispatch(db_session
                 "error": PROMPT_TOOL_INTERRUPTED,
             }
             assert isinstance(real_row.model_context_suffix, str) and real_row.model_context_suffix
-            assert "<current_session_todo_snapshot>" in real_row.model_context_suffix
-            assert '"revision":3' in real_row.model_context_suffix
-            assert '"status":"in_progress"' in real_row.model_context_suffix
-            assert "<current_terminal_watch_snapshot>" in real_row.model_context_suffix
-            assert '"status":"pending"' in real_row.model_context_suffix
-            assert all(tool_map["call-1"].content == parsed_db_result.content for tool_map in checkpoint_tool_maps)
+            suffix_payload = json.loads(real_row.model_context_suffix)
+            assert suffix_payload["current_session_todo"] == {
+                "revision": 3,
+                "todos": [{"content": "restore todo", "status": "in_progress"}],
+            }
+            terminal_snapshot = suffix_payload["current_terminal_watch"]
+            assert terminal_snapshot["terminals"][0]["terminal_session_id"] == "terminal-session-1"
+            assert terminal_snapshot["terminals"][0]["latest_manual"]["status"] == "pending"
+            for tool_map in checkpoint_tool_maps:
+                checkpoint_tool = tool_map["call-1"]
+                assert checkpoint_tool.content == parsed_db_result.content
+                assert checkpoint_tool.current_session_todo == parsed_db_result.current_session_todo
+                assert checkpoint_tool.current_terminal_watch == parsed_db_result.current_terminal_watch
             if iteration == 0:
                 fixed_model_context_suffix = real_row.model_context_suffix
                 fixed_model_content = parsed_db_result.content

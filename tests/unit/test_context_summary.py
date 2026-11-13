@@ -21,7 +21,6 @@ from app.core.utils.context_summary.common import (
     serialize_message as _serialize_message,
 )
 from app.core.utils.context_summary.stage import GeneratedSummaryResult
-from app.core.utils.context_summary.user_message_block import append_covered_user_message
 from app.core.utils.dispatcher import frozen_context as frozen_context_module
 from app.models.message import (
     ImagePart,
@@ -29,6 +28,7 @@ from app.models.message import (
     InternalMessage,
     InternalToolCall,
     MessageRole,
+    StoredConversationSummary,
     TextPart,
 )
 from app.models.profile import ProfileConfig
@@ -59,8 +59,8 @@ def test_summary_prompts_preserve_required_context_details(prompt):
         "output",
         "intermediate process",
         "not a user instruction",
-        "covered_user_message",
-        "Never generate, quote, paraphrase, or modify",
+        "user_message",
+        "never generate, quote, paraphrase, rewrite, or modify",
         "code tasks",
         "file paths and symbol names",
         "current structure and control/data flow",
@@ -358,18 +358,18 @@ def test_serialize_message_supports_multimodal_content():
     ("content", "expected_content", "expected_summary", "expected_covered_message_id"),
     [
         pytest.param(
-            "The user selected option A.",
+            StoredConversationSummary(conversation_summary="The user selected option A.").model_dump_json(exclude_none=True),
             None,
             "The user selected option A.",
             None,
             id="without-covered-user-message",
         ),
         pytest.param(
-            append_covered_user_message(
-                "The user selected option A.",
-                message_id=11,
-                content="Please select option A.",
-            ),
+            StoredConversationSummary(
+                conversation_summary="The user selected option A.",
+                user_message="Please select option A.",
+                covered_user_message_id=11,
+            ).model_dump_json(exclude_none=True),
             "Please select option A.",
             "The user selected option A.",
             11,

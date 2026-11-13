@@ -29,7 +29,6 @@ from app.core.tools import longterm_memory as longterm_memory_module
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
 from app.core.utils.assistant_files import build_assistant_files_content
 from app.core.utils.context_summary import ContextSummaryState
-from app.core.utils.context_summary.user_message_block import append_covered_user_message
 from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.channel import ChannelConfig, ChannelRule, ModelChannel
@@ -59,6 +58,7 @@ from app.models.message import (
     MessageContentFormat,
     MessageRole,
     MessageType,
+    StoredConversationSummary,
     TextPart,
 )
 from app.models.profile import Profile, ProfileConfig
@@ -403,12 +403,15 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
     preserved_reasoning_content = "PRESERVED_INTERNAL_REASONING"
     preserved_provider_metadata = {"source": {"marker": "PRESERVED_PROVIDER_METADATA"}}
     summary_content = "Earlier background: The user is working on Python projects."
-    summary_content_with_covered_user = append_covered_user_message(
-        summary_content,
-        message_id=40 if covered_user_content is not None else None,
-        content=covered_user_content,
-    )
-    todo_snapshot = '<current_session_todo_snapshot>{"revision":7,"todos":[{"content":"STALE_TODO_MUST_NOT_LEAK","status":"pending"}]}</current_session_todo_snapshot>'
+    summary_content_with_covered_user = StoredConversationSummary(
+        conversation_summary=summary_content,
+        user_message=covered_user_content,
+        covered_user_message_id=40 if covered_user_content is not None else None,
+    ).model_dump_json(exclude_none=True)
+    todo_snapshot = {
+        "revision": 7,
+        "todos": [{"content": "STALE_TODO_MUST_NOT_LEAK", "status": "pending"}],
+    }
     current_user_content = "Which editor do I prefer?"
     current_attachment_path = None
     if input_kind == "image_attachment":
@@ -470,7 +473,8 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
             InternalMessage(
                 role=MessageRole.TOOL,
                 tool_call_id="private-tool-call-id",
-                content=f'{{"status":"ok","result":"PRIVATE_TOOL_RESULT_MUST_NOT_LEAK","download_url":"https://download.invalid/tool-result"}}\n\n{todo_snapshot}',
+                content='{"status":"ok","result":"PRIVATE_TOOL_RESULT_MUST_NOT_LEAK","download_url":"https://download.invalid/tool-result"}',
+                current_session_todo=todo_snapshot,
             ),
         ]
         if input_kind == "inline_image":
@@ -687,9 +691,9 @@ async def test_memory_recall_precheck_persists_executes_and_recovers_idempotentl
 
 @pytest.mark.parametrize("protocol", ["openai", "deepseek"])
 @pytest.mark.parametrize("dispatcher_mode", ["non_stream", "stream"])
-@pytest.mark.parametrize("first_response_kind", ["empty", "reasoning_only"])
+@pytest.mark.parametrize("first_response_kind", ["empty", "reasoning_only", "invalid_tool"])
 @pytest.mark.asyncio
-async def test_memory_recall_retries_empty_response_before_recall_and_persistence(
+async def test_memory_recall_retries_invalid_response_before_recall_and_persistence(
     memory_recall_session_factory,
     monkeypatch: pytest.MonkeyPatch,
     protocol: str,
@@ -746,6 +750,16 @@ async def test_memory_recall_retries_empty_response_before_recall_and_persistenc
         "top_k": 2,
     }
     invalid_reasoning = "FIRST_INVALID_REASONING_MUST_NOT_LEAK"
+    invalid_tool_arguments = {"operation": "recall", "query": "must not execute"}
+    invalid_tool_call = {
+        "id": "recall-call-invalid",
+        "type": "function",
+        "function": {
+            "name": "invalid_memory_tool",
+            "arguments": json.dumps(invalid_tool_arguments),
+        },
+    }
+    invalid_tool_call_id: str | None = None
     captured_payloads: list[dict[str, Any]] = []
 
     def build_response(request_index: int) -> dict[str, Any]:
@@ -753,6 +767,8 @@ async def test_memory_recall_retries_empty_response_before_recall_and_persistenc
             message: dict[str, Any] = {"role": "assistant", "content": None}
             if first_response_kind == "reasoning_only":
                 message["reasoning_content"] = invalid_reasoning
+            elif first_response_kind == "invalid_tool":
+                message["tool_calls"] = [invalid_tool_call]
         else:
             message = {
                 "role": "assistant",
@@ -772,7 +788,7 @@ async def test_memory_recall_retries_empty_response_before_recall_and_persistenc
             "id": f"chatcmpl-memory-recall-{request_index}",
             "object": "chat.completion",
             "model": "chat-model",
-            "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if request_index else "stop"}],
+            "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if message.get("tool_calls") else "stop"}],
             "usage": {"prompt_tokens": 120, "completion_tokens": 12, "total_tokens": 132},
         }
 
@@ -788,8 +804,15 @@ async def test_memory_recall_retries_empty_response_before_recall_and_persistenc
             delta = {"role": "assistant"}
             if first_response_kind == "reasoning_only":
                 delta["reasoning_content"] = invalid_reasoning
+            if first_response_kind == "invalid_tool":
+                raw_tool_call = build_response(request_index)["choices"][0]["message"]["tool_calls"][0]
+                delta["tool_calls"] = [{"index": 0, **raw_tool_call}]
             events = [
-                {"id": "chatcmpl-first", "model": "chat-model", "choices": [{"index": 0, "delta": delta, "finish_reason": "stop"}]},
+                {
+                    "id": "chatcmpl-first",
+                    "model": "chat-model",
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": "tool_calls" if first_response_kind == "invalid_tool" else "stop"}],
+                },
             ]
         else:
             raw_tool_call = build_response(request_index)["choices"][0]["message"]["tool_calls"][0]
@@ -884,10 +907,44 @@ async def test_memory_recall_retries_empty_response_before_recall_and_persistenc
     assert len(captured_payloads) == 2
     assert all(payload["tool_choice"] == "auto" for payload in captured_payloads)
     assert [payload["stream"] for payload in captured_payloads] == [dispatcher_mode == "stream"] * 2
-    assert captured_payloads[1]["messages"] == [
-        *captured_payloads[0]["messages"],
-        {"role": "user", "content": LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT},
-    ]
+    if first_response_kind == "invalid_tool":
+        first_messages = captured_payloads[0]["messages"]
+        second_messages = captured_payloads[1]["messages"]
+        assert second_messages[: len(first_messages)] == first_messages
+        invalid_suffix = second_messages[len(first_messages) :]
+        assert len(invalid_suffix) == 3
+        actual_invalid_tool_call_id = second_messages[len(first_messages)]["tool_calls"][0]["id"]
+        assert isinstance(actual_invalid_tool_call_id, str) and actual_invalid_tool_call_id
+        invalid_tool_call_id = actual_invalid_tool_call_id
+        invalid_assistant = {
+            "role": "assistant",
+            "content": "[tool_call]" if protocol == "openai" else None,
+            "tool_calls": [
+                {
+                    "id": actual_invalid_tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "invalid_memory_tool",
+                        "arguments": json.dumps(invalid_tool_arguments),
+                    },
+                }
+            ],
+        }
+        if protocol == "deepseek":
+            invalid_assistant["reasoning_content"] = ""
+        assert invalid_suffix[0] == invalid_assistant
+        assert invalid_suffix[1] == {
+            "role": "tool",
+            "content": '{"tool_result":{"status":"ignored"}}',
+            "tool_call_id": actual_invalid_tool_call_id,
+        }
+        assert json.loads(invalid_suffix[1]["content"]) == {"tool_result": {"status": "ignored"}}
+        assert invalid_suffix[2] == {"role": "user", "content": LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT}
+    else:
+        assert captured_payloads[1]["messages"] == [
+            *captured_payloads[0]["messages"],
+            {"role": "user", "content": LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT},
+        ]
     assert invalid_reasoning not in json.dumps(captured_payloads[1], ensure_ascii=False)
 
     async with memory_recall_session_factory() as db:
@@ -899,6 +956,9 @@ async def test_memory_recall_retries_empty_response_before_recall_and_persistenc
         assert len(persisted_assistant.tool_calls or []) == 1
         assert persisted_assistant.tool_calls[0].arguments == recall_arguments
         assert invalid_reasoning not in "\n".join(row.content or "" for row in rows)
+        assert all("invalid_memory_tool" not in (row.content or "") for row in rows)
+        if invalid_tool_call_id is not None:
+            assert all(invalid_tool_call_id not in (row.content or "") for row in rows)
         recalled_record = await db.get(LongTermMemoryRecord, memory_id)
         assert recalled_record is not None and recalled_record.last_recalled_at is not None
         assert recalled_record.content == "The user's preferred Python editor is VS Code."
@@ -1546,7 +1606,13 @@ async def test_memory_recall_precheck_skips_image_only_input(
             is_history=False,
         )
 
-    with_todo_snapshot = '<current_session_todo_snapshot>{"revision":8,"todos":[{"content":"Confirm VS Code preference","status":"pending"},{"content":"Review editor note","status":"completed"}]}</current_session_todo_snapshot>'
+    with_todo_snapshot = {
+        "revision": 8,
+        "todos": [
+            {"content": "Confirm VS Code preference", "status": "pending"},
+            {"content": "Review editor note", "status": "completed"},
+        ],
+    }
     context_messages = [
         InternalMessage(
             role=MessageRole.USER,
@@ -1558,7 +1624,11 @@ async def test_memory_recall_precheck_skips_image_only_input(
         ),
         InternalMessage(role=MessageRole.USER, content="I prefer VS Code as my editor for Python projects."),
         InternalMessage(role=MessageRole.ASSISTANT, content="Noted your VS Code editor preference."),
-        InternalMessage(role=MessageRole.TOOL, tool_call_id="existing-todo-tool-call", content=with_todo_snapshot),
+        InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id="existing-todo-tool-call",
+            current_session_todo=with_todo_snapshot,
+        ),
         source_current_message,
     ]
 

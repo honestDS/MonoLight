@@ -11,8 +11,6 @@ from app.core.constants import (
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
-from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshot
-from app.core.utils.dispatcher.terminal_watch_snapshot import strip_terminal_watch_snapshot
 from app.models.message import InternalMessage, InternalToolCall
 from app.models.session_reply_work_item import SessionReplyWorkStatus
 
@@ -27,7 +25,7 @@ def _build_external_wait_response(
 
     for tool_result in tool_results:
         try:
-            payload = json.loads(strip_session_todo_snapshot(strip_terminal_watch_snapshot(tool_result.content)) or "")
+            payload = json.loads(tool_result.content or "")
         except (TypeError, ValueError):
             continue
 
@@ -116,9 +114,8 @@ async def build_terminal_wait_response(
         ):
             continue
 
-        content = strip_session_todo_snapshot(strip_terminal_watch_snapshot(tool_result.content))
         try:
-            payload = json.loads(content or "")
+            payload = json.loads(tool_result.content or "")
         except (TypeError, ValueError):
             continue
         if not isinstance(payload, dict):

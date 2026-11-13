@@ -524,9 +524,11 @@ async def test_interactive_request_rejection_returns_failed_tool_result_to_chat(
             tool_messages = [message for message in kwargs["messages"] if message.role == MessageRole.TOOL and message.tool_call_id == "shell-call"]
             assert len(tool_messages) == 1
             tool_payload = json.loads(tool_messages[0].content or "{}")
-            assert set(tool_payload) == {"status", "error"}
-            assert tool_payload["status"] == expected_status.value
-            assert tool_payload["error"] == expected_error
+            assert set(tool_payload) == {"tool_result"}
+            tool_result = tool_payload["tool_result"]
+            assert set(tool_result) == {"status", "error"}
+            assert tool_result["status"] == expected_status.value
+            assert tool_result["error"] == expected_error
             assert PRIVATE_RESPONSE not in json.dumps(tool_payload, ensure_ascii=False)
             return InternalResponse(
                 message=InternalMessage(

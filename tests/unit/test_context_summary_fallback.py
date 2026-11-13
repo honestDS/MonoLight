@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -70,7 +71,11 @@ async def test_failed_layer_is_invalidated_and_resplit_for_fallback_model(monkey
                 message_start_id=fragment_index * 2 + 1,
                 message_end_id=fragment_index * 2 + 2,
                 token_count=100,
-                content=f"fragment-{fragment_index}",
+                content=json.dumps(
+                    {"message_chunks": [{"role": "user", "content": f"fragment-{fragment_index}"}]},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
             )
 
     async def call_model(*, model, prompt):

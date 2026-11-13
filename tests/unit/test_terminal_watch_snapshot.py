@@ -1,4 +1,3 @@
-import json
 from datetime import UTC, datetime
 
 import pytest
@@ -15,22 +14,12 @@ from app.core.utils.dispatcher.terminal_watch_snapshot import (
 from app.models.background_task import BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalConversationSummary, InternalMessage, MessageRole
 
-_SNAPSHOT_OPEN = "<current_terminal_watch_snapshot>"
-_SNAPSHOT_CLOSE = "</current_terminal_watch_snapshot>"
 
-
-def _decode_snapshot(snapshot: str) -> dict:
-    assert snapshot.startswith(_SNAPSHOT_OPEN)
-    assert snapshot.endswith(_SNAPSHOT_CLOSE)
-    return json.loads(snapshot[len(_SNAPSHOT_OPEN) : -len(_SNAPSHOT_CLOSE)])
-
-
-def _old_snapshot(name: str = "old") -> str:
-    payload = {
+def _old_snapshot(name: str = "old") -> dict:
+    return {
         "type": "terminal_watch_state",
         "terminals": [{"terminal_session_id": name}],
     }
-    return f"{_SNAPSHOT_OPEN}{json.dumps(payload, separators=(',', ':'))}{_SNAPSHOT_CLOSE}"
 
 
 def _watch_row(
@@ -133,7 +122,7 @@ async def test_load_snapshot_separates_manual_and_automatic_watch_state(monkeypa
     )
 
     assert snapshot is not None
-    payload = _decode_snapshot(snapshot)
+    payload = snapshot
     assert payload["type"] == "terminal_watch_state"
     assert payload["instruction"] == TERMINAL_WATCH_STATE_INSTRUCTION_PROMPT
     assert payload["manual_call_count"] == 2
@@ -196,38 +185,40 @@ async def test_load_snapshot_returns_none_without_watch_rows(monkeypatch):
     assert snapshot is None
 
 
-def test_strip_removes_only_valid_snapshots_from_tools_and_summaries():
-    valid = _old_snapshot()
-    invalid = f"{_SNAPSHOT_OPEN}{json.dumps({'type': 'other', 'terminals': []})}{_SNAPSHOT_CLOSE}"
+def test_strip_removes_snapshots_from_independent_fields_without_changing_messages():
     tool_base = '{"event":"output"}'
-    user_content = f"user text\n\n{valid}"
     summary_message = InternalMessage(
         role=MessageRole.USER,
         content="preserved original request",
         conversation_summary=InternalConversationSummary(
             through_message_id=10,
-            content=f"previous summary\n\n{valid}",
+            content="previous summary",
         ),
+        current_terminal_watch=_old_snapshot("summary"),
     )
     messages = [
-        InternalMessage(role=MessageRole.USER, content=user_content),
-        InternalMessage(role=MessageRole.TOOL, content=f"{tool_base}\n\n{valid}"),
-        InternalMessage(role=MessageRole.TOOL, content=f"{tool_base}\n\n{invalid}"),
-        InternalMessage(role=MessageRole.ASSISTANT, content=f"assistant\n\n{valid}"),
+        InternalMessage(role=MessageRole.USER, content="user text", current_terminal_watch=_old_snapshot("user")),
+        InternalMessage(role=MessageRole.TOOL, content=tool_base, current_terminal_watch=_old_snapshot("tool")),
+        InternalMessage(role=MessageRole.TOOL, content="other tool output", current_terminal_watch={"type": "other"}),
+        InternalMessage(role=MessageRole.ASSISTANT, content="assistant", current_terminal_watch=_old_snapshot("assistant")),
         summary_message,
     ]
     original = [message.model_dump(mode="json") for message in messages]
 
     stripped = strip_terminal_watch_snapshots(messages)
 
-    assert stripped[0].content == user_content
+    assert [message.content for message in stripped] == [
+        "user text",
+        tool_base,
+        "other tool output",
+        "assistant",
+        "preserved original request",
+    ]
     assert stripped[1].content == tool_base
-    assert stripped[2].content == f"{tool_base}\n\n{invalid}"
-    assert stripped[3].content == f"assistant\n\n{valid}"
     assert stripped[4].role == MessageRole.USER
-    assert stripped[4].content == "preserved original request"
     assert stripped[4].conversation_summary is not None
     assert stripped[4].conversation_summary.content == "previous summary"
+    assert all(message.current_terminal_watch is None for message in stripped)
     assert [message.model_dump(mode="json") for message in messages] == original
 
 
@@ -235,19 +226,19 @@ def test_append_strips_old_targets_without_mutating_inputs_or_user_messages():
     old = _old_snapshot()
     new = _old_snapshot("new")
     tool_base = '{"event":"output"}'
-    user_content = f"user request\n\n{old}"
     summary_message = InternalMessage(
         role=MessageRole.USER,
         content="preserved original request",
         conversation_summary=InternalConversationSummary(
             through_message_id=10,
-            content=f"previous summary\n\n{old}",
+            content="previous summary",
         ),
+        current_terminal_watch=_old_snapshot("summary"),
     )
     messages = [
-        InternalMessage(role=MessageRole.USER, content=user_content),
+        InternalMessage(role=MessageRole.USER, content="user request", current_terminal_watch=old),
         summary_message,
-        InternalMessage(role=MessageRole.TOOL, content=f"{tool_base}\n\n{old}"),
+        InternalMessage(role=MessageRole.TOOL, content=tool_base, current_terminal_watch=_old_snapshot("tool")),
     ]
     original = [message.model_dump(mode="json") for message in messages]
     summary_only = InternalMessage(
@@ -255,26 +246,36 @@ def test_append_strips_old_targets_without_mutating_inputs_or_user_messages():
         content="preserved original request",
         conversation_summary=InternalConversationSummary(
             through_message_id=10,
-            content=f"previous summary\n\n{old}",
+            content="previous summary",
         ),
+        current_terminal_watch=old,
     )
     summary_only_original = summary_only.model_dump(mode="json")
 
     updated = append_terminal_watch_snapshot(messages, new)
     summary_updated = append_terminal_watch_snapshot([summary_only], new)
 
-    assert updated[0].content == user_content
+    assert updated[0].content == "user request"
+    assert updated[0].current_terminal_watch is None
     assert updated[1].role == MessageRole.USER
     assert updated[1].content == "preserved original request"
     assert updated[1].conversation_summary is not None
     assert updated[1].conversation_summary.content == "previous summary"
-    assert updated[2].content == f"{tool_base}\n\n{new}"
+    assert updated[1].current_terminal_watch is None
+    assert updated[2].content == tool_base
+    assert updated[2].current_terminal_watch == new
     assert [message.model_dump(mode="json") for message in messages] == original
     assert summary_updated[0].role == MessageRole.USER
     assert summary_updated[0].content == "preserved original request"
     assert summary_updated[0].conversation_summary is not None
-    assert summary_updated[0].conversation_summary.content == f"previous summary\n\n{new}"
+    assert summary_updated[0].conversation_summary.content == "previous summary"
+    assert summary_updated[0].current_terminal_watch == new
+    assert len(summary_updated) == 1
     assert summary_only.model_dump(mode="json") == summary_only_original
+
+    updated[2].current_terminal_watch["terminals"][0]["terminal_session_id"] = "changed"
+    assert new["terminals"][0]["terminal_session_id"] == "new"
+    assert messages[2].current_terminal_watch == _old_snapshot("tool")
 
 
 def test_append_handles_no_target_and_no_snapshot_without_adding_to_user():
@@ -284,7 +285,7 @@ def test_append_handles_no_target_and_no_snapshot_without_adding_to_user():
 
     without_target = append_terminal_watch_snapshot([user, assistant], snapshot)
     without_snapshot = append_terminal_watch_snapshot(
-        [InternalMessage(role=MessageRole.TOOL, content=f"tool result\n\n{snapshot}")],
+        [InternalMessage(role=MessageRole.TOOL, content="tool result", current_terminal_watch=snapshot)],
         None,
     )
     unchanged = strip_terminal_watch_snapshots(
@@ -294,11 +295,14 @@ def test_append_handles_no_target_and_no_snapshot_without_adding_to_user():
         ]
     )
 
+    assert [message.role for message in without_target] == [MessageRole.USER, MessageRole.ASSISTANT]
     assert [message.content for message in without_target] == ["user request", "assistant response"]
-    assert all(snapshot not in (message.content or "") for message in without_target)
+    assert all(message.current_terminal_watch is None for message in without_target)
     assert without_snapshot[0].content == "tool result"
+    assert without_snapshot[0].current_terminal_watch is None
     assert [message.content for message in unchanged] == ["plain tool result", "plain user message"]
 
 
 def test_measure_snapshot_tokens_is_positive_for_a_snapshot():
     assert measure_terminal_watch_snapshot_tokens(_old_snapshot()) > 0
+    assert measure_terminal_watch_snapshot_tokens(None) == 0

@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -65,7 +66,11 @@ async def test_grouped_summary_source_units_follows_balanced_plan_without_splitt
                 message_start_id=index,
                 message_end_id=index,
                 token_count=token_count,
-                content=f"unit-{index}",
+                content=json.dumps(
+                    {"message_chunks": [{"role": "user", "content": f"unit-{index}"}]},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
             )
 
     plan = build_balanced_fragment_plan(
@@ -85,9 +90,14 @@ async def test_grouped_summary_source_units_follows_balanced_plan_without_splitt
         (1, 1, 40),
         (2, 3, 42),
     ]
-    assert fragments[0].content == "unit-1"
+    assert json.loads(fragments[0].content)["message_chunks"] == [
+        {"role": "user", "content": "unit-1"},
+    ]
     assert fragments[0].existing_summary == "existing"
-    assert fragments[1].content == "unit-2\nunit-3"
+    assert json.loads(fragments[1].content)["message_chunks"] == [
+        {"role": "user", "content": "unit-2"},
+        {"role": "user", "content": "unit-3"},
+    ]
     assert fragments[1].existing_summary is None
 
     resumed = [

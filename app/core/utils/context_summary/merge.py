@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
@@ -36,9 +37,23 @@ def _format_completed_fragment(
     *,
     part_index: int | None = None,
     content: str | None = None,
-) -> str:
-    part_attribute = f' part="{part_index}"' if part_index is not None else ""
-    return f'<summary_fragment index="{fragment.fragment_index}" from_message_id="{fragment.message_start_id}" through_message_id="{fragment.message_end_id}"{part_attribute}>\n{fragment.content if content is None else content}\n</summary_fragment>'
+) -> dict[str, object]:
+    formatted_fragment: dict[str, object] = {
+        "index": fragment.fragment_index,
+        "from_message_id": fragment.message_start_id,
+        "through_message_id": fragment.message_end_id,
+    }
+    if part_index is not None:
+        formatted_fragment["part"] = part_index
+    if content is None:
+        formatted_fragment["content"] = fragment.content
+    else:
+        formatted_fragment["content"] = content
+    return formatted_fragment
+
+
+def _serialize_summary_fragments(fragments: list[dict[str, object]]) -> str:
+    return json.dumps({"summary_fragments": fragments}, ensure_ascii=False, separators=(",", ":"))
 
 
 def _split_completed_fragment(
@@ -46,12 +61,12 @@ def _split_completed_fragment(
     *,
     max_group_tokens: int,
     token_counter: Callable[[str], int],
-) -> list[str]:
+) -> list[dict[str, object]]:
     whole = _format_completed_fragment(fragment)
-    if token_counter(whole) <= max_group_tokens:
+    if token_counter(_serialize_summary_fragments([whole])) <= max_group_tokens:
         return [whole]
 
-    parts: list[str] = []
+    parts: list[dict[str, object]] = []
     remaining = fragment.content
     part_index = 0
     while remaining:
@@ -65,7 +80,7 @@ def _split_completed_fragment(
                 part_index=part_index,
                 content=remaining[:middle],
             )
-            if token_counter(candidate) <= max_group_tokens:
+            if token_counter(_serialize_summary_fragments([candidate])) <= max_group_tokens:
                 best = middle
                 low = middle + 1
             else:
@@ -181,7 +196,7 @@ async def group_completed_summary_fragments(
         raise ValueError(t(ERR_VALUE_MUST_BE_NON_NEGATIVE, field="first_group_index"))
 
     group_index = 0
-    group_parts: list[str] = []
+    group_parts: list[dict[str, object]] = []
     group_token_floor = 0
     group_start_id: int | None = None
     group_end_id: int | None = None
@@ -193,7 +208,7 @@ async def group_completed_summary_fragments(
     def build_group() -> SummaryFragmentInput:
         if group_start_id is None or group_end_id is None:
             raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MERGE_GROUP_EMPTY))
-        content = "\n".join(group_parts)
+        content = _serialize_summary_fragments(group_parts)
         return SummaryFragmentInput(
             fragment_index=group_index,
             message_start_id=group_start_id,
@@ -217,25 +232,21 @@ async def group_completed_summary_fragments(
             token_counter=token_counter,
         )
         fragment_range = (fragment.message_start_id, fragment.message_end_id)
-        fragment_isolated = (
-            fragment.message_start_id != fragment.message_end_id
-            and (
-                len(parts) > 1
-                or repeated_range
-                or (
-                    next_fragment is not None
-                    and (next_fragment.message_start_id, next_fragment.message_end_id) == fragment_range
-                )
-            )
-        )
-        isolation_boundary = (
-            previous_message_start_id is not None
-            and fragment_range != (previous_message_start_id, previous_message_end_id)
-            and (fragment_isolated or previous_fragment_isolated)
-        )
+        next_fragment_same_range = False
+        if next_fragment is not None:
+            next_fragment_same_range = (
+                next_fragment.message_start_id,
+                next_fragment.message_end_id,
+            ) == fragment_range
+        fragment_isolated = False
+        if fragment.message_start_id != fragment.message_end_id:
+            fragment_isolated = len(parts) > 1 or repeated_range or next_fragment_same_range
+        isolation_boundary = False
+        if previous_message_start_id is not None and fragment_range != (previous_message_start_id, previous_message_end_id):
+            isolation_boundary = fragment_isolated or previous_fragment_isolated
         for part_index, part in enumerate(parts):
-            part_token_floor = max(1, token_counter(part))
-            candidate_content = "\n".join([*group_parts, part])
+            part_token_floor = max(1, token_counter(_serialize_summary_fragments([part])))
+            candidate_content = _serialize_summary_fragments([*group_parts, part])
             candidate_token_floor = group_token_floor + part_token_floor
             candidate_tokens = max(
                 candidate_token_floor,

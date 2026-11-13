@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -142,11 +143,21 @@ def _patch_multifragment_completion_barrier(
                     message_start_id=start_id,
                     message_end_id=end_id,
                     token_count=500,
-                    content=f"fragment-input-{fragment_index}",
+                    content=json.dumps(
+                        {
+                            "message_chunks": [
+                                {
+                                    "role": "user",
+                                    "content": f"fragment-input-{fragment_index}",
+                                }
+                            ]
+                        },
+                        separators=(",", ":"),
+                    ),
                 )
 
     async def call_model(*, model, prompt):
-        return f"summary-{prompt[-1]}"
+        return f"summary-{json.loads(prompt)['message_chunks'][0]['content'][-1]}"
 
     async def create_stage(_db, *, stage):
         stage.succeeded_fragment_count = persisted_fragment_count

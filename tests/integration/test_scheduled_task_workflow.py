@@ -65,7 +65,6 @@ from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT, AUDIT_TAS
 from app.core.session_reply_queue.executor_resume import restore_interactive_tool_replies
 from app.core.tools.scheduled_tasks import ManageScheduledTasksExecutor
 from app.core.utils.context_summary import ContextSummaryState, ContextSummaryTriggerMode
-from app.core.utils.context_summary.user_message_block import append_covered_user_message
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.time import get_local_time
@@ -73,7 +72,7 @@ from app.models.agent_work import AgentWorkReportTarget, AgentWorkSpec
 from app.models.audit import AuditConfirmationClaim, AuditExecutionRecord, AuditFailureType, AuditRecord, AuditRecordStatus, AuditToolConclusion, AuditToolDetail
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.channel import ModelChannel
-from app.models.message import ImagePart, InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
+from app.models.message import ImagePart, InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType, StoredConversationSummary
 from app.models.profile import Profile, ProfileConfig
 from app.models.scheduled_task import ScheduledTask, ScheduledTaskStatus
 from app.models.session import ChatSession
@@ -1030,7 +1029,7 @@ async def test_llm_workflow_creates_lists_and_deletes_scheduled_task(
         for message in reversed(messages):
             if message.role == MessageRole.TOOL and message.tool_call_id == call_id:
                 assert isinstance(message.content, str)
-                result = json.loads(message.content)
+                result = json.loads(message.content)["tool_result"]
                 assert isinstance(result, dict)
                 return result
         raise AssertionError(f"No tool result found for {call_id}")
@@ -2702,7 +2701,7 @@ async def test_scheduled_task_audit_block_then_safe_read_finishes_with_original_
     def tool_result_payload(messages: list[InternalMessage], tool_call_id: str) -> dict[str, Any]:
         matching = [message for message in messages if message.role == MessageRole.TOOL and message.tool_call_id == tool_call_id]
         assert len(matching) == 1
-        payload = json.loads(matching[0].content or "{}")
+        payload = json.loads(matching[0].content or "{}")["tool_result"]
         assert isinstance(payload, dict)
         return payload
 
@@ -4750,7 +4749,7 @@ async def test_scheduled_agent_work_context_overflow_checkpoint_resume(
             assert multimodal_tool_call.arguments == {"path": str(image_path)}
             multimodal_tool_result_message = next(message for message in messages if message.role == MessageRole.TOOL and message.tool_call_id == multimodal_tool_call_id)
             assert multimodal_tool_result_message.tool_execution_status == "succeeded"
-            assert json.loads(multimodal_tool_result_message.content) == multimodal_tool_result
+            assert json.loads(multimodal_tool_result_message.content)["tool_result"] == multimodal_tool_result
             assert messages[-1].role == MessageRole.USER
             assert isinstance(messages[-1].content, list)
             assert any(isinstance(part, ImagePart) for part in messages[-1].content)
@@ -4843,11 +4842,11 @@ async def test_scheduled_agent_work_context_overflow_checkpoint_resume(
                     InternalMessage(role=MessageRole.TOOL, tool_call_id=multimodal_tool_call_id, content=json.dumps(multimodal_tool_result, ensure_ascii=False), tool_execution_status="succeeded"),
                 ]
             else:
-                existing_summary = append_covered_user_message(
-                    existing_summary_marker + " " + ("entry " * 6500),
-                    message_id=trigger_message.id,
-                    content=task_instruction,
-                )
+                existing_summary = StoredConversationSummary(
+                    conversation_summary=existing_summary_marker + " " + ("entry " * 6500),
+                    user_message=task_instruction,
+                    covered_user_message_id=trigger_message.id,
+                ).model_dump_json(exclude_none=True)
                 assert existing_summary is not None
                 summary_message = ContextSummaryState(
                     content=existing_summary,
@@ -5020,7 +5019,11 @@ async def test_scheduled_task_context_overflow_routes_fallback_and_persists_noti
         trigger_id = execution_state["agent_work"]["instruction_message_id"]
         trigger_message = await claim_db.get(Message, trigger_id)
         assert trigger_message is not None and trigger_message.id == trigger_id
-        existing_summary = append_covered_user_message("已有简短摘要", message_id=trigger_message.id, content=trigger_message.content)
+        existing_summary = StoredConversationSummary(
+            conversation_summary="已有简短摘要",
+            user_message=trigger_message.content,
+            covered_user_message_id=trigger_message.id,
+        ).model_dump_json(exclude_none=True)
         assert existing_summary is not None
         summary_message = ContextSummaryState(content=existing_summary, message_id=trigger_message.id).as_message()
         assert summary_message is not None

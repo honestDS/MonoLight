@@ -47,7 +47,7 @@ async def test_background_summary_request_keeps_tool_result_protocol_chain(monke
 
     async def fake_build_system_prompt(_db, _profile, *, include_longterm_memory):
         assert include_longterm_memory is False
-        return "system"
+        return json.dumps({"message_contract": "system prompt"})
 
     async def fake_generate_chat_with_fallback(_db, **kwargs):
         request_messages = kwargs["request_builder"](
@@ -123,7 +123,7 @@ async def test_background_summary_submission_context_skips_shared_summary_checkp
 
     async def fake_build_system_prompt(_db, _profile, *, include_longterm_memory):
         assert include_longterm_memory is False
-        return "system"
+        return json.dumps({"message_contract": "system prompt"})
 
     async def unexpected_shared_summary(*_args, **_kwargs):
         raise AssertionError("frozen submission context must not read or mutate shared summary")
@@ -187,7 +187,7 @@ def assert_rejected_feedback(request, tool_call_id, correction_prompt, *, expect
     messages = request["messages"]
     tool_index = next(index for index, message in enumerate(messages) if message.role == MessageRole.TOOL and message.tool_call_id == tool_call_id)
     assert any(message.role == MessageRole.ASSISTANT and any(call.id == tool_call_id for call in message.tool_calls or []) for message in messages[:tool_index])
-    feedback = json.loads(messages[tool_index].content)
+    feedback = json.loads(messages[tool_index].content)["tool_result"]
     if expect_rejected:
         assert feedback["status"] == "rejected"
         assert feedback["executed"] is False
@@ -287,7 +287,7 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
     requests = []
     tool_execution_calls = []
     saved_messages = []
-    todo_snapshot = '<current_session_todo_snapshot>{"revision":2,"todos":[{"content":"finish","status":"in_progress"}]}</current_session_todo_snapshot>'
+    todo_snapshot = {"revision": 2, "todos": [{"content": "finish", "status": "in_progress"}]}
     original_user_content = "请生成图片"
     original_user_guidance = "原始渠道指导"
     original_platform_constraints = "仅限当前聊天渠道"
@@ -401,7 +401,7 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
 
     async def fake_persist_todo_snapshot(_db, *, uid, session_id, tool_results):
         if tool_results:
-            tool_results[-1].content = f"{tool_results[-1].content}\n\n{todo_snapshot}"
+            tool_results[-1].current_session_todo = todo_snapshot
         return todo_snapshot
 
     monkeypatch.setattr(background_module.user_crud, "get_by_uid", fake_get_user)
@@ -479,8 +479,9 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
     for request in final_phase_requests:
         execution_results = [message.content for message in request["messages"] if message.role == MessageRole.TOOL and message.tool_call_id == initial_tool_call.id]
         assert len(execution_results) == 1
-        assert '{"status":"success"}' in execution_results[0]
-        assert todo_snapshot in execution_results[0]
+        execution_result = json.loads(execution_results[0])
+        assert execution_result["tool_result"] == {"status": "success"}
+        assert execution_result["current_session_todo"] == todo_snapshot
 
     for rejected_index, rejected_call in enumerate(rejected_tool_calls):
         correction_request_index = rejected_index + 2

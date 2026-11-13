@@ -18,7 +18,7 @@ from app.core.utils.context_summary.common import (
     ContextSummaryWorkInvalidError,
 )
 from app.core.utils.context_summary.model_call import CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalMessage, MessageRole, StoredConversationSummary
 from tests.unit.context_summary_service_test_support import (
     _patch_summary_dependencies,
     _patch_token_counter,
@@ -51,8 +51,14 @@ async def test_complete_candidate_including_covered_user_block_must_reduce_repla
         return 50
 
     def estimate_tokens(content, **_kwargs):
-        if "<covered_user_message " in content:
+        try:
+            payload = json.loads(content)
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("user_message") == "必须逐字保留的当前目标与验收约束" and payload.get("conversation_summary") == "compressed history":
             return 60
+        if isinstance(payload, dict) and payload.get("conversation_summary") == "compressed history":
+            return 10
         if "compressed history" in content:
             return 10
         if content.startswith('{"role":'):
@@ -164,7 +170,9 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
     )
 
     assert state == ContextSummaryState(
-        content="compressed history",
+        content=StoredConversationSummary(
+            conversation_summary="compressed history",
+        ).model_dump_json(exclude_none=True),
         message_id=4,
         revision=1,
     )
@@ -176,7 +184,9 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
             "expected_message_id": None,
             "expected_revision": 0,
             "expected_content_revision": 0,
-            "summary": "compressed history",
+            "summary": StoredConversationSummary(
+                conversation_summary="compressed history",
+            ).model_dump_json(exclude_none=True),
             "message_id": 4,
         }
     ]
@@ -258,7 +268,9 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
     )
 
     assert at_fifty_state == ContextSummaryState(
-        content="compressed history",
+        content=StoredConversationSummary(
+            conversation_summary="compressed history",
+        ).model_dump_json(exclude_none=True),
         message_id=4,
         revision=1,
     )
@@ -304,7 +316,9 @@ async def test_context_summary_force_bypasses_threshold(monkeypatch):
     )
 
     assert state == ContextSummaryState(
-        content="compressed history",
+        content=StoredConversationSummary(
+            conversation_summary="compressed history",
+        ).model_dump_json(exclude_none=True),
         message_id=4,
         revision=1,
     )
@@ -542,7 +556,9 @@ async def test_context_summary_confirmed_provider_threshold_allows_tool_definiti
     )
 
     assert state == ContextSummaryState(
-        content="compressed history",
+        content=StoredConversationSummary(
+            conversation_summary="compressed history",
+        ).model_dump_json(exclude_none=True),
         message_id=4,
         revision=1,
     )
@@ -621,9 +637,17 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
     lifecycle_events = []
     states = iter(
         [
-            ContextSummaryState(content="old summary", message_id=8, revision=3),
             ContextSummaryState(
-                content="newer concurrent summary",
+                content=StoredConversationSummary(
+                    conversation_summary="old summary",
+                ).model_dump_json(exclude_none=True),
+                message_id=8,
+                revision=3,
+            ),
+            ContextSummaryState(
+                content=StoredConversationSummary(
+                    conversation_summary="newer concurrent summary",
+                ).model_dump_json(exclude_none=True),
                 message_id=12,
                 revision=4,
                 content_revision=7,
@@ -664,7 +688,9 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
     )
 
     assert state == ContextSummaryState(
-        content="newer concurrent summary",
+        content=StoredConversationSummary(
+            conversation_summary="newer concurrent summary",
+        ).model_dump_json(exclude_none=True),
         message_id=12,
         revision=4,
         content_revision=7,

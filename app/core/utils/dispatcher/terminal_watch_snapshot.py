@@ -1,3 +1,4 @@
+import copy
 import json
 from collections.abc import Mapping
 from datetime import datetime
@@ -15,13 +16,10 @@ __all__ = [
     "append_terminal_watch_snapshot",
     "load_current_terminal_watch_snapshot",
     "measure_terminal_watch_snapshot_tokens",
-    "strip_terminal_watch_snapshot",
     "strip_terminal_watch_snapshots",
 ]
 
 
-_SNAPSHOT_OPEN = "<current_terminal_watch_snapshot>"
-_SNAPSHOT_CLOSE = "</current_terminal_watch_snapshot>"
 _ACTIVE_STATUSES = {"pending", "running"}
 _PENDING_RESULT_STATUSES = {"succeeded", "failed"}
 _PENDING_REPLY_STATUSES = {"pending", "running"}
@@ -42,16 +40,6 @@ def _created_at_value(value: Any) -> str | None:
     if isinstance(value, str):
         return value
     return None
-
-
-def _snapshot_json(payload: dict[str, Any]) -> str:
-    serialized = json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    serialized = serialized.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
-    return f"{_SNAPSHOT_OPEN}{serialized}{_SNAPSHOT_CLOSE}"
 
 
 def _latest_task(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -107,7 +95,7 @@ async def load_current_terminal_watch_snapshot(
     session_id: str,
     profile_id: int,
     message_work_id: int | None = None,
-) -> str | None:
+) -> dict[str, Any] | None:
     if not isinstance(db, AsyncSession):
         return None
     if not _is_positive_int(profile_id):
@@ -183,72 +171,35 @@ async def load_current_terminal_watch_snapshot(
     if not terminals:
         return None
 
-    return _snapshot_json(
-        {
-            "type": "terminal_watch_state",
-            "instruction": TERMINAL_WATCH_STATE_INSTRUCTION_PROMPT,
-            "manual_call_count": manual_call_count,
-            "automatic_observation_count": automatic_observation_count,
-            "terminals": list(terminals.values()),
-        }
-    )
-
-
-def _valid_snapshot_payload(snapshot: str) -> bool:
-    if not isinstance(snapshot, str) or not snapshot.startswith(_SNAPSHOT_OPEN) or not snapshot.endswith(_SNAPSHOT_CLOSE):
-        return False
-    payload_text = snapshot[len(_SNAPSHOT_OPEN) : -len(_SNAPSHOT_CLOSE)]
-    try:
-        payload = json.loads(payload_text)
-    except (TypeError, ValueError):
-        return False
-    return isinstance(payload, dict) and payload.get("type") == "terminal_watch_state" and isinstance(payload.get("terminals"), list)
-
-
-def strip_terminal_watch_snapshot(content: str | None) -> str | None:
-    if not isinstance(content, str) or not content.endswith(_SNAPSHOT_CLOSE):
-        return content
-
-    if content.startswith(_SNAPSHOT_OPEN):
-        if _valid_snapshot_payload(content):
-            return ""
-        return content
-
-    marker_index = content.rfind(f"\n\n{_SNAPSHOT_OPEN}")
-    if marker_index < 0:
-        return content
-    snapshot = content[marker_index + 2 :]
-    if not _valid_snapshot_payload(snapshot):
-        return content
-    return content[:marker_index]
+    return {
+        "type": "terminal_watch_state",
+        "instruction": TERMINAL_WATCH_STATE_INSTRUCTION_PROMPT,
+        "manual_call_count": manual_call_count,
+        "automatic_observation_count": automatic_observation_count,
+        "terminals": list(terminals.values()),
+    }
 
 
 def strip_terminal_watch_snapshots(messages: list[InternalMessage]) -> list[InternalMessage]:
     stripped: list[InternalMessage] = []
     for message in messages:
         stripped_message = message.model_copy(deep=True)
-        if stripped_message.role == MessageRole.TOOL and isinstance(stripped_message.content, str):
-            stripped_message.content = strip_terminal_watch_snapshot(stripped_message.content)
-        conversation_summary = stripped_message.conversation_summary
-        if conversation_summary is not None:
-            conversation_summary.content = strip_terminal_watch_snapshot(conversation_summary.content)
+        stripped_message.current_terminal_watch = None
         stripped.append(stripped_message)
     return stripped
 
 
 def append_terminal_watch_snapshot(
     messages: list[InternalMessage],
-    snapshot: str | None,
+    snapshot: dict[str, Any] | None,
 ) -> list[InternalMessage]:
     updated = strip_terminal_watch_snapshots(messages)
-    if not snapshot:
+    if snapshot is None:
         return updated
 
     target = None
     for message in reversed(updated):
         if message.role != MessageRole.TOOL:
-            continue
-        if not isinstance(message.content, str):
             continue
         target = message
         break
@@ -260,17 +211,16 @@ def append_terminal_watch_snapshot(
     if target is None:
         return updated
 
-    if target.role == MessageRole.TOOL:
-        base_content = target.content or ""
-        target.content = f"{base_content}\n\n{snapshot}" if base_content else snapshot
-    else:
-        conversation_summary = target.conversation_summary
-        base_content = conversation_summary.content or ""
-        conversation_summary.content = f"{base_content}\n\n{snapshot}" if base_content else snapshot
+    target.current_terminal_watch = copy.deepcopy(snapshot)
     return updated
 
 
-def measure_terminal_watch_snapshot_tokens(snapshot: str | None) -> int:
-    if not snapshot:
+def measure_terminal_watch_snapshot_tokens(snapshot: dict[str, Any] | None) -> int:
+    if snapshot is None:
         return 0
-    return estimate_tokens(f"\n\n{snapshot}")
+    serialized = json.dumps(
+        {"current_terminal_watch": snapshot},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return estimate_tokens(serialized)

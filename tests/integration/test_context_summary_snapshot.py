@@ -1,9 +1,21 @@
+import json
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.utils.context_summary.history import iter_persistent_summary_source_units
+from app.core.utils.context_messages import message_token_text
+from app.core.utils.context_summary.history import (
+    iter_persistent_summary_source_units,
+    measure_complete_replacement_input,
+    measure_snapshot_history,
+)
 from app.core.utils.context_summary.snapshot import build_context_summary_snapshot, iter_persistent_summary_rounds
-from app.models.message import Message, MessageRole, MessageType
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
+from app.core.utils.message_parser import parse_db_messages_to_internal
+from app.core.utils.tokenizer import estimate_tokens
+from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
+from app.transformers.openai import OpenAIChatCompletionsTransformer
 
 
 def _message(message_id: int, role: MessageRole, *, content: str | None = None) -> Message:
@@ -227,6 +239,115 @@ async def test_model_excluded_user_message_extends_source_coverage_without_expos
     assert "并行工具调用" in units[0].content
     assert "工具结果一" in units[0].content
     assert "工具结果二" in units[0].content
+
+
+@pytest.mark.parametrize(
+    ("tool_content", "expected_tool_result"),
+    [
+        pytest.param(
+            'first line\n"quoted value"\nlast line',
+            'first line\n"quoted value"\nlast line',
+            id="plain-multiline-tool-text",
+        ),
+        pytest.param(
+            '{"status":"ok","items":[{"id":1,"name":"alpha"},{"id":2,"name":"beta"}]}',
+            {"status": "ok", "items": [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]},
+            id="compact-json-tool-result",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_context_summary_budget_counts_outbound_tool_result_wrapper(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_content: str,
+    expected_tool_result: object,
+):
+    monkeypatch.setattr("app.models.message.time", SimpleNamespace(time=lambda: 1.0))
+    tool_call = InternalToolCall(
+        id="snapshot-budget-call",
+        name="inspect_context",
+        arguments={"query": "budget"},
+    )
+    tool_call_message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        tool_calls=[tool_call],
+    )
+    tool_result_message = InternalMessage(
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        tool_call_id=tool_call.id,
+        content=tool_content,
+    )
+    user_message = _message(1, MessageRole.USER, content="inspect the result")
+    tool_call_row = Message(
+        id=2,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=tool_call_message.model_dump_json(exclude_none=True),
+        is_processed=True,
+    )
+    tool_result_row = Message(
+        id=3,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content=tool_result_message.model_dump_json(exclude_none=True),
+        is_processed=True,
+    )
+    db_session.add_all([user_message, tool_call_row, tool_result_row])
+    await db_session.commit()
+
+    snapshot = await build_context_summary_snapshot(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        expected_summary_message_id=None,
+        before_id=None,
+        target_message_id=tool_result_row.id,
+    )
+    assert snapshot.persistent_summary_target_id == tool_result_row.id
+    assert snapshot.has_persistent_history
+
+    parsed_history = parse_db_messages_to_internal([user_message, tool_call_row, tool_result_row])
+    parsed_tool_result = next(message for message in parsed_history if message.role == MessageRole.TOOL)
+    materialized_history = materialize_user_environment_prompts(parsed_history)
+    provider_history = OpenAIChatCompletionsTransformer.to_provider(materialized_history)
+    provider_tool_result = next(message for message in provider_history if message.get("role") == MessageRole.TOOL.value and message.get("tool_call_id") == parsed_tool_result.tool_call_id)
+    provider_tool_content = provider_tool_result["content"]
+    assert isinstance(provider_tool_content, str)
+    assert json.loads(provider_tool_content) == {"tool_result": expected_tool_result}
+
+    baseline_tokens = sum(estimate_tokens(message_token_text(message)) for message in parsed_history if message.role != MessageRole.TOOL)
+    raw_tool_tokens = estimate_tokens(tool_content)
+    wrapped_tool_tokens = estimate_tokens(provider_tool_content)
+    assert wrapped_tool_tokens > raw_tool_tokens
+    expected_tokens = baseline_tokens + wrapped_tool_tokens
+
+    snapshot_history_tokens, history_message_count = await measure_snapshot_history(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        snapshot=snapshot,
+        use_request_token_text=True,
+    )
+    replacement_input_tokens = await measure_complete_replacement_input(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        snapshot=snapshot,
+        existing_summary=None,
+    )
+
+    assert history_message_count == len(parsed_history)
+    assert snapshot_history_tokens == expected_tokens
+    assert replacement_input_tokens == expected_tokens
 
 
 @pytest.mark.asyncio
