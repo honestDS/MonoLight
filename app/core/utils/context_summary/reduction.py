@@ -34,7 +34,6 @@ from app.core.utils.context_summary.common import (
     find_context_summary_output_budget_error,
 )
 from app.core.utils.context_summary.merge import (
-    count_lower_stage_merge_groups,
     iter_completed_lower_stage_fragments,
     iter_lower_stage_merge_groups,
 )
@@ -81,6 +80,7 @@ def build_reduction_stage_identity(
     model: ContextSummaryModelSnapshot,
     expected_fragment_count: int,
     refinement_index: int,
+    max_group_tokens: int | None = None,
 ) -> tuple[str, str]:
     model_payload = json.dumps(
         {
@@ -98,14 +98,17 @@ def build_reduction_stage_identity(
         separators=(",", ":"),
     )
     model_key = hashlib.sha256(model_payload.encode("utf-8")).hexdigest()
+    stage_payload_data = {
+        "snapshot_key": lower_stage.snapshot_key,
+        "lower_stage_key": lower_stage.stage_key,
+        "model_key": model_key,
+        "expected_fragment_count": expected_fragment_count,
+        "refinement_index": refinement_index,
+    }
+    if max_group_tokens is not None:
+        stage_payload_data["max_group_tokens"] = max_group_tokens
     stage_payload = json.dumps(
-        {
-            "snapshot_key": lower_stage.snapshot_key,
-            "lower_stage_key": lower_stage.stage_key,
-            "model_key": model_key,
-            "expected_fragment_count": expected_fragment_count,
-            "refinement_index": refinement_index,
-        },
+        stage_payload_data,
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -163,12 +166,14 @@ async def create_reduction_stage(
     model: ContextSummaryModelSnapshot,
     expected_fragment_count: int,
     refinement_index: int,
+    max_group_tokens: int | None = None,
 ) -> ContextSummaryStage:
     stage_key, model_key = build_reduction_stage_identity(
         lower_stage=lower_stage,
         model=model,
         expected_fragment_count=expected_fragment_count,
         refinement_index=refinement_index,
+        max_group_tokens=max_group_tokens,
     )
     stage = ContextSummaryStage(
         uid=lower_stage.uid,
@@ -241,14 +246,38 @@ async def execute_reduction_stage(
     if max_group_tokens <= 0:
         raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MODEL_NO_INPUT_BUDGET, stage="reduction"))
 
-    expected_fragment_count = await count_lower_stage_merge_groups(
-        work_dedupe_key=lower_stage.work_dedupe_key,
-        lower_stage_key=lower_stage.stage_key,
-        max_group_tokens=max_group_tokens,
-        token_counter=lambda text: estimate_context_summary_text_tokens(model, text),
-    )
-    if expected_fragment_count <= 0:
-        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_REDUCTION_NO_INPUT_GROUPS))
+    while True:
+        next_max_group_tokens = max_group_tokens
+        fragment_count = 0
+        has_over_budget_group = False
+        groups = iter_lower_stage_merge_groups(
+            work_dedupe_key=lower_stage.work_dedupe_key,
+            lower_stage_key=lower_stage.stage_key,
+            max_group_tokens=max_group_tokens,
+            first_group_index=0,
+            token_counter=lambda text: estimate_context_summary_text_tokens(model, text),
+        )
+        async for group in groups:
+            fragment_count += 1
+            prompt_tokens = estimate_context_summary_prompt_tokens(
+                model,
+                merge_fragment_prompt(group),
+            )
+            if prompt_tokens > model.input_budget_tokens:
+                has_over_budget_group = True
+                next_max_group_tokens = min(
+                    next_max_group_tokens,
+                    group.token_count - (prompt_tokens - model.input_budget_tokens),
+                )
+        if fragment_count <= 0:
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_REDUCTION_NO_INPUT_GROUPS))
+        if not has_over_budget_group:
+            expected_fragment_count = fragment_count
+            break
+        await ensure_context_summary_work_valid(work_validity_checker)
+        if next_max_group_tokens <= 0:
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MODEL_NO_INPUT_BUDGET, stage="reduction"))
+        max_group_tokens = next_max_group_tokens
 
     await ensure_context_summary_work_valid(work_validity_checker)
     stage = await create_reduction_stage(
@@ -256,6 +285,7 @@ async def execute_reduction_stage(
         model=model,
         expected_fragment_count=expected_fragment_count,
         refinement_index=refinement_index,
+        max_group_tokens=max_group_tokens,
     )
     first_fragment_index = stage.succeeded_fragment_count
     if stage.status == ContextSummaryStageStatus.COMPLETED:

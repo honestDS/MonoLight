@@ -381,18 +381,48 @@ async def generate_snapshot_summary_with_model(
     if max_fragment_tokens <= 0:
         raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_MODEL_NO_INPUT_BUDGET, stage="fragment"))
 
-    fragment_plan = await build_summary_fragment_plan(
-        db,
-        session_id=session_id,
-        uid=uid,
-        snapshot=snapshot,
-        max_fragment_tokens=max_fragment_tokens,
-        model_id=model.model_id,
-        protocol=model.protocol,
-    )
+    while True:
+        fragment_plan = await build_summary_fragment_plan(
+            db,
+            session_id=session_id,
+            uid=uid,
+            snapshot=snapshot,
+            max_fragment_tokens=max_fragment_tokens,
+            model_id=model.model_id,
+            protocol=model.protocol,
+        )
+        if fragment_plan.fragment_count <= 0:
+            raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_LAYER_UNSPLITTABLE))
+
+        next_max_fragment_tokens = max_fragment_tokens
+        async for fragment in iter_summary_fragments(
+            db,
+            session_id=session_id,
+            uid=uid,
+            snapshot=snapshot,
+            existing_summary=existing_summary,
+            plan=fragment_plan,
+            max_fragment_tokens=max_fragment_tokens,
+            first_fragment_index=0,
+            model_id=model.model_id,
+            protocol=model.protocol,
+        ):
+            prompt_tokens = estimate_context_summary_prompt_tokens(model, fragment_prompt(fragment))
+            if model.accepts_prompt_tokens(prompt_tokens):
+                continue
+            overflow = prompt_tokens - model.input_budget_tokens
+            next_max_fragment_tokens = min(
+                next_max_fragment_tokens,
+                fragment.token_count - overflow,
+            )
+            if next_max_fragment_tokens <= 0:
+                raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_MODEL_NO_INPUT_BUDGET, stage="fragment"))
+
+        if next_max_fragment_tokens == max_fragment_tokens:
+            break
+        await ensure_context_summary_work_valid(work_validity_checker)
+        max_fragment_tokens = next_max_fragment_tokens
     expected_fragment_count = fragment_plan.fragment_count
-    if expected_fragment_count <= 0:
-        raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_LAYER_UNSPLITTABLE))
 
     snapshot_max_message_id = snapshot.snapshot_max_message_id
     persistent_summary_target_id = snapshot.persistent_summary_target_id
