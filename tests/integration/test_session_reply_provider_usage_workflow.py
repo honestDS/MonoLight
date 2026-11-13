@@ -555,6 +555,123 @@ async def test_foreground_reply_real_response_snapshot_is_separate_from_session_
     assert not any(key.startswith("_provider_") for key in session.llm_request_metadata)
 
 
+@pytest.mark.asyncio
+async def test_foreground_stream_response_merges_partial_usage_before_persisting(
+    image_chat_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with image_chat_runtime("OPENAI", goal_mode=False) as runtime:
+        async with runtime.factory() as db:
+            session = await db.get(ChatSession, runtime.session_id)
+            assert session is not None
+            metadata = _session_metadata(1000, 250, 200)
+            metadata.update(
+                {
+                    "channel_id": 1,
+                    "model_id": runtime.chat_model_id,
+                    "protocol": "openai",
+                    "context_summary_revision": 0,
+                    "context_content_revision": 0,
+                }
+            )
+            session.stream_llm_request = True
+            session.llm_request_metadata = metadata
+            session.context_summary_revision = 0
+            session.context_content_revision = 0
+            await db.commit()
+
+        raw_chunks = [
+            {
+                "model": runtime.chat_model_id,
+                "choices": [{"delta": {"content": "foreground reply"}}],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 2,
+                    "total_tokens": 22,
+                    "prompt_tokens_details": {"cached_tokens": 3},
+                },
+            },
+            {"usage": None},
+            {"usage": {}},
+            {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {"completion_tokens": 5},
+            },
+        ]
+
+        async def fake_stream(self, **kwargs: Any):
+            normalize_event = kwargs["normalize_event"]
+            for raw_chunk in raw_chunks:
+                normalized, _ = normalize_event(raw_chunk)
+                if normalized is not None:
+                    yield normalized
+
+        monkeypatch.setattr(OpenAIChatCompletionsTransformer, "_stream_sse_json", fake_stream)
+
+        accepted = await runtime.client.post(
+            "/api/v1/chat/completions",
+            json={
+                "session_id": runtime.session_id,
+                "request_id": "stream-usage-request",
+                "message": "test",
+            },
+        )
+        assert accepted.status_code == 200
+        accepted_data = accepted.json()["data"]
+        assert accepted_data["submission_status"] == "accepted"
+        work_id = accepted_data["work_id"]
+        assert isinstance(work_id, int)
+
+        completed = await runtime.run_next()
+        assert completed is not None
+        assert completed.id == work_id
+        assert completed.status == SessionReplyWorkStatus.SUCCEEDED
+
+        reply = await runtime.client.get(f"/api/v1/chat/reply-works/{work_id}")
+        assert reply.status_code == 200
+        reply_data = reply.json()["data"]
+        assert reply_data["status"] == SessionReplyWorkStatus.SUCCEEDED.value
+        response = reply_data["response"]
+        assert response["choices"][0]["message"]["content"] == "foreground reply"
+        response_metadata = response["llm_request_metadata"]
+        assert response_metadata["input_tokens"] == 20
+        assert response_metadata["input_tokens_source"] == "provider"
+        assert (
+            response_metadata["total_input_tokens"],
+            response_metadata["total_cached_tokens"],
+            response_metadata["total_output_tokens"],
+        ) == (1020, 253, 205)
+        assert response_metadata["summary_trigger_tokens"] > 0
+
+        async with runtime.factory() as db:
+            session = await db.get(ChatSession, runtime.session_id)
+            details = list((await db.execute(select(ProviderUsageDetail))).scalars().all())
+        assert session is not None
+        assert len(details) == 1
+        detail = details[0]
+        assert detail.type == ProviderUsageType.MAIN_DIALOGUE.value
+        assert (detail.input_tokens, detail.cached_tokens, detail.output_tokens) == (20, 3, 5)
+        assert (
+            session.llm_request_metadata["total_input_tokens"],
+            session.llm_request_metadata["total_cached_tokens"],
+            session.llm_request_metadata["total_output_tokens"],
+        ) == (1020, 253, 205)
+        assert session.llm_request_metadata["summary_trigger_tokens"] == response_metadata["summary_trigger_tokens"]
+        assert session.context_summary_revision == 0
+        assert session.context_content_revision == 0
+        assert (
+            extract_confirmed_provider_input_tokens(
+                session.llm_request_metadata,
+                channel_id=1,
+                model_id=runtime.chat_model_id,
+                protocol="openai",
+                context_summary_revision=0,
+                context_content_revision=0,
+            )
+            == 20
+        )
+
+
 @pytest.mark.parametrize("scheduled_sequence_no", [1, 3])
 @pytest.mark.asyncio
 async def test_scheduled_interactive_usage_stays_outside_session_totals_and_survives_work_cleanup(

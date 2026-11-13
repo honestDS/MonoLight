@@ -19,6 +19,7 @@ export function useChatHttpSend({
   trackSubmission,
   trackHttpSubmission,
   ensureIncrementalHistoryCursor,
+  invalidateCurrentLlmRequestInput,
   markNewSessionTodoKnownEmpty,
   selectNewSession,
   applyNonStreamSessionEvents,
@@ -95,6 +96,12 @@ export function useChatHttpSend({
   const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null, profileOverrideId = null, showToolCalls = true, showReasoning = true, goalMode = true, maxTurns = 5) => {
     if (requestSessionId) {
       ensureIncrementalHistoryCursor(requestSessionId)
+      if (
+        requestSessionId === sessionManager.currentSessionId.value
+        && isSessionScopeActive()
+      ) {
+        invalidateCurrentLlmRequestInput({})
+      }
     }
     const isCurrentRequestSession = () => (
       isSessionScopeActive()

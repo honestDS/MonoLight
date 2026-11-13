@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from functools import partial
 from importlib import import_module
 from types import SimpleNamespace
 
@@ -25,8 +27,10 @@ from app.core.crud.context_summary.fragment import (
     context_summary_fragment_crud,
 )
 from app.core.crud.context_summary.stage import context_summary_stage_crud
+from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.exceptions import LLMContextLengthException, LLMException, LLMRequestRejectedException
+from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.utils.context_budget import calculate_context_summary_trigger_tokens
 from app.core.utils.context_summary import cleanup as context_summary_cleanup
 from app.core.utils.context_summary import merge as context_summary_merge
@@ -52,6 +56,13 @@ from app.models.context_summary_stage import ContextSummaryFragment, ContextSumm
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import ProfileConfig, ToolConfig
 from app.models.session import ChatSession
+from app.models.session_reply_stream_event import SessionReplyStreamEvent
+from app.models.session_reply_work_item import (
+    SessionReplySourceType,
+    SessionReplyWorkItem,
+    SessionReplyWorkStatus,
+    SessionReplyWorkType,
+)
 from app.models.session_todo import SessionTodoPlan
 from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 from app.transformers.openai.base import BaseOpenAITransformer
@@ -76,6 +87,8 @@ async def context_summary_database(tmp_path, monkeypatch: pytest.MonkeyPatch) ->
             ContextSummaryStage.__table__,
             ContextSummaryFragment.__table__,
             SessionTodoPlan.__table__,
+            SessionReplyWorkItem.__table__,
+            SessionReplyStreamEvent.__table__,
         ],
     )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -536,6 +549,159 @@ async def test_checkpoint_summary_threshold_uses_persisted_provider_usage_not_lo
         session = (await db.execute(select(ChatSession).where(ChatSession.session_id == "summary-session"))).scalar_one()
         assert session.context_summary == "provider-triggered summary"
         assert session.context_summary_message_id == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["success", "failure", "cancel"], ids=["success", "failure", "cancel"])
+async def test_context_summary_lifecycle_persists_revision_in_stream_events(
+    context_summary_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    await _seed_summary_history(context_summary_database)
+    async with context_summary_database() as db:
+        history = list((await db.execute(select(Message).where(Message.session_id == "summary-session").order_by(Message.id))).scalars())
+        work = SessionReplyWorkItem(
+            id=1,
+            uid="summary-user",
+            session_id="summary-session",
+            profile_id=1,
+            sequence_no=1,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id="1",
+            dedupe_key="summary-lifecycle-work",
+            status=SessionReplyWorkStatus.RUNNING,
+            locked_by="summary-worker",
+            lock_until=9_999_999_999,
+            attempt_count=1,
+            max_attempts=2,
+            available_at=0,
+        )
+        db.add(work)
+        await db.commit()
+
+    stream_state = executor_interactive_module._InteractiveWorkStreamEventState(
+        work=work,
+        worker_id="summary-worker",
+        next_sequence=1,
+        dequeued_request_ids=set(),
+        turn_end_content_by_response_id={},
+        tool_names_by_response_id={},
+    )
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", context_summary_database)
+    lifecycle_callback = partial(executor_interactive_module._publish_interactive_work_stream_event, stream_state)
+
+    async def generate_summary(*_args, **_kwargs):
+        if mode == "success":
+            return context_summary_stage.GeneratedSummaryResult(
+                content="short summary",
+                message_count=2,
+                completed_stage=SimpleNamespace(),
+            )
+        if mode == "failure":
+            raise LLMException(message="summary model unavailable")
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(context_summary_service, "generate_snapshot_summary_result", generate_summary)
+
+    request_messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="stable system prompt"),
+        *[
+            InternalMessage(
+                id=message.id,
+                role=message.role,
+                content=message.content,
+            )
+            for message in history
+        ],
+    ]
+    cfg = SimpleNamespace(
+        other=SimpleNamespace(context_summary_threshold_percent=50),
+    )
+
+    async def run_summary() -> ContextSummaryState:
+        async with context_summary_database() as db:
+            return await context_summary_service.ensure_context_summary(
+                db,
+                session_id="summary-session",
+                uid="summary-user",
+                profile=SimpleNamespace(id=1),
+                cfg=cfg,
+                before_id=3,
+                current_message="",
+                context_window_k=8,
+                max_tokens=512,
+                reserved_tokens=0,
+                tools=None,
+                fixed_request_messages=[request_messages[0], *request_messages[3:]],
+                summary_source_messages=request_messages,
+                trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+                fixed_upper_message_id=3,
+                channel_id=11,
+                model_id="gateway-model",
+                protocol="openai",
+                lifecycle_event_callback=lifecycle_callback,
+                force=True,
+            )
+
+    if mode == "success":
+        summary_state = await run_summary()
+        assert summary_state.content == "short summary"
+        assert summary_state.message_id == 2
+        assert summary_state.revision == 1
+        assert summary_state.content_revision == 0
+    elif mode == "failure":
+        with pytest.raises(LLMException):
+            await run_summary()
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            await run_summary()
+
+    async with context_summary_database() as db:
+        session = (await db.execute(select(ChatSession).where(ChatSession.session_id == "summary-session"))).scalar_one()
+        restored_work = await db.get(SessionReplyWorkItem, 1)
+        stream_events = await session_reply_stream_event_crud.list_after_sequence(
+            db,
+            work_id=1,
+            after_sequence_no=0,
+        )
+
+    assert restored_work is not None
+    assert (restored_work.uid, restored_work.session_id, restored_work.profile_id, restored_work.sequence_no) == (
+        "summary-user",
+        "summary-session",
+        1,
+        1,
+    )
+    assert (restored_work.status, restored_work.locked_by, restored_work.lock_until) == (
+        SessionReplyWorkStatus.RUNNING,
+        "summary-worker",
+        9_999_999_999,
+    )
+    assert [event.sequence_no for event in stream_events] == [1, 2]
+    assert [event.event["type"] for event in stream_events] == ["context_summary_start", "context_summary_end"]
+    end_event = stream_events[-1]
+    assert end_event.work_id == 1
+    assert end_event.event["session_id"] == "summary-session"
+    assert end_event.event["work_id"] == 1
+    assert end_event.event["work_sequence_no"] == 1
+    assert end_event.event["event_sequence_no"] == 2
+
+    if mode == "success":
+        assert session.context_summary == "short summary"
+        assert session.context_summary_message_id == 2
+        assert session.context_summary_revision == 1
+        assert session.context_content_revision == 0
+        assert end_event.event["context_summary_revision"] == 1
+        assert end_event.event["context_content_revision"] == 0
+    else:
+        assert session.context_summary is None
+        assert session.context_summary_message_id is None
+        assert session.context_summary_revision == 0
+        assert session.context_content_revision == 0
+        assert "context_summary_revision" not in end_event.event
+        assert "context_content_revision" not in end_event.event
 
 
 @pytest.mark.asyncio

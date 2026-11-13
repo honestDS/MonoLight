@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createHarness, createSession } from './chatDraftHarness.js'
+import { getContextSummaryProgress } from '../src/composables/chat/requestUsagePresentation.js'
 
 const selectSession = async (harness, id) => {
   const session = harness.chat.sessions.value.find(item => item.session_id === id)
@@ -38,6 +39,7 @@ test('composed session keeps confirmed LLM metadata scoped and ordered', async t
     protocol: 'responses',
     context_summary_revision: 2,
     context_content_revision: 4,
+    summary_trigger_tokens: 200,
     work_sequence_no: 2,
     event_sequence_no: 5,
     request_purpose: 'main_dialogue'
@@ -80,12 +82,18 @@ test('composed session keeps confirmed LLM metadata scoped and ordered', async t
     work_sequence_no: 2,
     event_sequence_no: 6
   })
-  assert.equal(chat.llmRequestMetadata.value.input_tokens, 123)
-  assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'provider')
+  assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
+  assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'previous')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 123 / 200)
 
   const sessionMetadata = chat.sessions.value.find(item => item.session_id === 'A').llm_request_metadata
-  assert.equal(sessionMetadata.input_tokens, 123)
-  assert.equal(sessionMetadata.input_tokens_source, 'provider')
+  assert.equal(sessionMetadata.input_tokens, null)
+  assert.equal(sessionMetadata.input_tokens_source, 'estimated')
+  assert.equal(sessionMetadata.last_confirmed_context_usage.input_tokens, 123)
+  assert.equal(sessionMetadata.last_confirmed_context_usage.summary_trigger_tokens, 200)
+  assert.equal(getContextSummaryProgress(sessionMetadata).status, 'previous')
+  assert.equal(getContextSummaryProgress(sessionMetadata).ratio, 123 / 200)
 })
 
 test('composed session accumulates LLM totals across ordered main and scheduled metadata', async t => {
@@ -1039,6 +1047,30 @@ const createMainMetadata = ({
   cache_hit_rate: 250 / 50000
 })
 
+const createContextMetadata = ({
+  inputTokens = 123,
+  inputTokensSource = 'provider',
+  summaryTriggerTokens = 200,
+  channelId = 7,
+  modelId = 'model-a',
+  protocol = 'responses',
+  contextSummaryRevision = 2,
+  contextContentRevision = 4,
+  responseId = 'context-response',
+  workSequenceNo = 2,
+  eventSequenceNo = 5
+} = {}) => ({
+  ...createMainMetadata({ responseId, workSequenceNo, eventSequenceNo }),
+  input_tokens: inputTokens,
+  input_tokens_source: inputTokensSource,
+  channel_id: channelId,
+  model_id: modelId,
+  protocol,
+  context_summary_revision: contextSummaryRevision,
+  context_content_revision: contextContentRevision,
+  summary_trigger_tokens: summaryTriggerTokens
+})
+
 const createTaskMetadata = (source, workSequenceNo, totals = null) => ({
   input_tokens: 120,
   input_tokens_source: 'provider',
@@ -1075,6 +1107,307 @@ const createProactiveReply = ({
 })
 
 const getSessionMetadata = chat => chat.sessions.value.find(item => item.session_id === 'A').llm_request_metadata
+
+test('composed context usage stays scoped across estimated refreshes, reloads, and switches', async t => {
+  const confirmedA = createContextMetadata({
+    responseId: 'confirmed-a',
+    workSequenceNo: 1,
+    eventSequenceNo: 1
+  })
+  const oldDatabaseA = {
+    ...confirmedA,
+    input_tokens: 90,
+    response_id: 'old-database-a',
+    work_sequence_no: 1,
+    event_sequence_no: 2
+  }
+  const bMetadata = createContextMetadata({
+    inputTokens: 700,
+    summaryTriggerTokens: 1000,
+    channelId: 9,
+    modelId: 'model-b',
+    contextSummaryRevision: 1,
+    contextContentRevision: 1,
+    responseId: 'confirmed-b',
+    workSequenceNo: 1,
+    eventSequenceNo: 1
+  })
+  const harness = await createHarness(t, {
+    sessions: [
+      createSession('A', { source: 'ws', llm_request_metadata: confirmedA }),
+      createSession('B', { source: 'ws', llm_request_metadata: bMetadata })
+    ],
+    initialRoute: { path: '/', query: { session_id: 'A' } }
+  })
+  const { chat } = harness
+  const serverA = harness.sessions.find(item => item.session_id === 'A')
+
+  await harness.flush()
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 123 / 200)
+
+  const estimatedA = {
+    ...confirmedA,
+    input_tokens: 999,
+    input_tokens_source: 'estimated',
+    summary_trigger_tokens: 300,
+    channel_id: 8,
+    model_id: 'model-b',
+    protocol: 'chat_completions',
+    response_id: 'estimated-a',
+    work_sequence_no: 2,
+    event_sequence_no: 1
+  }
+  await receiveWs(harness, {
+    type: 'llm_request_metadata',
+    session_id: 'A',
+    ...estimatedA
+  })
+  assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
+  assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'previous')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 123 / 200)
+
+  serverA.llm_request_metadata = oldDatabaseA
+  await chat.loadSessions()
+  await harness.flush()
+  assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
+  assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'previous')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 123 / 200)
+
+  await selectSession(harness, 'B')
+  assert.equal(chat.currentSessionId.value, 'B')
+  assert.equal(chat.llmRequestMetadata.value.input_tokens, 700)
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 0.7)
+
+  await selectSession(harness, 'A')
+  assert.equal(chat.currentSessionId.value, 'A')
+  assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 123 / 200)
+
+  const newerProviderA = {
+    ...estimatedA,
+    input_tokens: 180,
+    input_tokens_source: 'provider',
+    summary_trigger_tokens: 300,
+    response_id: 'provider-a-new',
+    work_sequence_no: 3,
+    event_sequence_no: 1
+  }
+  await receiveWs(harness, {
+    type: 'llm_request_metadata',
+    session_id: 'A',
+    ...newerProviderA
+  })
+  assert.equal(chat.llmRequestMetadata.value.input_tokens, 180)
+  assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'provider')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 180 / 300)
+  assert.equal(getContextSummaryProgress(getSessionMetadata(chat)).ratio, 180 / 300)
+})
+
+for (const [failureName, createFailure] of [
+  ['network failure', () => new Error('network failure')],
+  ['business rejection', () => {
+    const error = new Error('business rejection')
+    error.response = { data: { code: 'request_rejected' } }
+    return error
+  }]
+]) {
+  test(`composed HTTP send preserves previous context usage after ${failureName}`, async t => {
+    const confirmedMetadata = createContextMetadata({
+      responseId: `http-confirmed-${failureName}`,
+      workSequenceNo: 2,
+      eventSequenceNo: 5
+    })
+    const recoveredMetadata = {
+      ...confirmedMetadata,
+      input_tokens: 180,
+      summary_trigger_tokens: 300,
+      response_id: `http-recovered-${failureName}`,
+      work_sequence_no: 3,
+      event_sequence_no: 1
+    }
+    let httpPending
+    const harness = await createHarness(t, {
+      sessions: [createSession('A', {
+        source: 'http',
+        stream_llm_request: false,
+        is_context_summarizing: false,
+        context_summary_revision: confirmedMetadata.context_summary_revision,
+        context_content_revision: confirmedMetadata.context_content_revision,
+        llm_request_metadata: confirmedMetadata
+      })],
+      httpResponses: ({ pending }) => {
+        httpPending = pending
+        return pending.promise
+      },
+      initialRoute: { path: '/', query: { session_id: 'A' } }
+    })
+    const { chat } = harness
+    const serverA = harness.sessions.find(item => item.session_id === 'A')
+    const assertPreviousUsage = () => {
+      assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
+      assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
+      assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'previous')
+      assert.equal(
+        getContextSummaryProgress(chat.llmRequestMetadata.value).ratio,
+        confirmedMetadata.input_tokens / confirmedMetadata.summary_trigger_tokens
+      )
+    }
+
+    await harness.flush()
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+
+    const sendPromise = chat.httpSend('request while context is stale')
+    await harness.flush()
+    assert.ok(httpPending)
+    assertPreviousUsage()
+
+    serverA.llm_request_metadata = { ...confirmedMetadata }
+    await chat.loadSessions()
+    await harness.flush()
+    assertPreviousUsage()
+
+    httpPending.resolve(createFailure())
+    await sendPromise
+    await harness.flush()
+    assertPreviousUsage()
+
+    serverA.llm_request_metadata = { ...recoveredMetadata }
+    await chat.loadSessions()
+    await harness.flush()
+    assert.equal(chat.llmRequestMetadata.value.input_tokens, recoveredMetadata.input_tokens)
+    assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'provider')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+    assert.equal(
+      getContextSummaryProgress(chat.llmRequestMetadata.value).ratio,
+      recoveredMetadata.input_tokens / recoveredMetadata.summary_trigger_tokens
+    )
+  })
+}
+
+for (const [errorName, createErrorEvent] of [
+  ['structured error', requestId => ({
+    type: 'error',
+    session_id: 'A',
+    request_id: requestId,
+    message: 'validation rejected'
+  })],
+  ['LLMResponse error choice', requestId => ({
+    session_id: 'A',
+    request_id: requestId,
+    choices: [{
+      message: { role: 'err', content: 'validation rejected' },
+      finish_reason: 'error'
+    }]
+  })]
+]) {
+  test(`composed WS ${errorName} preserves previous context usage`, async t => {
+    const confirmedA = createContextMetadata({
+      responseId: `ws-confirmed-${errorName}`,
+      workSequenceNo: 2,
+      eventSequenceNo: 5
+    })
+    const confirmedB = createContextMetadata({
+      inputTokens: 700,
+      summaryTriggerTokens: 1000,
+      contextSummaryRevision: confirmedA.context_summary_revision,
+      contextContentRevision: confirmedA.context_content_revision,
+      responseId: `ws-b-${errorName}`,
+      workSequenceNo: 1,
+      eventSequenceNo: 1
+    })
+    const newProvider = createContextMetadata({
+      inputTokens: 180,
+      summaryTriggerTokens: 300,
+      contextSummaryRevision: confirmedA.context_summary_revision,
+      contextContentRevision: confirmedA.context_content_revision,
+      responseId: `ws-recovered-${errorName}`,
+      workSequenceNo: 3,
+      eventSequenceNo: 1
+    })
+    const totals = metadata => [
+      metadata?.total_input_tokens,
+      metadata?.total_cached_tokens,
+      metadata?.total_output_tokens,
+      metadata?.cache_hit_rate
+    ]
+    const confirmedTotals = totals(confirmedA)
+    const harness = await createHarness(t, {
+      sessions: [
+        createSession('A', {
+          source: 'ws',
+          context_summary_revision: confirmedA.context_summary_revision,
+          context_content_revision: confirmedA.context_content_revision,
+          llm_request_metadata: confirmedA
+        }),
+        createSession('B', {
+          source: 'ws',
+          context_summary_revision: confirmedB.context_summary_revision,
+          context_content_revision: confirmedB.context_content_revision,
+          llm_request_metadata: confirmedB
+        })
+      ],
+      initialRoute: { path: '/', query: { session_id: 'A' } }
+    })
+    const { chat } = harness
+    const serverA = harness.sessions.find(item => item.session_id === 'A')
+    const assertPreviousUsage = () => {
+      assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
+      assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
+      assert.equal(chat.llmRequestMetadata.value.last_confirmed_context_usage.input_tokens, 123)
+      assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'previous')
+      assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 123 / 200)
+      assert.deepEqual(totals(chat.llmRequestMetadata.value), confirmedTotals)
+    }
+
+    await harness.flush()
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 123 / 200)
+
+    const sendPromise = chat.wsSend('early rejection')
+    await harness.flush()
+    const request = harness.wsManager.sent.filter(item => item.type === 'chat').at(-1)
+    assert.ok(request)
+    assertPreviousUsage()
+
+    const errorEvent = createErrorEvent(request.request_id)
+    await receiveWs(harness, errorEvent)
+    await sendPromise
+    assertPreviousUsage()
+
+    await receiveWs(harness, { ...errorEvent })
+    assertPreviousUsage()
+
+    serverA.llm_request_metadata = { ...confirmedA }
+    await chat.loadSessions()
+    await harness.flush()
+    assertPreviousUsage()
+
+    await selectSession(harness, 'B')
+    assert.equal(chat.currentSessionId.value, 'B')
+    assert.equal(chat.llmRequestMetadata.value.input_tokens, 700)
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 0.7)
+
+    await selectSession(harness, 'A')
+    assert.equal(chat.currentSessionId.value, 'A')
+    assertPreviousUsage()
+
+    await receiveWs(harness, {
+      type: 'llm_request_metadata',
+      session_id: 'A',
+      ...newProvider
+    })
+    assert.equal(chat.llmRequestMetadata.value.input_tokens, 180)
+    assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'provider')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 180 / 300)
+    assert.deepEqual(totals(chat.llmRequestMetadata.value), confirmedTotals)
+  })
+}
 
 test('composed cumulative-only independent responses preserve the main context', async t => {
   const mainMetadata = createMainMetadata()
@@ -1686,6 +2019,232 @@ test('composed reconnect keeps recovered metadata isolated across session switch
   assert.equal(chat.messages.value.filter(message => message.content === 'isolated task result').length, 1)
 })
 
+test('composed streaming context summaries preserve previous usage through failure and revision changes', async t => {
+  const confirmedMetadata = createContextMetadata({
+    responseId: 'confirmed-stream',
+    workSequenceNo: 2,
+    eventSequenceNo: 5
+  })
+  const harness = await createHarness(t, {
+    sessions: [createSession('A', { source: 'ws', llm_request_metadata: confirmedMetadata })],
+    initialRoute: { path: '/', query: { session_id: 'A' } }
+  })
+  const { chat } = harness
+
+  await harness.flush()
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 123 / 200)
+
+  await receiveWs(harness, {
+    type: 'context_summary_start',
+    session_id: 'A',
+    work_id: 'summary-stream-failed',
+    request_id: 'summary-request-failed',
+    work_sequence_no: 3,
+    event_sequence_no: 1
+  })
+  assert.equal(chat.isContextSummarizing.value, true)
+  assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
+  assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
+  assert.equal(
+    getContextSummaryProgress(chat.llmRequestMetadata.value, chat.isContextSummarizing.value).status,
+    'summarizing'
+  )
+  assert.equal(chat.llmRequestMetadata.value.last_confirmed_context_usage.input_tokens, 123)
+  assert.equal(chat.llmRequestMetadata.value.last_confirmed_context_usage.summary_trigger_tokens, 200)
+
+  await receiveWs(harness, {
+    type: 'context_summary_end',
+    session_id: 'A',
+    work_id: 'summary-stream-failed',
+    request_id: 'summary-request-failed',
+    work_sequence_no: 3,
+    event_sequence_no: 2
+  })
+  assert.equal(chat.isContextSummarizing.value, false)
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'previous')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 123 / 200)
+
+  await receiveWs(harness, {
+    type: 'context_summary_start',
+    session_id: 'A',
+    work_id: 'summary-stream-stale',
+    request_id: 'summary-request-stale',
+    work_sequence_no: 4,
+    event_sequence_no: 1
+  })
+  await receiveWs(harness, {
+    type: 'context_summary_end',
+    session_id: 'A',
+    work_id: 'summary-stream-new',
+    request_id: 'summary-request-new',
+    work_sequence_no: 5,
+    event_sequence_no: 1,
+    context_summary_revision: 3,
+    context_content_revision: 5
+  })
+  assert.equal(chat.isContextSummarizing.value, true)
+  assert.equal(chat.llmRequestMetadata.value.last_confirmed_context_usage, undefined)
+
+  await receiveWs(harness, {
+    type: 'llm_request_metadata',
+    session_id: 'A',
+    ...confirmedMetadata,
+    response_id: 'old-confirmation',
+    work_sequence_no: 6,
+    event_sequence_no: 1
+  })
+  assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
+  assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
+  assert.equal(
+    getContextSummaryProgress(chat.llmRequestMetadata.value, chat.isContextSummarizing.value).status,
+    'summarizing'
+  )
+
+  const staleEnd = {
+    type: 'context_summary_end',
+    session_id: 'A',
+    work_id: 'summary-stream-stale',
+    request_id: 'summary-request-stale',
+    work_sequence_no: 4,
+    event_sequence_no: 2
+  }
+  await receiveWs(harness, staleEnd)
+  assert.equal(chat.isContextSummarizing.value, false)
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'waiting')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, null)
+
+  await receiveWs(harness, { ...staleEnd })
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'waiting')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, null)
+
+  const recoveredMetadata = {
+    ...confirmedMetadata,
+    input_tokens: 180,
+    summary_trigger_tokens: 300,
+    channel_id: 8,
+    model_id: 'model-b',
+    response_id: 'provider-after-summary',
+    work_sequence_no: 7,
+    event_sequence_no: 1,
+    context_summary_revision: 3,
+    context_content_revision: 5
+  }
+  await receiveWs(harness, {
+    type: 'llm_request_metadata',
+    session_id: 'A',
+    ...recoveredMetadata
+  })
+  assert.equal(chat.llmRequestMetadata.value.input_tokens, 180)
+  assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'provider')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 180 / 300)
+})
+
+for (const eventType of ['audit_tool_results_update', 'tool_results_update']) {
+  test(`composed ${eventType} invalidates stale context usage through session refresh`, async t => {
+    const confirmedA = createContextMetadata({
+      responseId: `audit-confirmed-${eventType}`,
+      workSequenceNo: 2,
+      eventSequenceNo: 5
+    })
+    const confirmedB = createContextMetadata({
+      inputTokens: 700,
+      summaryTriggerTokens: 1000,
+      contextSummaryRevision: 1,
+      contextContentRevision: 1,
+      responseId: `audit-b-${eventType}`,
+      workSequenceNo: 1,
+      eventSequenceNo: 1
+    })
+    const toolResult = {
+      id: 420,
+      type: 'tool_result',
+      role: 'tool',
+      content: JSON.stringify({
+        role: 'tool',
+        tool_call_id: `audit-call-${eventType}`,
+        content: 'updated history result'
+      })
+    }
+    const harness = await createHarness(t, {
+      sessions: [
+        createSession('A', {
+          source: 'ws',
+          context_summary_revision: confirmedA.context_summary_revision,
+          context_content_revision: confirmedA.context_content_revision,
+          llm_request_metadata: confirmedA
+        }),
+        createSession('B', {
+          source: 'ws',
+          context_summary_revision: confirmedB.context_summary_revision,
+          context_content_revision: confirmedB.context_content_revision,
+          llm_request_metadata: confirmedB
+        })
+      ],
+      initialRoute: { path: '/', query: { session_id: 'A' } }
+    })
+    const { chat } = harness
+    const serverA = harness.sessions.find(item => item.session_id === 'A')
+
+    await harness.flush()
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 123 / 200)
+
+    serverA.context_summary_revision = 3
+    serverA.context_content_revision = 5
+    serverA.llm_request_metadata = { ...confirmedA }
+    serverA.messages.push({ ...toolResult })
+    const update = {
+      type: eventType,
+      session_id: 'A',
+      work_id: `audit-history-work-${eventType}`,
+      event_sequence_no: 10,
+      messages: [{ ...toolResult }]
+    }
+
+    await receiveWs(harness, update)
+    assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
+    assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'waiting')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, null)
+    assert.equal(
+      chat.messages.value.filter(message => String(message.db_id ?? message.id) === '420').length,
+      1
+    )
+
+    await receiveWs(harness, { ...update })
+    await receiveWs(harness, { ...update, event_sequence_no: 9 })
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'waiting')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, null)
+    assert.equal(
+      chat.messages.value.filter(message => String(message.db_id ?? message.id) === '420').length,
+      1
+    )
+
+    await selectSession(harness, 'B')
+    assert.equal(chat.currentSessionId.value, 'B')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 0.7)
+
+    await receiveWs(harness, { ...update, event_sequence_no: 11 })
+    assert.equal(chat.currentSessionId.value, 'B')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, 0.7)
+
+    await selectSession(harness, 'A')
+    assert.equal(chat.currentSessionId.value, 'A')
+    assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
+    assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'waiting')
+    assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, null)
+    assert.equal(
+      chat.messages.value.filter(message => String(message.db_id ?? message.id) === '420').length,
+      1
+    )
+  })
+}
+
 test('composed non-stream session refresh keeps context summary usage scoped and resumable', async t => {
   const confirmedMetadata = {
     ...createMainMetadata({ responseId: 'confirmed-a', workSequenceNo: 2, eventSequenceNo: 5 }),
@@ -1766,6 +2325,50 @@ test('composed non-stream session refresh keeps context summary usage scoped and
   assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
   assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
   assert.deepEqual(totals(chat.llmRequestMetadata.value), confirmedTotals)
+  assert.equal(
+    getContextSummaryProgress(chat.llmRequestMetadata.value, chat.isContextSummarizing.value).status,
+    'summarizing'
+  )
+
+  serverA.is_context_summarizing = false
+  serverA.context_summary_revision = confirmedMetadata.context_summary_revision
+  serverA.context_content_revision = confirmedMetadata.context_content_revision
+  serverA.llm_request_metadata = { ...confirmedMetadata }
+  await chat.loadSessions()
+  await harness.flush()
+  assert.equal(chat.isContextSummarizing.value, false)
+  assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
+  assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'previous')
+  assert.equal(
+    getContextSummaryProgress(chat.llmRequestMetadata.value).ratio,
+    confirmedMetadata.input_tokens / confirmedMetadata.summary_trigger_tokens
+  )
+
+  await chat.loadSessions()
+  await harness.flush()
+  assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
+  assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'previous')
+  assert.equal(
+    getContextSummaryProgress(chat.llmRequestMetadata.value).ratio,
+    confirmedMetadata.input_tokens / confirmedMetadata.summary_trigger_tokens
+  )
+
+  await selectSession(harness, 'B')
+  assert.equal(chat.currentSessionId.value, 'B')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).ratio, bMetadata.input_tokens / bMetadata.summary_trigger_tokens)
+
+  await selectSession(harness, 'A')
+  assert.equal(chat.currentSessionId.value, 'A')
+  assert.equal(chat.llmRequestMetadata.value.input_tokens, null)
+  assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'previous')
+  assert.equal(
+    getContextSummaryProgress(chat.llmRequestMetadata.value).ratio,
+    confirmedMetadata.input_tokens / confirmedMetadata.summary_trigger_tokens
+  )
 
   serverA.is_context_summarizing = false
   serverA.context_summary_revision = recoveredMetadata.context_summary_revision
@@ -1778,6 +2381,7 @@ test('composed non-stream session refresh keeps context summary usage scoped and
   assert.equal(chat.llmRequestMetadata.value.input_tokens_source, 'estimated')
   assert.equal(chat.llmRequestMetadata.value.context_summary_revision, confirmedMetadata.context_summary_revision)
   assert.deepEqual(totals(chat.llmRequestMetadata.value), confirmedTotals)
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'waiting')
 
   serverA.llm_request_metadata = { ...recoveredMetadata }
   await chat.loadSessions()
@@ -1788,6 +2392,11 @@ test('composed non-stream session refresh keeps context summary usage scoped and
   assert.equal(chat.llmRequestMetadata.value.context_summary_revision, recoveredMetadata.context_summary_revision)
   assert.equal(chat.llmRequestMetadata.value.event_sequence_no, recoveredMetadata.event_sequence_no)
   assert.deepEqual(totals(chat.llmRequestMetadata.value), confirmedTotals)
+  assert.equal(getContextSummaryProgress(chat.llmRequestMetadata.value).status, 'ready')
+  assert.equal(
+    getContextSummaryProgress(chat.llmRequestMetadata.value).ratio,
+    recoveredMetadata.input_tokens / recoveredMetadata.summary_trigger_tokens
+  )
 
   await chat.loadSessions()
   await harness.flush()
@@ -1821,5 +2430,9 @@ test('composed non-stream session refresh keeps context summary usage scoped and
     assert.equal(initialChat.llmRequestMetadata.value.input_tokens, null)
     assert.equal(initialChat.llmRequestMetadata.value.input_tokens_source, 'estimated')
     assert.deepEqual(totals(initialChat.llmRequestMetadata.value), confirmedTotals)
+    assert.equal(
+      getContextSummaryProgress(initialChat.llmRequestMetadata.value, initialChat.isContextSummarizing.value).status,
+      'summarizing'
+    )
   })
 })

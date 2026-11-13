@@ -13,10 +13,17 @@ const CUMULATIVE_TOTAL_FIELDS = [
   'total_cached_tokens',
   'total_output_tokens'
 ]
-const CONTEXT_IDENTITY_FIELDS = [
-  'channel_id',
+const LAST_CONFIRMED_CONTEXT_USAGE_FIELDS = [
+  'input_tokens',
+  'input_tokens_source',
+  'summary_trigger_tokens',
   'model_id',
+  'channel_id',
   'protocol',
+  'context_summary_revision',
+  'context_content_revision'
+]
+const CONTEXT_REVISION_FIELDS = [
   'context_summary_revision',
   'context_content_revision'
 ]
@@ -27,10 +34,49 @@ const hasOwn = (value, field) => (
 
 const isValidNonNegativeNumber = (value) => Number.isFinite(value) && value >= 0
 
+const isValidPositiveNumber = (value) => Number.isFinite(value) && value > 0
+
+const isValidContextRevision = (value) => (
+  Number.isFinite(value) && Number.isInteger(value) && value >= 0
+)
+
 const isTotalsOnlyLlmRequestMetadata = (metadata) => (
   (hasOwn(metadata, 'total_input_tokens') || hasOwn(metadata, 'total_output_tokens')) &&
   !REQUEST_METADATA_FIELDS.some((field) => hasOwn(metadata, field))
 )
+
+const canCreateLastConfirmedContextUsage = (metadata) => (
+  metadata !== null &&
+  metadata !== undefined &&
+  metadata.input_tokens_source === 'provider' &&
+  isValidNonNegativeNumber(metadata.input_tokens) &&
+  isValidPositiveNumber(metadata.summary_trigger_tokens)
+)
+
+const copyLastConfirmedContextUsage = (metadata) => {
+  const snapshot = {}
+  for (const field of LAST_CONFIRMED_CONTEXT_USAGE_FIELDS) {
+    if (hasOwn(metadata, field)) snapshot[field] = metadata[field]
+  }
+  return snapshot
+}
+
+const getLastConfirmedContextUsage = (metadata) => {
+  if (canCreateLastConfirmedContextUsage(metadata)) return copyLastConfirmedContextUsage(metadata)
+  if (canCreateLastConfirmedContextUsage(metadata?.last_confirmed_context_usage)) {
+    return copyLastConfirmedContextUsage(metadata.last_confirmed_context_usage)
+  }
+  return null
+}
+
+const shouldDiscardLastConfirmedContextUsage = (snapshot, metadata) => {
+  for (const field of CONTEXT_REVISION_FIELDS) {
+    if (!hasOwn(metadata, field) || !isValidContextRevision(metadata[field])) continue
+    if (!hasOwn(snapshot, field) || !isValidContextRevision(snapshot[field])) return true
+    if (metadata[field] > snapshot[field]) return true
+  }
+  return false
+}
 
 export const normalizeLlmRequestMetadata = (metadata) => {
   if (!metadata || typeof metadata !== 'object') return null
@@ -132,27 +178,15 @@ export const isMainDialogueRequestMetadata = (metadata) => (
   !metadata?.request_purpose || metadata.request_purpose === MAIN_DIALOGUE_REQUEST_PURPOSE
 )
 
-const hasCompleteContextIdentity = (metadata) => {
-  for (const field of CONTEXT_IDENTITY_FIELDS) {
-    if (!hasOwn(metadata, field) || metadata[field] === null || metadata[field] === undefined) return false
-  }
-  return true
-}
-
-const hasMatchingContextIdentity = (currentMetadata, incomingMetadata) => {
-  if (!hasCompleteContextIdentity(currentMetadata) || !hasCompleteContextIdentity(incomingMetadata)) return false
-  for (const field of CONTEXT_IDENTITY_FIELDS) {
-    if (currentMetadata[field] !== incomingMetadata[field]) return false
-  }
-  return true
-}
-
 export const mergeLlmRequestMetadata = (currentMetadata, metadata) => {
   const current = currentMetadata && typeof currentMetadata === 'object' ? currentMetadata : {}
   const incoming = metadata && typeof metadata === 'object' ? metadata : {}
   const totalsOnly = isTotalsOnlyLlmRequestMetadata(incoming)
   const shouldReplaceRequest = !totalsOnly && shouldReplaceLlmRequestMetadata(current, incoming)
   const nextMetadata = shouldReplaceRequest ? { ...incoming } : { ...current }
+  const currentLastConfirmedContextUsage = getLastConfirmedContextUsage(current)
+
+  delete nextMetadata.last_confirmed_context_usage
 
   for (const field of ['output_tokens', 'cached_tokens']) {
     if (!hasOwn(nextMetadata, field) && hasOwn(current, field)) nextMetadata[field] = current[field]
@@ -176,18 +210,16 @@ export const mergeLlmRequestMetadata = (currentMetadata, metadata) => {
   nextMetadata.cache_hit_rate = getSessionCacheHitRate(nextMetadata)
 
   if (!totalsOnly && shouldReplaceRequest && incoming.input_tokens_source === 'estimated') {
-    const canReuseProviderInput = (
-      current.input_tokens_source === 'provider' &&
-      isValidNonNegativeNumber(current.input_tokens) &&
-      hasMatchingContextIdentity(current, incoming)
-    )
-    if (canReuseProviderInput) {
-      nextMetadata.input_tokens = current.input_tokens
-      nextMetadata.input_tokens_source = 'provider'
-    } else {
-      nextMetadata.input_tokens = null
-      nextMetadata.input_tokens_source = 'estimated'
-    }
+    nextMetadata.input_tokens = null
+    nextMetadata.input_tokens_source = 'estimated'
+  }
+
+  if (
+    !canCreateLastConfirmedContextUsage(nextMetadata) &&
+    currentLastConfirmedContextUsage &&
+    !shouldDiscardLastConfirmedContextUsage(currentLastConfirmedContextUsage, nextMetadata)
+  ) {
+    nextMetadata.last_confirmed_context_usage = currentLastConfirmedContextUsage
   }
   return nextMetadata
 }
@@ -205,5 +237,11 @@ export const invalidateLlmRequestInput = (currentMetadata, event) => {
   for (const field of ['work_sequence_no', 'event_sequence_no']) {
     if (hasOwn(event, field)) nextMetadata[field] = event[field]
   }
-  return nextMetadata
+  for (const field of CONTEXT_REVISION_FIELDS) {
+    if (!hasOwn(event, field) || !isValidContextRevision(event[field])) continue
+    if (!isValidContextRevision(currentMetadata[field]) || event[field] > currentMetadata[field]) {
+      nextMetadata[field] = event[field]
+    }
+  }
+  return mergeLlmRequestMetadata(currentMetadata, nextMetadata)
 }

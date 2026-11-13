@@ -90,11 +90,18 @@ async def emit_context_summary_lifecycle_event(
     lifecycle: ContextSummaryLifecycle,
     *,
     event_type: str,
+    state: ContextSummaryState | None = None,
 ) -> bool:
     if lifecycle.event_callback is None:
         return False
     try:
-        await lifecycle.event_callback({"type": event_type})
+        event: dict[str, object] = {"type": event_type}
+        if state is not None:
+            event.update(
+                context_summary_revision=state.revision,
+                context_content_revision=state.content_revision,
+            )
+        await lifecycle.event_callback(event)
         return True
     except Exception:
         logger.warning(
@@ -813,8 +820,9 @@ async def ensure_context_summary(
     force: bool = False,
 ) -> ContextSummaryState:
     lifecycle = ContextSummaryLifecycle(event_callback=lifecycle_event_callback)
+    result_state: ContextSummaryState | None = None
     try:
-        return await _ensure_context_summary(
+        result_state = await _ensure_context_summary(
             db,
             session_id=session_id,
             uid=uid,
@@ -840,11 +848,13 @@ async def ensure_context_summary(
             lifecycle=lifecycle,
             force=force,
         )
+        return result_state
     finally:
         if lifecycle.event_started:
             await emit_context_summary_lifecycle_event(
                 lifecycle,
                 event_type="context_summary_end",
+                state=result_state,
             )
         if lifecycle.work_dedupe_key is not None:
             await cleanup_context_summary_work_safely(

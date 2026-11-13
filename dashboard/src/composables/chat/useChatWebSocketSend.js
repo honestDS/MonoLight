@@ -24,6 +24,7 @@ export function useChatWebSocketSend({
   contextSummaryWorkKeys,
   contextSummaryRequestKeys,
   workLifecycleTracker,
+  invalidateCurrentLlmRequestInput,
   finishRequestLifecycle,
   setTransportMode,
   transportNotifier,
@@ -85,6 +86,9 @@ export function useChatWebSocketSend({
       isSessionScopeActive()
       && requestSessionId === sessionManager.currentSessionId.value
     )
+    if (requestSessionId && isCurrentRequestSession()) {
+      invalidateCurrentLlmRequestInput({})
+    }
 
     const historyMessageId = getHistoryMessageCursor(
       chatState.messages.value.filter(message => {

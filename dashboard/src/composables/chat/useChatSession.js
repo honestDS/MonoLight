@@ -163,6 +163,7 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     workLifecycleTracker,
     isContextSummarizing,
     llmRequestMetadata,
+    invalidateCurrentLlmRequestInput,
     processAiResponse,
     createStreamCallbacks,
     finishRequestLifecycle,
@@ -346,6 +347,7 @@ export function useChatSession({ currentUid = ref(null) } = {}) {
     currentSessionGoalMode,
     currentSessionMaxTurns,
     isStopping,
+    invalidateCurrentLlmRequestInput,
     rejectReadOnlySession: () => {
       if (!isCurrentSessionReadOnly.value) return false
       ElMessage.warning(t('chat.external_session_read_only'))

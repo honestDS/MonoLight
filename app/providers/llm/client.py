@@ -39,6 +39,22 @@ _CHAT_TRANSFORMERS = {
 }
 
 
+def _merge_usage(
+    current: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(current)
+    for key, value in incoming.items():
+        if value is None and key in merged:
+            continue
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_usage(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def _merge_metadata(
     current: dict[str, Any] | None,
     incoming: Any,
@@ -544,7 +560,7 @@ class LLMClient:
             if isinstance(chunk.get("model"), str):
                 model = chunk["model"]
             if isinstance(chunk.get("usage"), dict):
-                usage = chunk["usage"]
+                usage = _merge_usage(usage, chunk["usage"])
             choices = chunk.get("choices") or []
             choice = choices[0] if choices and isinstance(choices[0], dict) else None
             delta = choice.get("delta") if isinstance(choice, dict) else None

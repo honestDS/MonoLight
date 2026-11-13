@@ -62,7 +62,7 @@
 
           <div class="request-metadata-detail-footer">
             <div class="request-metadata-context-note">
-              <span>{{ $t('chat.context_summary_last_request') }}</span>
+              <span v-if="contextSummaryProgress.status !== 'previous'">{{ $t('chat.context_summary_last_request') }}</span>
               <span v-if="hasContextSummaryProgress">
                 {{ $t('chat.context_summary_remaining', { percent: formatPercent(contextSummaryProgress.remainingRatio) }) }}
               </span>
@@ -174,7 +174,8 @@ watch(requestMetadataCollapsed, value => setClientSetting('requestMetadataCollap
 const contextSummaryProgress = computed(() => getContextSummaryProgress(props.metadata, props.contextSummarizing))
 const hasContextSummaryProgress = computed(() => (
   contextSummaryProgress.value.status === 'ready' ||
-  contextSummaryProgress.value.status === 'threshold_reached'
+  contextSummaryProgress.value.status === 'threshold_reached' ||
+  contextSummaryProgress.value.status === 'previous'
 ))
 
 const formatPercent = value => percentNumberFormatter.format(value)
@@ -188,7 +189,10 @@ const contextSummaryStatusText = computed(() => {
   return t('chat.context_summary_waiting')
 })
 
-const contextSummaryAriaValueText = computed(() => t('chat.context_summary_used', {
-  percent: formatPercent(contextSummaryProgress.value.ratio)
-}))
+const contextSummaryAriaValueText = computed(() => t(
+  contextSummaryProgress.value.status === 'previous' ? 'chat.context_summary_previous_usage' : 'chat.context_summary_used',
+  {
+    percent: formatPercent(contextSummaryProgress.value.ratio)
+  }
+))
 </script>

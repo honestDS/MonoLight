@@ -28,6 +28,7 @@ export default {
   context_summary_reached: 'Compression threshold reached',
   context_summary_waiting: 'Waiting for usage from the model service',
   context_summary_last_request: 'Based on the latest request',
+  context_summary_previous_usage: 'Previous usage: {percent} used',
   context_summary_usage_details: 'Input {input} / summary threshold {threshold} tokens, about {remaining} tokens remaining',
   session_prefix: 'Session: {id}',
   session_created_at: 'Created',

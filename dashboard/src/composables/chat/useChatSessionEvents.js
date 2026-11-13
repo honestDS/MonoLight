@@ -105,12 +105,27 @@ export function useChatSessionEvents({
     if (!sessionId) return null
     const metadata = llmRequestMetadataBySession.value.get(sessionId)
       || normalizeLlmRequestMetadata(currentSession.value?.llm_request_metadata)
-    if (!metadata || !hasNewerContextRevision(metadata)) return metadata
-    return {
+    if (!metadata) return null
+    if (!isContextSummarizing.value && !hasNewerContextRevision(metadata)) return metadata
+
+    const displayMetadata = {
       ...metadata,
       input_tokens: null,
       input_tokens_source: 'estimated'
     }
+    const lastConfirmedContextUsage = displayMetadata.last_confirmed_context_usage
+    if (lastConfirmedContextUsage && typeof lastConfirmedContextUsage === 'object') {
+      for (const field of ['context_summary_revision', 'context_content_revision']) {
+        const currentRevision = currentSession.value?.[field]
+        if (!Number.isInteger(currentRevision) || currentRevision < 0) continue
+        const confirmedRevision = lastConfirmedContextUsage[field]
+        if (!Number.isInteger(confirmedRevision) || confirmedRevision < currentRevision) {
+          delete displayMetadata.last_confirmed_context_usage
+          break
+        }
+      }
+    }
+    return displayMetadata
   })
 
   const processAiResponse = (response, thinkingId = null, requestId = null) => {
@@ -141,11 +156,10 @@ export function useChatSessionEvents({
   }
 
   const cacheLlmRequestMetadata = (sessionId, currentMetadata, metadata) => {
-    let nextMetadata = mergeLlmRequestMetadata(currentMetadata, metadata)
-    if (isContextSummarizing.value) {
-      nextMetadata = invalidateLlmRequestInput(nextMetadata, {})
-    }
-    return storeLlmRequestMetadata(sessionId, nextMetadata)
+    return storeLlmRequestMetadata(
+      sessionId,
+      mergeLlmRequestMetadata(currentMetadata, metadata)
+    )
   }
 
   const invalidateCurrentLlmRequestInput = (event) => {
@@ -160,10 +174,19 @@ export function useChatSessionEvents({
     storeLlmRequestMetadata(sessionId, invalidatedMetadata)
     const sessionIndex = sessionManager.sessions.value.findIndex(session => session.session_id === sessionId)
     if (sessionIndex !== -1) {
-      sessionManager.sessions.value[sessionIndex] = {
+      const nextSession = {
         ...sessionManager.sessions.value[sessionIndex],
         llm_request_metadata: invalidatedMetadata
       }
+      for (const field of ['context_summary_revision', 'context_content_revision']) {
+        const eventRevision = event?.[field]
+        if (!Number.isInteger(eventRevision) || eventRevision < 0) continue
+        const currentRevision = nextSession[field]
+        if (!Number.isInteger(currentRevision) || currentRevision < 0 || eventRevision > currentRevision) {
+          nextSession[field] = eventRevision
+        }
+      }
+      sessionManager.sessions.value[sessionIndex] = nextSession
     }
   }
 
@@ -214,11 +237,32 @@ export function useChatSessionEvents({
       const metadata = normalizeLlmRequestMetadata(persistedMetadata)
       if (!metadata || !isMainDialogueRequestMetadata(metadata)) return
 
+      const currentMetadata = llmRequestMetadataBySession.value.get(sessionId)
+      let metadataToCache = metadata
+      const isSamePersistedRequest = (
+        Number.isInteger(currentMetadata?.work_sequence_no)
+        && currentMetadata.work_sequence_no > 0
+        && currentMetadata.work_sequence_no === metadata.work_sequence_no
+        && (currentMetadata.event_sequence_no ?? 0) === (metadata.event_sequence_no ?? 0)
+      )
+      if (
+        currentMetadata?.input_tokens_source === 'estimated'
+        && currentMetadata?.last_confirmed_context_usage
+        && metadata.input_tokens_source === 'provider'
+        && isSamePersistedRequest
+      ) {
+        metadataToCache = {
+          ...metadata,
+          input_tokens: null,
+          input_tokens_source: 'estimated'
+        }
+      }
+
       // 完整会话刷新需要同步断线期间产生的累计用量。
       cacheLlmRequestMetadata(
         sessionId,
-        llmRequestMetadataBySession.value.get(sessionId),
-        metadata
+        currentMetadata,
+        metadataToCache
       )
     },
     { immediate: true, flush: 'sync' }
@@ -367,6 +411,7 @@ export function useChatSessionEvents({
           !isCurrentStreamEvent(data)
           || contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)
         ) return
+        invalidateCurrentLlmRequestInput(data)
         contextSummaryTracker.endContextSummaryWork(
           contextSummaryWorkKeys.value,
           contextSummaryRequestKeys,
@@ -605,6 +650,7 @@ export function useChatSessionEvents({
       chatState.messages.value = result.messages
     }
 
+    refreshSessionLoadingState()
     void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
       console.error('Audit tool result history merge failed:', err)
     })
@@ -633,6 +679,7 @@ export function useChatSessionEvents({
     workLifecycleTracker,
     isContextSummarizing,
     llmRequestMetadata,
+    invalidateCurrentLlmRequestInput,
     processAiResponse,
     createStreamCallbacks,
     finishRequestLifecycle,

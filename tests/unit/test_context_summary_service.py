@@ -194,7 +194,11 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
     assert cleanup_calls[0].startswith("context-summary:")
     assert lifecycle_events == [
         {"type": "context_summary_start"},
-        {"type": "context_summary_end"},
+        {
+            "type": "context_summary_end",
+            "context_summary_revision": 1,
+            "context_content_revision": 0,
+        },
     ]
 
 
@@ -263,7 +267,11 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
     assert len(generated_calls) == 1
     assert lifecycle_events == [
         {"type": "context_summary_start"},
-        {"type": "context_summary_end"},
+        {
+            "type": "context_summary_end",
+            "context_summary_revision": 1,
+            "context_content_revision": 0,
+        },
     ]
 
 
@@ -610,6 +618,7 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
         monkeypatch,
         update_result=False,
     )
+    lifecycle_events = []
     states = iter(
         [
             ContextSummaryState(content="old summary", message_id=8, revision=3),
@@ -617,9 +626,13 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
                 content="newer concurrent summary",
                 message_id=12,
                 revision=4,
+                content_revision=7,
             ),
         ]
     )
+
+    async def lifecycle_event_callback(event):
+        lifecycle_events.append(event)
 
     async def get_state(_db, *, session_id, uid):
         return next(states)
@@ -647,16 +660,26 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
         reserved_tokens=0,
         safety_margin_tokens=0,
         force=True,
+        lifecycle_event_callback=lifecycle_event_callback,
     )
 
     assert state == ContextSummaryState(
         content="newer concurrent summary",
         message_id=12,
         revision=4,
+        content_revision=7,
     )
     assert update_calls[0]["expected_message_id"] == 8
     assert update_calls[0]["expected_revision"] == 3
     assert selected_calls[0]["profile_id"] == 9
+    assert lifecycle_events == [
+        {"type": "context_summary_start"},
+        {
+            "type": "context_summary_end",
+            "context_summary_revision": 4,
+            "context_content_revision": 7,
+        },
+    ]
 
 
 @pytest.mark.asyncio

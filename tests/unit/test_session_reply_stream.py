@@ -18,10 +18,12 @@ from app.core.session_reply_queue.manager import SessionReplyQueueManager
 from app.core.session_reply_queue.manager_common import build_foreground_message_dedupe_key
 from app.core.utils.dispatcher.helpers import dump_output_history
 from app.core.utils.dispatcher.save_message import _to_storable_content
+from app.core.utils.request_token_baseline import extract_provider_token_metrics
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkCategory, SessionReplyWorkStatus, SessionReplyWorkType
 from app.providers.llm import client as llm_client_module
 from app.providers.llm.client import LLMClient
+from app.transformers.openai import OpenAIChatCompletionsTransformer
 
 
 @pytest.fixture
@@ -265,6 +267,148 @@ async def test_generate_with_stream_callback_emits_content_and_rebuilds_tool_cal
     }
     assert response.model == "model-final"
     assert response.usage["total_tokens"] == 3
+
+
+@pytest.mark.asyncio
+async def test_generate_with_stream_callback_merges_partial_stream_usage(monkeypatch):
+    raw_chunks = [
+        {
+            "choices": [{"delta": {"content": "answer"}}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 2,
+                "total_tokens": 12,
+                "prompt_tokens_details": {"cached_tokens": 4, "audio_tokens": 1},
+            },
+        },
+        {"usage": None},
+        {"usage": {}},
+        {"usage": {"completion_tokens": 3}},
+        {"usage": {"prompt_tokens_details": {}}},
+        {"usage": {"prompt_tokens_details": {"cached_tokens": 0}}},
+    ]
+    chunks = []
+    for raw_chunk in raw_chunks:
+        normalized, _ = OpenAIChatCompletionsTransformer._normalize_stream_event(raw_chunk)
+        assert normalized is not None
+        chunks.append(normalized)
+
+    async def generate_stream(cls, **_kwargs):
+        for chunk in chunks:
+            yield chunk
+
+    async def on_content(_content: str) -> None:
+        return None
+
+    monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
+
+    response = await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="test")],
+        on_content=on_content,
+    )
+
+    assert isinstance(response, InternalResponse)
+    assert response.usage == {
+        "prompt_tokens": 10,
+        "completion_tokens": 3,
+        "total_tokens": 12,
+        "prompt_tokens_details": {"cached_tokens": 0, "audio_tokens": 1},
+        "cached_tokens": 0,
+    }
+    assert extract_provider_token_metrics(response.usage)["input_tokens"] == 10
+
+
+@pytest.mark.asyncio
+async def test_generate_with_stream_callback_replaces_later_complete_stream_usage(monkeypatch):
+    raw_chunks = [
+        {
+            "choices": [{"delta": {"content": "answer"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+        },
+        {
+            "usage": {"prompt_tokens": 20, "completion_tokens": 3, "total_tokens": 23},
+        },
+    ]
+    chunks = []
+    for raw_chunk in raw_chunks:
+        normalized, _ = OpenAIChatCompletionsTransformer._normalize_stream_event(raw_chunk)
+        assert normalized is not None
+        chunks.append(normalized)
+
+    async def generate_stream(cls, **_kwargs):
+        for chunk in chunks:
+            yield chunk
+
+    async def on_content(_content: str) -> None:
+        return None
+
+    monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
+
+    response = await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="test")],
+        on_content=on_content,
+    )
+
+    assert isinstance(response, InternalResponse)
+    assert response.usage == {
+        "prompt_tokens": 20,
+        "completion_tokens": 3,
+        "total_tokens": 23,
+        "cached_tokens": None,
+    }
+    assert extract_provider_token_metrics(response.usage)["input_tokens"] == 20
+
+
+@pytest.mark.asyncio
+async def test_generate_with_stream_callback_does_not_share_usage_between_requests(monkeypatch):
+    raw_streams = [
+        [
+            {
+                "choices": [{"delta": {"content": "first"}}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 1, "total_tokens": 8},
+            }
+        ],
+        [{"choices": [{"delta": {"content": "second"}}]}],
+    ]
+
+    async def generate_stream(cls, **_kwargs):
+        for raw_chunk in raw_streams.pop(0):
+            normalized, _ = OpenAIChatCompletionsTransformer._normalize_stream_event(raw_chunk)
+            assert normalized is not None
+            yield normalized
+
+    async def on_content(_content: str) -> None:
+        return None
+
+    monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
+
+    first_response = await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="first")],
+        on_content=on_content,
+    )
+    second_response = await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="second")],
+        on_content=on_content,
+    )
+
+    assert isinstance(first_response, InternalResponse)
+    assert isinstance(second_response, InternalResponse)
+    assert first_response.usage["prompt_tokens"] == 7
+    assert extract_provider_token_metrics(first_response.usage)["input_tokens"] == 7
+    assert second_response.usage == {}
+    assert extract_provider_token_metrics(second_response.usage) == {}
 
 
 @pytest.mark.asyncio
