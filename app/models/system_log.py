@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from sqlalchemy import Index
 from sqlmodel import (
     Column,
     DateTime,
@@ -21,6 +22,10 @@ class SystemLogBase(SQLModel):
 
 class SystemLog(SystemLogBase, table=True):
     __tablename__ = "system_log"
+    __table_args__ = (
+        Index("ix_system_log_created_at_id", "created_at", "id"),
+        {"sqlite_autoincrement": True},
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     created_at: datetime | None = Field(

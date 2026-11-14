@@ -184,6 +184,8 @@ const createHarness = async (t, options = {}) => {
   }
   const defaultSystemSettings = {
     log_locale: 'en',
+    log_retention_days: 7,
+    log_max_entries: 100000,
     temp_dir_max_size_mb: 2048,
     llm_request_max_size_mb: 64,
     audit_retention_days: 120,
@@ -649,6 +651,8 @@ test('ordinary users and superusers load safe model options without the channel 
 test('superuser can load, open, and save global settings', async t => {
   const loadedSettings = {
     log_locale: 'en',
+    log_retention_days: 30,
+    log_max_entries: 50000,
     temp_dir_max_size_mb: 4096,
     llm_request_max_size_mb: 128,
     audit_retention_days: 180,
@@ -666,9 +670,13 @@ test('superuser can load, open, and save global settings', async t => {
   })
 
   assert.equal(harness.module.systemSettings.log_redaction_enabled, false)
+  assert.equal(harness.module.systemSettings.log_retention_days, 7)
+  assert.equal(harness.module.systemSettings.log_max_entries, 100000)
   assert.equal(await harness.module.loadSystemSettings(), true)
   assert.equal(harness.api.systemSettings.length, 1)
   assert.deepEqual(normalize(harness.module.systemSettings), loadedSettings)
+  assert.equal(harness.module.systemSettings.log_retention_days, 30)
+  assert.equal(harness.module.systemSettings.log_max_entries, 50000)
   assert.equal(harness.module.systemSettings.agent_work_max_concurrency, 12)
   assert.equal(typeof harness.module.systemSettings.log_redaction_enabled, 'boolean')
 
@@ -676,17 +684,25 @@ test('superuser can load, open, and save global settings', async t => {
   assert.equal(harness.api.systemSettings.length, 2)
   assert.equal(harness.module.settingsDialogVisible.value, true)
   assert.equal(harness.module.systemSettings.log_redaction_enabled, true)
+  assert.equal(harness.module.systemSettings.log_retention_days, 30)
+  assert.equal(harness.module.systemSettings.log_max_entries, 50000)
 
   harness.module.systemSettings.audit_retention_days = 365
+  harness.module.systemSettings.log_retention_days = 45
+  harness.module.systemSettings.log_max_entries = 250000
   harness.module.systemSettings.llm_request_max_size_mb = 256
   harness.module.systemSettings.agent_work_max_concurrency = 6
   harness.module.systemSettings.log_redaction_enabled = false
   const expectedPayload = normalize(harness.module.systemSettings)
+  assert.equal(expectedPayload.log_retention_days, 45)
+  assert.equal(expectedPayload.log_max_entries, 250000)
   assert.equal(typeof expectedPayload.log_redaction_enabled, 'boolean')
   assert.equal(expectedPayload.log_redaction_enabled, false)
   await harness.module.saveSystemSettings()
 
   assert.deepEqual(harness.api.systemSettingsUpdates, [expectedPayload])
+  assert.equal(harness.api.systemSettingsUpdates[0].log_retention_days, 45)
+  assert.equal(harness.api.systemSettingsUpdates[0].log_max_entries, 250000)
   assert.equal(harness.api.systemSettingsUpdates[0].llm_request_max_size_mb, 256)
   assert.equal(harness.api.systemSettingsUpdates[0].agent_work_max_concurrency, 6)
   assert.equal('session_reply_max_concurrency' in harness.api.systemSettingsUpdates[0], false)
@@ -696,6 +712,8 @@ test('superuser can load, open, and save global settings', async t => {
     ...expectedPayload,
     audit_report_email: 'saved@example.com',
   })
+  assert.equal(harness.module.systemSettings.log_retention_days, 45)
+  assert.equal(harness.module.systemSettings.log_max_entries, 250000)
   assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 256)
   assert.equal(harness.module.systemSettings.agent_work_max_concurrency, 6)
   assert.equal(harness.module.systemSettings.log_redaction_enabled, false)
@@ -706,10 +724,14 @@ test('superuser can load, open, and save global settings', async t => {
   await harness.module.showSystemSettingsDialog()
   assert.equal(harness.api.systemSettings.length, 3)
   assert.equal(harness.module.systemSettings.log_redaction_enabled, true)
+  assert.equal(harness.module.systemSettings.log_retention_days, 30)
+  assert.equal(harness.module.systemSettings.log_max_entries, 50000)
   harness.module.systemSettings.log_redaction_enabled = false
   await harness.module.saveSystemSettings()
 
   assert.equal(harness.api.systemSettingsUpdates.length, 2)
+  assert.equal(harness.api.systemSettingsUpdates[1].log_retention_days, 30)
+  assert.equal(harness.api.systemSettingsUpdates[1].log_max_entries, 50000)
   assert.equal(typeof harness.api.systemSettingsUpdates[1].log_redaction_enabled, 'boolean')
   assert.equal(harness.api.systemSettingsUpdates[1].log_redaction_enabled, false)
   assert.equal(harness.module.systemSettings.log_redaction_enabled, false)
@@ -778,10 +800,14 @@ test('failed global settings save preserves the request size and dialog state', 
 
   await harness.module.showSystemSettingsDialog()
   harness.module.systemSettings.llm_request_max_size_mb = 256
+  harness.module.systemSettings.log_retention_days = 14
+  harness.module.systemSettings.log_max_entries = 200000
   harness.module.systemSettings.log_redaction_enabled = true
   await harness.module.saveSystemSettings()
 
   assert.equal(harness.module.systemSettings.llm_request_max_size_mb, 256)
+  assert.equal(harness.module.systemSettings.log_retention_days, 14)
+  assert.equal(harness.module.systemSettings.log_max_entries, 200000)
   assert.equal(harness.module.systemSettings.log_redaction_enabled, true)
   assert.equal(typeof harness.module.systemSettings.log_redaction_enabled, 'boolean')
   assert.equal(harness.module.settingsDialogVisible.value, true)

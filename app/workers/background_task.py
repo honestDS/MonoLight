@@ -35,7 +35,7 @@ async def run_owned_background_task_worker(
 
     background_task_manager.start()
     cleaner_tasks = [
-        asyncio.create_task(background_log_cleaner(7)),
+        asyncio.create_task(background_log_cleaner()),
         asyncio.create_task(background_temp_cleaner()),
         asyncio.create_task(background_context_summary_cleaner()),
     ]

@@ -148,6 +148,36 @@
           />
           <div id="log-redaction-hint" class="help-text mt-5 full-width-input">{{ $t('profiles.log_redaction_enabled_hint') }}</div>
         </el-form-item>
+        <el-form-item :label="$t('profiles.log_retention_days')" required>
+          <el-input-number
+            v-model="systemSettings.log_retention_days"
+            :min="1"
+            :max="3650"
+            :precision="0"
+            :step="1"
+            step-strictly
+            class="full-width-input"
+            controls-position="right"
+            :aria-label="[$t('profiles.log_retention_days'), $t('profiles.log_retention_days_hint')].join(' ')"
+            :disabled="settingsSubmitting"
+          />
+          <div class="help-text mt-5 full-width-input">{{ $t('profiles.log_retention_days_hint') }}</div>
+        </el-form-item>
+        <el-form-item :label="$t('profiles.log_max_entries')" required>
+          <el-input-number
+            v-model="systemSettings.log_max_entries"
+            :min="1"
+            :max="1000000"
+            :precision="0"
+            :step="1"
+            step-strictly
+            class="full-width-input"
+            controls-position="right"
+            :aria-label="[$t('profiles.log_max_entries'), $t('profiles.log_max_entries_hint')].join(' ')"
+            :disabled="settingsSubmitting"
+          />
+          <div class="help-text mt-5 full-width-input">{{ $t('profiles.log_max_entries_hint') }}</div>
+        </el-form-item>
         <el-form-item :label="$t('profiles.temp_dir_max_size_mb')">
           <el-input-number v-model="systemSettings.temp_dir_max_size_mb" :min="1" :max="1048576" class="full-width-input" controls-position="right" />
           <div class="help-text mt-5">{{ $t('profiles.temp_dir_max_size_mb_hint') }}</div>
@@ -171,7 +201,7 @@
       </el-form>
       <template #footer>
         <el-button @click="settingsDialogVisible = false" size="default">{{ $t('profiles.cancel') }}</el-button>
-        <el-button type="primary" @click="saveSystemSettings" size="default" :loading="settingsSubmitting">{{ $t('profiles.save') }}</el-button>
+        <el-button type="primary" @click="saveSystemSettings" size="default" :loading="settingsSubmitting" :disabled="systemSettings.log_retention_days == null || systemSettings.log_max_entries == null">{{ $t('profiles.save') }}</el-button>
       </template>
     </el-dialog>
   </div>

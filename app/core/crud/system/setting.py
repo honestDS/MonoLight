@@ -6,6 +6,8 @@ from sqlmodel import select
 
 from app.core.constants import (
     DEFAULT_LLM_REQUEST_MAX_SIZE_MB,
+    DEFAULT_SYSTEM_LOG_MAX_ENTRIES,
+    DEFAULT_SYSTEM_LOG_RETENTION_DAYS,
     ERR_DATABASE_TYPE_UNSUPPORTED,
     ERR_SETUP_STATUS_NOT_INITIALIZED,
     ERR_SYSTEM_SETTING_NOT_FOUND_AFTER_INSERT,
@@ -16,6 +18,8 @@ from app.core.constants import (
     SETUP_STATUS_CONFIGURING,
     SETUP_STATUS_KEY,
     SETUP_STATUS_PENDING,
+    SYSTEM_LOG_MAX_ENTRIES_UPPER_BOUND,
+    SYSTEM_LOG_RETENTION_DAYS_UPPER_BOUND,
 )
 from app.core.crud.base import CRUDBase
 from app.core.i18n import t
@@ -24,6 +28,8 @@ from app.models.system_setting import SystemRuntimeSettings, SystemSetting
 
 DEFAULT_SYSTEM_SETTINGS = {
     "log_locale": DEFAULT_LOCALE,
+    "log_retention_days": str(DEFAULT_SYSTEM_LOG_RETENTION_DAYS),
+    "log_max_entries": str(DEFAULT_SYSTEM_LOG_MAX_ENTRIES),
     "temp_dir_max_size_mb": "1024",
     "llm_request_max_size_mb": str(DEFAULT_LLM_REQUEST_MAX_SIZE_MB),
     "audit_retention_days": "90",
@@ -34,17 +40,40 @@ DEFAULT_SYSTEM_SETTINGS = {
 
 
 def _parse_llm_request_max_size_mb(value: str | None) -> int:
-    try:
-        parsed = int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return DEFAULT_LLM_REQUEST_MAX_SIZE_MB
-    if parsed is None or not 1 <= parsed <= LLM_REQUEST_MAX_SIZE_MB_UPPER_BOUND:
-        return DEFAULT_LLM_REQUEST_MAX_SIZE_MB
-    return parsed
+    return _parse_bounded_int(
+        value,
+        default=DEFAULT_LLM_REQUEST_MAX_SIZE_MB,
+        upper_bound=LLM_REQUEST_MAX_SIZE_MB_UPPER_BOUND,
+    )
 
 
 def _parse_log_redaction_enabled(value: str | None) -> bool:
     return value is not None and value.strip().lower() == "true"
+
+
+def _parse_bounded_int(value: str | None, *, default: int, upper_bound: int) -> int:
+    try:
+        parsed = int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return default
+    if parsed is None or not 1 <= parsed <= upper_bound:
+        return default
+    return parsed
+
+
+def _parse_log_retention(values: dict[str, str | None]) -> tuple[int, int]:
+    return (
+        _parse_bounded_int(
+            values.get("log_retention_days"),
+            default=DEFAULT_SYSTEM_LOG_RETENTION_DAYS,
+            upper_bound=SYSTEM_LOG_RETENTION_DAYS_UPPER_BOUND,
+        ),
+        _parse_bounded_int(
+            values.get("log_max_entries"),
+            default=DEFAULT_SYSTEM_LOG_MAX_ENTRIES,
+            upper_bound=SYSTEM_LOG_MAX_ENTRIES_UPPER_BOUND,
+        ),
+    )
 
 
 class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
@@ -99,6 +128,13 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
         result = await db.execute(select(SystemSetting.value).where(SystemSetting.key == "log_redaction_enabled"))
         return _parse_log_redaction_enabled(result.scalar_one_or_none())
 
+    async def get_log_retention(self, db: AsyncSession, *, lock_for_update: bool = False) -> tuple[int, int]:
+        statement = select(SystemSetting.key, SystemSetting.value).where(SystemSetting.key.in_(("log_retention_days", "log_max_entries")))
+        if lock_for_update:
+            statement = statement.with_for_update()
+        result = await db.execute(statement)
+        return _parse_log_retention(dict(result.all()))
+
     async def initialize_setup_state(self, db: AsyncSession, *, admin_uid: str | None) -> tuple[str, str | None]:
         initial_status = SETUP_STATUS_COMPLETED if admin_uid else SETUP_STATUS_PENDING
         await self._insert_if_missing(db, key=SETUP_STATUS_KEY, value=initial_status)
@@ -133,6 +169,7 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
         raw_audit_report_email = values.get("audit_report_email", DEFAULT_SYSTEM_SETTINGS["audit_report_email"])
         raw_agent_work_max_concurrency = values.get("agent_work_max_concurrency", DEFAULT_SYSTEM_SETTINGS["agent_work_max_concurrency"])
         raw_log_redaction_enabled = values.get("log_redaction_enabled", DEFAULT_SYSTEM_SETTINGS["log_redaction_enabled"])
+        log_retention_days, log_max_entries = _parse_log_retention(values)
         try:
             temp_dir_max_size_mb = int(raw_temp_dir_max_size_mb)
         except (TypeError, ValueError):
@@ -150,6 +187,8 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
             log_locale=normalize_locale(raw_log_locale),
             temp_dir_max_size_mb=temp_dir_max_size_mb,
             llm_request_max_size_mb=llm_request_max_size_mb,
+            log_retention_days=log_retention_days,
+            log_max_entries=log_max_entries,
             audit_retention_days=audit_retention_days,
             audit_report_email=str(raw_audit_report_email or "").strip(),
             agent_work_max_concurrency=agent_work_max_concurrency,
@@ -167,6 +206,10 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
             "agent_work_max_concurrency": str(normalized.agent_work_max_concurrency),
             "log_redaction_enabled": "true" if normalized.log_redaction_enabled else "false",
         }
+        if "log_retention_days" in settings.model_fields_set:
+            values["log_retention_days"] = str(normalized.log_retention_days)
+        if "log_max_entries" in settings.model_fields_set:
+            values["log_max_entries"] = str(normalized.log_max_entries)
         for key, value in values.items():
             db_obj = await self.get_by_key(db, key)
             if db_obj:

@@ -2,8 +2,7 @@ from app.core.constants import SEND_FILE_TO_USER_TOOL_NAME
 
 MESSAGES = {
     "MSG_LOG_LIST_SUCCESS": "Log list retrieved successfully",
-    "MSG_LOG_CLEANER_CLEARED": "Cleared {deleted_count} expired system logs",
-    "ERR_LOG_CLEANER_FAILED": "Failed to clean expired system logs: {message}",
+    "ERR_LOG_CLEANER_FAILED": "Failed to clean up log history: {message}",
     "MSG_TEMP_CLEANER_CLEARED": "Cleared {deleted_count} temporary files. Current largest single temp directory size: {current_size} bytes, per-directory limit: {max_size_bytes} bytes",
     "ERR_TEMP_CLEANER_FAILED": "Failed to clean temp directory: {message}",
     "ERR_TEMP_CLEANER_DELETE_FAILED": "Failed to delete temporary file: {message}",

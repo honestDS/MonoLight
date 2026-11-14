@@ -53,7 +53,7 @@ async def test_background_task_worker_starts_and_stops_manager_and_cleaners(monk
     monkeypatch.setattr(background_task_worker, "run_with_worker_lease", run_with_lease)
     monkeypatch.setattr(background_task_worker.background_task_manager, "start", start_manager)
     monkeypatch.setattr(background_task_worker.background_task_manager, "stop", stop_manager)
-    monkeypatch.setattr(background_task_worker, "background_log_cleaner", lambda days: cleaner("log-cleaner"))
+    monkeypatch.setattr(background_task_worker, "background_log_cleaner", lambda: cleaner("log-cleaner"))
     monkeypatch.setattr(background_task_worker, "background_temp_cleaner", lambda: cleaner("temp-cleaner"))
     monkeypatch.setattr(
         background_task_worker,

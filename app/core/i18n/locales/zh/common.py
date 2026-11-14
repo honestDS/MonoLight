@@ -2,8 +2,7 @@ from app.core.constants import SEND_FILE_TO_USER_TOOL_NAME
 
 MESSAGES = {
     "MSG_LOG_LIST_SUCCESS": "日志获取成功",
-    "MSG_LOG_CLEANER_CLEARED": "已清理 {deleted_count} 条过期系统日志",
-    "ERR_LOG_CLEANER_FAILED": "清理过期系统日志失败: {message}",
+    "ERR_LOG_CLEANER_FAILED": "清理历史日志失败: {message}",
     "MSG_TEMP_CLEANER_CLEARED": "已清理 {deleted_count} 个临时文件，当前最大单个临时目录大小 {current_size} 字节，单目录上限 {max_size_bytes} 字节",
     "ERR_TEMP_CLEANER_FAILED": "清理临时目录失败: {message}",
     "ERR_TEMP_CLEANER_DELETE_FAILED": "删除临时文件失败: {message}",

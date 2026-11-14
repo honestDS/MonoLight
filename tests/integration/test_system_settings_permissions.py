@@ -26,6 +26,8 @@ SETTINGS_PATH = "/api/v1/system/settings"
 RUNTIME_KEYS = (
     "log_locale",
     "log_redaction_enabled",
+    "log_retention_days",
+    "log_max_entries",
     "temp_dir_max_size_mb",
     "llm_request_max_size_mb",
     "audit_retention_days",
@@ -115,6 +117,8 @@ def _assert_error(response: httpx.Response, code: int, message: str) -> None:
 VALID_SETTINGS = {
     "log_locale": "en",
     "log_redaction_enabled": True,
+    "log_retention_days": 14,
+    "log_max_entries": 250000,
     "temp_dir_max_size_mb": 3072,
     "llm_request_max_size_mb": 64,
     "audit_retention_days": 365,
@@ -125,6 +129,24 @@ VALID_SETTINGS = {
 INVALID_LLM_REQUEST_MAX_SIZE_VALUES = (0, -1, 1025, 1.5, None, "invalid")
 INVALID_STORED_LLM_REQUEST_MAX_SIZE_VALUES = ("-1", "0", "1025", "invalid")
 INVALID_AGENT_WORK_MAX_CONCURRENCY_VALUES = (0, 101, None, 1.5, "invalid")
+INVALID_LOG_RETENTION_SETTINGS = (
+    ("log_retention_days", 0),
+    ("log_retention_days", -1),
+    ("log_retention_days", 3651),
+    ("log_retention_days", 1.5),
+    ("log_retention_days", True),
+    ("log_retention_days", False),
+    ("log_retention_days", None),
+    ("log_retention_days", "14"),
+    ("log_max_entries", 0),
+    ("log_max_entries", -1),
+    ("log_max_entries", 1000001),
+    ("log_max_entries", 1.5),
+    ("log_max_entries", True),
+    ("log_max_entries", False),
+    ("log_max_entries", None),
+    ("log_max_entries", "250000"),
+)
 
 
 FORBIDDEN_REQUESTS = (
@@ -212,6 +234,8 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
         assert initial.json()["data"] == {
             "log_locale": "en",
             "log_redaction_enabled": False,
+            "log_retention_days": 7,
+            "log_max_entries": 100000,
             "temp_dir_max_size_mb": 2048,
             "llm_request_max_size_mb": 32,
             "audit_retention_days": 180,
@@ -225,6 +249,8 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
             json={
                 "log_locale": " EN-US ",
                 "log_redaction_enabled": True,
+                "log_retention_days": 14,
+                "log_max_entries": 250000,
                 "temp_dir_max_size_mb": 3072,
                 "llm_request_max_size_mb": 64,
                 "audit_retention_days": 365,
@@ -240,6 +266,8 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
         assert persisted == {
             "log_locale": "en",
             "log_redaction_enabled": "true",
+            "log_retention_days": "14",
+            "log_max_entries": "250000",
             "temp_dir_max_size_mb": "3072",
             "llm_request_max_size_mb": "64",
             "audit_retention_days": "365",
@@ -251,6 +279,93 @@ async def test_superuser_reads_updates_and_persists_normalized_system_settings(
         assert after.status_code == 200
         assert after.json()["code"] == 200
         assert after.json()["data"] == VALID_SETTINGS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setting_key", "value"),
+    (
+        ("log_retention_days", 1),
+        ("log_retention_days", 3650),
+        ("log_max_entries", 1),
+        ("log_max_entries", 1000000),
+    ),
+)
+async def test_superuser_persists_log_retention_boundaries(
+    api_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    setting_key: str,
+    value: int,
+) -> None:
+    token = _token("admin")
+    payload = {**VALID_SETTINGS, setting_key: value}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        updated = await _request(client, "POST", token=token, json=payload)
+        assert updated.status_code == 200
+        assert updated.json()["code"] == 200
+        assert updated.json()["data"] == payload
+
+        persisted = {key: stored_value for _, key, stored_value in await _settings_snapshot(setup_session_factory) if key == setting_key}
+        assert persisted == {setting_key: str(value)}
+
+        read_back = await _request(client, "GET", token=token)
+        assert read_back.status_code == 200
+        assert read_back.json()["code"] == 200
+        assert read_back.json()["data"][setting_key] == value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("setting_key", "invalid_value"), INVALID_LOG_RETENTION_SETTINGS)
+async def test_superuser_rejects_invalid_log_retention_settings_without_changes(
+    api_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    setting_key: str,
+    invalid_value: Any,
+) -> None:
+    token = _token("admin")
+    payload = {**VALID_SETTINGS, setting_key: invalid_value}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        before = await _settings_snapshot(setup_session_factory)
+        response = await _request(client, "POST", token=token, json=payload)
+        assert response.status_code == 422
+        assert await _settings_snapshot(setup_session_factory) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "omitted_keys",
+    (
+        ("log_retention_days",),
+        ("log_max_entries",),
+        ("log_retention_days", "log_max_entries"),
+    ),
+)
+async def test_omitting_log_retention_settings_preserves_existing_values(
+    api_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    omitted_keys: tuple[str, ...],
+) -> None:
+    token = _token("admin")
+    existing_values = {"log_retention_days": 21, "log_max_entries": 300000}
+    async with setup_session_factory() as session:
+        session.add_all(SystemSetting(key=key, value=str(value)) for key, value in existing_values.items())
+        await session.commit()
+
+    payload = {key: value for key, value in VALID_SETTINGS.items() if key not in omitted_keys}
+    expected_values = {key: existing_values[key] if key in omitted_keys else VALID_SETTINGS[key] for key in existing_values}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        updated = await _request(client, "POST", token=token, json=payload)
+        assert updated.status_code == 200
+        assert updated.json()["code"] == 200
+        assert {key: updated.json()["data"][key] for key in expected_values} == expected_values
+
+        persisted = {key: stored_value for _, key, stored_value in await _settings_snapshot(setup_session_factory) if key in expected_values}
+        assert persisted == {key: str(value) for key, value in expected_values.items()}
+
+        read_back = await _request(client, "GET", token=token)
+        assert read_back.status_code == 200
+        assert read_back.json()["code"] == 200
+        assert {key: read_back.json()["data"][key] for key in expected_values} == expected_values
 
 
 @pytest.mark.asyncio

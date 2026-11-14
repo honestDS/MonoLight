@@ -2,14 +2,18 @@ import asyncio
 import heapq
 import os
 import shutil
+from datetime import timedelta
 from pathlib import Path
 
 from app.core.constants import (
     ERR_LOG_CLEANER_FAILED,
     ERR_TEMP_CLEANER_DELETE_FAILED,
     ERR_TEMP_CLEANER_FAILED,
-    MSG_LOG_CLEANER_CLEARED,
     MSG_TEMP_CLEANER_CLEARED,
+    SYSTEM_LOG_CLEANUP_BATCH_PAUSE_SECONDS,
+    SYSTEM_LOG_CLEANUP_BATCH_SIZE,
+    SYSTEM_LOG_CLEANUP_INTERVAL_SECONDS,
+    SYSTEM_LOG_REALTIME_GRACE_SECONDS,
 )
 from app.core.crud.system.log import system_log_crud
 from app.core.crud.system.setting import system_setting_crud
@@ -17,7 +21,8 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import TEMP_DIR
 from app.core.user.file_cleanup import recover_user_file_cleanup
-from app.providers.database import AsyncSessionLocal
+from app.core.utils.time import get_local_time
+from app.providers.database import AsyncSessionLocal, ensure_sqlite_outer_transaction
 
 logger = get_logger(__name__)
 
@@ -135,15 +140,42 @@ async def background_temp_cleaner(interval_seconds: int = 10):
         await asyncio.sleep(interval_seconds)
 
 
-async def background_log_cleaner(days: int = 7):
-    while True:
-        try:
-            async with AsyncSessionLocal() as db:
-                deleted_count = await system_log_crud.clear_expired_logs(db, days=days)
-                await db.commit()
-                if deleted_count > 0:
-                    logger.bind(deleted_count=deleted_count, retention_days=days).info(t(MSG_LOG_CLEANER_CLEARED, deleted_count=deleted_count))
-        except Exception as e:
-            logger.bind(retention_days=days).error(t(ERR_LOG_CLEANER_FAILED, message=str(e)))
+async def _cleanup_system_log_batch() -> int | None:
+    async with AsyncSessionLocal() as db:
+        await ensure_sqlite_outer_transaction(db)
+        policy = await system_setting_crud.get_log_retention(db)
+        retention_days, max_entries = policy
+        now = get_local_time()
+        log_ids = await system_log_crud.list_old_log_ids(
+            db,
+            cutoff=now - timedelta(days=retention_days),
+            max_entries=max_entries,
+            batch_size=SYSTEM_LOG_CLEANUP_BATCH_SIZE,
+            written_before=now - timedelta(seconds=SYSTEM_LOG_REALTIME_GRACE_SECONDS),
+        )
 
-        await asyncio.sleep(86400)  # 24 hours
+    if not log_ids:
+        return 0
+
+    async with AsyncSessionLocal() as db, db.begin():
+        connection = await db.connection()
+        if connection.dialect.name == "sqlite":
+            await connection.exec_driver_sql("BEGIN IMMEDIATE")
+        current_policy = await system_setting_crud.get_log_retention(db, lock_for_update=True)
+        # 更宽松设置已保存时，不按旧规则删除。
+        if current_policy != policy:
+            return None
+        return await system_log_crud.delete_log_ids(db, ids=log_ids)
+
+
+async def background_log_cleaner(*, interval_seconds: float = SYSTEM_LOG_CLEANUP_INTERVAL_SECONDS) -> None:
+    while True:
+        pause_seconds = interval_seconds
+        try:
+            deleted_count = await _cleanup_system_log_batch()
+            if deleted_count is None or deleted_count == SYSTEM_LOG_CLEANUP_BATCH_SIZE:
+                pause_seconds = SYSTEM_LOG_CLEANUP_BATCH_PAUSE_SECONDS
+        except Exception as e:
+            logger.error(t(ERR_LOG_CLEANER_FAILED, message=str(e)))
+
+        await asyncio.sleep(pause_seconds)
