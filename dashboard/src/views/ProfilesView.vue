@@ -131,73 +131,119 @@
       @closed="closeMemoryEmbeddingDialog"
     />
 
-    <el-dialog v-if="userPermissions.isSuperuser" :title="$t('profiles.global_settings')" v-model="settingsDialogVisible" width="520px" class="standard-dialog dialog-with-scroll-body" center align-center>
-      <el-form :model="systemSettings" label-width="150px" size="default">
-        <el-form-item :label="$t('profiles.log_locale')">
-          <el-select v-model="systemSettings.log_locale" class="full-width-input">
-            <el-option v-for="locale in localeOptions" :key="locale.value" :label="locale.label" :value="locale.value" />
-          </el-select>
-          <div class="help-text mt-5">{{ $t('profiles.log_locale_hint') }}</div>
-        </el-form-item>
-        <el-form-item :label="$t('profiles.log_redaction_enabled')">
-          <el-switch
-            v-model="systemSettings.log_redaction_enabled"
-            :aria-label="$t('profiles.log_redaction_enabled')"
-            aria-describedby="log-redaction-hint"
-            :disabled="settingsSubmitting"
-          />
-          <div id="log-redaction-hint" class="help-text mt-5 full-width-input">{{ $t('profiles.log_redaction_enabled_hint') }}</div>
-        </el-form-item>
-        <el-form-item :label="$t('profiles.log_retention_days')" required>
-          <el-input-number
-            v-model="systemSettings.log_retention_days"
-            :min="1"
-            :max="3650"
-            :precision="0"
-            :step="1"
-            step-strictly
-            class="full-width-input"
-            controls-position="right"
-            :aria-label="[$t('profiles.log_retention_days'), $t('profiles.log_retention_days_hint')].join(' ')"
-            :disabled="settingsSubmitting"
-          />
-          <div class="help-text mt-5 full-width-input">{{ $t('profiles.log_retention_days_hint') }}</div>
-        </el-form-item>
-        <el-form-item :label="$t('profiles.log_max_entries')" required>
-          <el-input-number
-            v-model="systemSettings.log_max_entries"
-            :min="1"
-            :max="1000000"
-            :precision="0"
-            :step="1"
-            step-strictly
-            class="full-width-input"
-            controls-position="right"
-            :aria-label="[$t('profiles.log_max_entries'), $t('profiles.log_max_entries_hint')].join(' ')"
-            :disabled="settingsSubmitting"
-          />
-          <div class="help-text mt-5 full-width-input">{{ $t('profiles.log_max_entries_hint') }}</div>
-        </el-form-item>
-        <el-form-item :label="$t('profiles.temp_dir_max_size_mb')">
-          <el-input-number v-model="systemSettings.temp_dir_max_size_mb" :min="1" :max="1048576" class="full-width-input" controls-position="right" />
-          <div class="help-text mt-5">{{ $t('profiles.temp_dir_max_size_mb_hint') }}</div>
-        </el-form-item>
-        <el-form-item :label="$t('profiles.llm_request_max_size_mb')">
-          <el-input-number v-model="systemSettings.llm_request_max_size_mb" :min="1" :max="1024" :precision="0" :step="1" step-strictly class="full-width-input" controls-position="right" :aria-label="$t('profiles.llm_request_max_size_mb')" />
-          <div class="help-text mt-5">{{ $t('profiles.llm_request_max_size_mb_hint') }}</div>
-        </el-form-item>
-        <el-form-item :label="$t('profiles.audit_retention_days')">
-          <el-input-number v-model="systemSettings.audit_retention_days" :min="1" :max="3650" class="full-width-input" controls-position="right" />
-          <div class="help-text mt-5">{{ $t('profiles.audit_retention_days_hint') }}</div>
-        </el-form-item>
-        <el-form-item :label="$t('profiles.audit_report_email')">
-          <el-input v-model.trim="systemSettings.audit_report_email" type="email" :placeholder="$t('profiles.audit_report_email_placeholder')" class="full-width-input" />
-          <div class="help-text mt-5">{{ $t('profiles.audit_report_email_hint') }}</div>
-        </el-form-item>
-        <el-form-item :label="$t('profiles.agent_work_max_concurrency')">
-          <el-input-number v-model="systemSettings.agent_work_max_concurrency" :min="1" :max="100" class="full-width-input" controls-position="right" />
-          <div class="help-text mt-5">{{ $t('profiles.agent_work_max_concurrency_hint') }}</div>
-        </el-form-item>
+    <el-dialog v-if="userPermissions.isSuperuser" :title="$t('profiles.global_settings')" v-model="settingsDialogVisible" width="800px" class="standard-dialog dialog-with-scroll-body global-settings-dialog" center align-center>
+      <el-form :model="systemSettings" label-position="top" class="global-settings-form" size="default">
+        <section class="settings-section" aria-labelledby="global-log-settings-title">
+          <h3 class="settings-section-title" id="global-log-settings-title">{{ $t('profiles.global_log_settings') }}</h3>
+          <div class="global-settings-grid">
+            <el-form-item :label="$t('profiles.log_locale')">
+              <template #label>
+                {{ $t('profiles.log_locale') }}
+                <HelpTooltip :content="$t('profiles.log_locale_hint')" />
+              </template>
+              <el-select v-model="systemSettings.log_locale" class="full-width-input">
+                <el-option v-for="locale in localeOptions" :key="locale.value" :label="locale.label" :value="locale.value" />
+              </el-select>
+            </el-form-item>
+            <el-form-item :label="$t('profiles.log_redaction_enabled')">
+              <template #label>
+                {{ $t('profiles.log_redaction_enabled') }}
+                <HelpTooltip :content="$t('profiles.log_redaction_enabled_hint')" />
+              </template>
+              <el-switch
+                v-model="systemSettings.log_redaction_enabled"
+                :aria-label="$t('profiles.log_redaction_enabled')"
+                aria-describedby="global-log-safety-notice"
+                :disabled="settingsSubmitting"
+              />
+            </el-form-item>
+            <el-form-item :label="$t('profiles.log_retention_days')" required>
+              <template #label>
+                {{ $t('profiles.log_retention_days') }}
+                <HelpTooltip :content="$t('profiles.log_retention_days_hint')" />
+              </template>
+              <el-input-number
+                v-model="systemSettings.log_retention_days"
+                :min="1"
+                :max="3650"
+                :precision="0"
+                :step="1"
+                step-strictly
+                class="full-width-input"
+                controls-position="right"
+                :aria-label="[$t('profiles.log_retention_days'), $t('profiles.log_retention_days_hint')].join(' ')"
+                :disabled="settingsSubmitting"
+              />
+            </el-form-item>
+            <el-form-item :label="$t('profiles.log_max_entries')" required>
+              <template #label>
+                {{ $t('profiles.log_max_entries') }}
+                <HelpTooltip :content="$t('profiles.log_max_entries_hint')" />
+              </template>
+              <el-input-number
+                v-model="systemSettings.log_max_entries"
+                :min="1"
+                :max="1000000"
+                :precision="0"
+                :step="1"
+                step-strictly
+                class="full-width-input"
+                controls-position="right"
+                :aria-label="[$t('profiles.log_max_entries'), $t('profiles.log_max_entries_hint')].join(' ')"
+                :disabled="settingsSubmitting"
+              />
+            </el-form-item>
+          </div>
+          <p id="global-log-safety-notice" class="global-settings-notice">{{ $t('profiles.global_log_safety_notice') }}</p>
+        </section>
+
+        <section class="settings-section" aria-labelledby="global-resource-settings-title">
+          <h3 class="settings-section-title" id="global-resource-settings-title">{{ $t('profiles.global_resource_settings') }}</h3>
+          <div class="global-settings-grid global-settings-grid--resources">
+            <el-form-item :label="$t('profiles.temp_dir_max_size_mb')">
+              <template #label>
+                {{ $t('profiles.temp_dir_max_size_mb') }}
+                <HelpTooltip :content="$t('profiles.temp_dir_max_size_mb_hint')" />
+              </template>
+              <el-input-number v-model="systemSettings.temp_dir_max_size_mb" :min="1" :max="1048576" class="full-width-input" controls-position="right" />
+            </el-form-item>
+            <el-form-item :label="$t('profiles.llm_request_max_size_mb')">
+              <template #label>
+                {{ $t('profiles.llm_request_max_size_mb') }}
+                <HelpTooltip :content="$t('profiles.llm_request_max_size_mb_hint')" />
+              </template>
+              <el-input-number v-model="systemSettings.llm_request_max_size_mb" :min="1" :max="1024" :precision="0" :step="1" step-strictly class="full-width-input" controls-position="right" :aria-label="$t('profiles.llm_request_max_size_mb')" />
+            </el-form-item>
+            <el-form-item :label="$t('profiles.agent_work_max_concurrency')">
+              <template #label>
+                {{ $t('profiles.agent_work_max_concurrency') }}
+                <HelpTooltip :content="$t('profiles.agent_work_max_concurrency_hint')" />
+              </template>
+              <el-input-number v-model="systemSettings.agent_work_max_concurrency" :min="1" :max="100" class="full-width-input" controls-position="right" />
+            </el-form-item>
+          </div>
+        </section>
+
+        <section class="settings-section" aria-labelledby="global-audit-settings-title">
+          <h3 class="settings-section-title" id="global-audit-settings-title">{{ $t('profiles.global_audit_settings') }}</h3>
+          <div class="global-settings-grid">
+            <el-form-item :label="$t('profiles.audit_retention_days')">
+              <template #label>
+                {{ $t('profiles.audit_retention_days') }}
+                <HelpTooltip :content="$t('profiles.audit_retention_days_hint')" />
+              </template>
+              <el-input-number v-model="systemSettings.audit_retention_days" :min="1" :max="3650" class="full-width-input" controls-position="right" />
+            </el-form-item>
+            <el-form-item :label="$t('profiles.audit_report_email')">
+              <template #label>
+                {{ $t('profiles.audit_report_email') }}
+                <HelpTooltip :content="$t('profiles.audit_report_email_hint')" />
+              </template>
+              <el-input v-model.trim="systemSettings.audit_report_email" type="email" :placeholder="$t('profiles.audit_report_email_placeholder')" class="full-width-input" aria-describedby="global-audit-email-hint" />
+            </el-form-item>
+          </div>
+          <p id="global-audit-email-hint" class="global-settings-note">{{ $t('profiles.audit_report_email_hint') }}</p>
+        </section>
       </el-form>
       <template #footer>
         <el-button @click="settingsDialogVisible = false" size="default">{{ $t('profiles.cancel') }}</el-button>
@@ -213,6 +259,7 @@ import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import ProfileFormDialog from '../components/ProfileFormDialog.vue'
 import MemoryEmbeddingDialog from '../components/MemoryEmbeddingDialog.vue'
+import HelpTooltip from '../components/HelpTooltip.vue'
 import { useProfilesView } from '../composables/profiles/useProfilesView.js'
 
 const {

@@ -10,7 +10,11 @@ from app.core.utils.context_summary.cleanup import (
     background_context_summary_cleaner,
 )
 from app.providers.database.bootstrap import create_database_tables
-from app.tasks import background_log_cleaner, background_temp_cleaner
+from app.tasks import (
+    background_log_cleaner,
+    background_log_file_cleaner,
+    background_temp_cleaner,
+)
 from app.workers.lease import run_startup_cleanup, run_with_worker_lease
 from app.workers.signals import install_shutdown_signal_handlers
 
@@ -36,6 +40,7 @@ async def run_owned_background_task_worker(
     background_task_manager.start()
     cleaner_tasks = [
         asyncio.create_task(background_log_cleaner()),
+        asyncio.create_task(background_log_file_cleaner()),
         asyncio.create_task(background_temp_cleaner()),
         asyncio.create_task(background_context_summary_cleaner()),
     ]

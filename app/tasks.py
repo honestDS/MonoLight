@@ -1,9 +1,11 @@
 import asyncio
 import heapq
 import os
+import re
 import shutil
 from datetime import timedelta
 from pathlib import Path
+from stat import S_ISREG
 
 from app.core.constants import (
     ERR_LOG_CLEANER_FAILED,
@@ -19,7 +21,7 @@ from app.core.crud.system.log import system_log_crud
 from app.core.crud.system.setting import system_setting_crud
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.paths import TEMP_DIR
+from app.core.paths import DEFAULT_LOG_FILE_PATH, TEMP_DIR, TOOLS_LOG_FILENAME
 from app.core.user.file_cleanup import recover_user_file_cleanup
 from app.core.utils.time import get_local_time
 from app.providers.database import AsyncSessionLocal, ensure_sqlite_outer_transaction
@@ -168,11 +170,116 @@ async def _cleanup_system_log_batch() -> int | None:
         return await system_log_crud.delete_log_ids(db, ids=log_ids)
 
 
+def _list_old_rotated_log_files(log_path: Path, *, cutoff: float, batch_size: int) -> list[Path]:
+    if batch_size <= 0:
+        return []
+
+    timestamp_pattern = r"\.\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d{6}"
+    service_pattern = rf"{re.escape(log_path.stem)}(?:\.\d+)?{timestamp_pattern}(?:\.\d+)?{re.escape(log_path.suffix)}\.zip"
+    tools_log_path = Path(TOOLS_LOG_FILENAME)
+    tools_pattern = rf"{re.escape(tools_log_path.stem)}(?:\.\d+)?{timestamp_pattern}(?:\.\d+)?{re.escape(tools_log_path.suffix)}"
+    candidates: list[Path] = []
+
+    try:
+        entries = os.scandir(log_path.parent)
+    except FileNotFoundError:
+        return []
+
+    with entries:
+        for entry in entries:
+            if re.fullmatch(service_pattern, entry.name) is None and re.fullmatch(tools_pattern, entry.name) is None:
+                continue
+
+            path = Path(entry.path)
+            try:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                modified_at = entry.stat(follow_symlinks=False).st_mtime
+            except OSError as e:
+                logger.bind(path=str(path)).warning(t(ERR_LOG_CLEANER_FAILED, message=str(e)))
+                continue
+
+            if modified_at >= cutoff:
+                continue
+
+            candidates.append(path)
+            if len(candidates) >= batch_size:
+                return candidates
+
+    return candidates
+
+
+def _delete_rotated_log_files(paths: list[Path], *, cutoff: float) -> int:
+    deleted_count = 0
+    for path in paths:
+        try:
+            stat_result = path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            logger.bind(path=str(path)).warning(t(ERR_LOG_CLEANER_FAILED, message=str(e)))
+            continue
+
+        if not S_ISREG(stat_result.st_mode) or stat_result.st_mtime >= cutoff:
+            continue
+
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            logger.bind(path=str(path)).warning(t(ERR_LOG_CLEANER_FAILED, message=str(e)))
+            continue
+
+        deleted_count += 1
+
+    return deleted_count
+
+
+async def _cleanup_rotated_log_file_batch() -> int | None:
+    async with AsyncSessionLocal() as db:
+        await ensure_sqlite_outer_transaction(db)
+        retention_days, _ = await system_setting_crud.get_log_retention(db)
+
+    cutoff = (get_local_time() - timedelta(days=retention_days)).timestamp()
+    log_path = Path(os.getenv("LOG_FILE_PATH", str(DEFAULT_LOG_FILE_PATH)))
+    paths = await asyncio.to_thread(
+        _list_old_rotated_log_files,
+        log_path,
+        cutoff=cutoff,
+        batch_size=SYSTEM_LOG_CLEANUP_BATCH_SIZE,
+    )
+    if not paths:
+        return 0
+
+    async with AsyncSessionLocal() as db, db.begin():
+        connection = await db.connection()
+        if connection.dialect.name == "sqlite":
+            await connection.exec_driver_sql("BEGIN IMMEDIATE")
+        current_retention_days, _ = await system_setting_crud.get_log_retention(db, lock_for_update=True)
+        if current_retention_days != retention_days:
+            return None
+        return await asyncio.to_thread(_delete_rotated_log_files, paths, cutoff=cutoff)
+
+
 async def background_log_cleaner(*, interval_seconds: float = SYSTEM_LOG_CLEANUP_INTERVAL_SECONDS) -> None:
     while True:
         pause_seconds = interval_seconds
         try:
             deleted_count = await _cleanup_system_log_batch()
+            if deleted_count is None or deleted_count == SYSTEM_LOG_CLEANUP_BATCH_SIZE:
+                pause_seconds = SYSTEM_LOG_CLEANUP_BATCH_PAUSE_SECONDS
+        except Exception as e:
+            logger.error(t(ERR_LOG_CLEANER_FAILED, message=str(e)))
+
+        await asyncio.sleep(pause_seconds)
+
+
+async def background_log_file_cleaner(*, interval_seconds: float = SYSTEM_LOG_CLEANUP_INTERVAL_SECONDS) -> None:
+    while True:
+        pause_seconds = interval_seconds
+        try:
+            deleted_count = await _cleanup_rotated_log_file_batch()
             if deleted_count is None or deleted_count == SYSTEM_LOG_CLEANUP_BATCH_SIZE:
                 pause_seconds = SYSTEM_LOG_CLEANUP_BATCH_PAUSE_SECONDS
         except Exception as e:

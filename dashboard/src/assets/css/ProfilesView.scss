@@ -259,3 +259,96 @@
 .profile-owner-filter-input {
   width: 180px;
 }
+
+.global-settings-dialog {
+  max-width: calc(100vw - 64px);
+
+  .el-dialog__body {
+    padding: 12px 20px;
+  }
+
+  .el-dialog__footer {
+    padding-top: 12px;
+    border-top: 1px solid var(--el-border-color-light);
+    text-align: right;
+  }
+
+  .global-settings-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .settings-section {
+    padding: 12px 16px;
+    margin-bottom: 0;
+    box-shadow: none;
+    border-radius: var(--radius-6);
+  }
+
+  .settings-section-title {
+    margin: 0 0 10px;
+    color: var(--color-text-main);
+    line-height: 20px;
+  }
+
+  .global-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px 20px;
+    align-items: end;
+  }
+
+  .global-settings-grid--resources {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .global-settings-form .el-form-item {
+    min-width: 0;
+    margin-bottom: 0;
+  }
+
+  .global-settings-form .el-form-item__label {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    height: auto;
+    margin-bottom: 6px;
+    padding: 0;
+    line-height: 22px;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+
+  .global-settings-form .el-form-item__content {
+    min-width: 0;
+    gap: 0;
+  }
+
+  .global-settings-form .help-tooltip__trigger {
+    min-width: 24px;
+    min-height: 24px;
+    margin: 0;
+    justify-content: center;
+  }
+
+  .global-settings-notice {
+    margin: 10px 0 0;
+    padding: 8px 12px;
+    background: var(--color-bg-page);
+    border-radius: var(--radius-4);
+    color: var(--color-text-regular);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .global-settings-note {
+    margin: 6px 0 0;
+    color: var(--color-text-regular);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+}

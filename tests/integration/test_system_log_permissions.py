@@ -1,8 +1,12 @@
 import asyncio
 import json
+import os
+import threading
+import zipfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
@@ -202,6 +206,32 @@ async def _wait_for_log_ids(
             await asyncio.sleep(0.02)
 
     return await asyncio.wait_for(poll(), timeout=timeout)
+
+
+def _write_rotated_log_file(path: Path, content: str, modified_at: datetime, *, archive: bool = False) -> bytes:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if archive:
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive_file:
+            archive_file.writestr("rotated.log", content)
+    else:
+        path.write_text(content, encoding="utf-8")
+    timestamp = modified_at.timestamp()
+    os.utime(path, (timestamp, timestamp))
+    return path.read_bytes()
+
+
+async def _wait_for_file_state(
+    expected_state: dict[Path, bool],
+    *,
+    timeout: float = 5,
+) -> None:
+    async def poll() -> None:
+        while True:
+            if all(path.exists() == expected for path, expected in expected_state.items()):
+                return
+            await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(poll(), timeout=timeout)
 
 
 @asynccontextmanager
@@ -440,6 +470,207 @@ async def test_system_log_cleaner_applies_live_retention_and_entry_limits(
         finally:
             cleaner_task.cancel()
             await asyncio.gather(cleaner_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_system_log_cleaners_apply_api_policy_to_database_and_rotated_files(
+    api_app: FastAPI,
+    log_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    headers = {"Authorization": f"Bearer {_token('admin')}"}
+    log_path = tmp_path / "logs" / "custom.[service].log"
+    monkeypatch.setenv("LOG_FILE_PATH", str(log_path))
+    monkeypatch.setattr(tasks, "AsyncSessionLocal", log_session_factory)
+    monkeypatch.setattr(tasks, "SYSTEM_LOG_CLEANUP_BATCH_SIZE", 2)
+    monkeypatch.setattr(tasks, "SYSTEM_LOG_CLEANUP_BATCH_PAUSE_SECONDS", 0.0)
+
+    now = get_local_time()
+    old_file_time = now - timedelta(days=10)
+    recent_file_time = now - timedelta(days=1)
+    old_stamp = old_file_time.strftime("%Y-%m-%d_%H-%M-%S_%f")
+    recent_stamp = recent_file_time.strftime("%Y-%m-%d_%H-%M-%S_%f")
+    service_text = "[2026-11-15 12:00:00.000] [INFO] [app.service:1]: service log\n"
+    tools_text = "[2026-11-15 12:00:00.000] [INFO] tool call result\n"
+
+    old_rotated_files = [
+        log_path.parent / f"custom.[service].{old_stamp}.log.zip",
+        log_path.parent / f"custom.[service].123.{old_stamp}.log.zip",
+        log_path.parent / f"custom.[service].456.{old_stamp}.1.log.zip",
+        log_path.parent / f"tools.{old_stamp}.log",
+        log_path.parent / f"tools.123.{old_stamp}.log",
+        log_path.parent / f"tools.456.{old_stamp}.2.log",
+    ]
+    recent_rotated_files = [
+        log_path.parent / f"custom.[service].{recent_stamp}.log.zip",
+        log_path.parent / f"custom.[service].789.{recent_stamp}.log.zip",
+        log_path.parent / f"tools.{recent_stamp}.log",
+    ]
+    retained_files: dict[Path, bytes] = {}
+    for path in old_rotated_files[:3] + recent_rotated_files[:2]:
+        retained_files[path] = _write_rotated_log_file(path, service_text, old_file_time if path in old_rotated_files else recent_file_time, archive=True)
+    for path in old_rotated_files[3:] + recent_rotated_files[2:]:
+        retained_files[path] = _write_rotated_log_file(path, tools_text, old_file_time if path in old_rotated_files else recent_file_time)
+
+    active_service_file = log_path.parent / "custom.[service].123.log"
+    active_tools_file = log_path.parent / "tools.123.log"
+    unrelated_file = log_path.parent / f"other-service.{old_stamp}.log.zip"
+    retained_files[active_service_file] = _write_rotated_log_file(active_service_file, service_text, old_file_time)
+    retained_files[active_tools_file] = _write_rotated_log_file(active_tools_file, tools_text, old_file_time)
+    retained_files[unrelated_file] = _write_rotated_log_file(unrelated_file, service_text, old_file_time, archive=True)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        await _set_log_settings(client, headers, retention_days=30, max_entries=2)
+        async with log_session_factory() as session:
+            await session.execute(delete(SystemLog))
+            old_log = SystemLog(
+                level="WARNING",
+                module="cleanup",
+                message="database log outside updated retention",
+                created_at=now - timedelta(days=10),
+            )
+            recent_log = SystemLog(
+                level="INFO",
+                module="cleanup",
+                message="database log inside retention",
+                created_at=now - timedelta(days=1),
+            )
+            session.add_all([old_log, recent_log])
+            await session.commit()
+        assert old_log.id is not None
+        assert recent_log.id is not None
+
+        assert await tasks._cleanup_rotated_log_file_batch() == 0
+        assert all(path.exists() for path in retained_files)
+
+        cleaner_tasks: list[asyncio.Task[None]] = []
+        try:
+            cleaner_tasks = [
+                asyncio.create_task(tasks.background_log_file_cleaner(interval_seconds=0.02)),
+                asyncio.create_task(tasks.background_log_cleaner(interval_seconds=0.02)),
+            ]
+            await _set_log_settings(client, headers, retention_days=7, max_entries=1)
+            await _wait_for_file_state(
+                {
+                    **{path: False for path in old_rotated_files},
+                    **{path: True for path in recent_rotated_files + [active_service_file, active_tools_file, unrelated_file]},
+                }
+            )
+            page = await _wait_for_log_page(client, headers, {recent_log.id})
+            assert page["total"] == 1
+            assert page["items"][0]["message"] == "database log inside retention"
+            assert await _read_log_ids(log_session_factory) == [recent_log.id]
+            retained_paths = recent_rotated_files + [active_service_file, active_tools_file, unrelated_file]
+            for path in retained_paths:
+                assert path.read_bytes() == retained_files[path]
+        finally:
+            for cleaner_task in cleaner_tasks:
+                cleaner_task.cancel()
+            await asyncio.gather(*cleaner_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_rotated_log_cleaner_uses_default_retention_without_stored_settings(
+    api_app: FastAPI,
+    log_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    headers = {"Authorization": f"Bearer {_token('admin')}"}
+    log_path = tmp_path / "logs" / "custom.[service].log"
+    monkeypatch.setenv("LOG_FILE_PATH", str(log_path))
+    monkeypatch.setattr(tasks, "AsyncSessionLocal", log_session_factory)
+
+    now = get_local_time()
+    old_time = now - timedelta(days=8)
+    recent_time = now - timedelta(days=6)
+    old_stamp = old_time.strftime("%Y-%m-%d_%H-%M-%S_%f")
+    recent_stamp = recent_time.strftime("%Y-%m-%d_%H-%M-%S_%f")
+    service_text = "[2026-11-15 12:00:00.000] [INFO] [app.service:1]: default retention\n"
+    tools_text = "[2026-11-15 12:00:00.000] [INFO] tool result\n"
+    old_files = [
+        log_path.parent / f"custom.[service].{old_stamp}.log.zip",
+        log_path.parent / f"tools.123.{old_stamp}.log",
+    ]
+    recent_files = [
+        log_path.parent / f"custom.[service].123.{recent_stamp}.log.zip",
+        log_path.parent / f"tools.{recent_stamp}.log",
+    ]
+    for path in old_files:
+        _write_rotated_log_file(path, service_text if path.suffix == ".zip" else tools_text, old_time, archive=path.suffix == ".zip")
+    for path in recent_files:
+        _write_rotated_log_file(path, service_text if path.suffix == ".zip" else tools_text, recent_time, archive=path.suffix == ".zip")
+    original_ids = await _read_log_ids(log_session_factory)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        before = await client.get(SETTINGS_PATH, headers=headers)
+        assert before.status_code == 200
+        assert before.json()["data"]["log_retention_days"] == 7
+        assert before.json()["data"]["log_max_entries"] == 100000
+        assert await tasks._cleanup_rotated_log_file_batch() == 2
+        await _wait_for_file_state(
+            {
+                **{path: False for path in old_files},
+                **{path: True for path in recent_files},
+            }
+        )
+        after = await client.get(SETTINGS_PATH, headers=headers)
+        assert after.status_code == 200
+        assert after.json()["data"]["log_retention_days"] == 7
+        assert after.json()["data"]["log_max_entries"] == 100000
+
+    assert await _read_log_ids(log_session_factory) == original_ids
+
+
+@pytest.mark.asyncio
+async def test_rotated_log_cleaner_skips_deletion_when_retention_changes_during_scan(
+    api_app: FastAPI,
+    log_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    headers = {"Authorization": f"Bearer {_token('admin')}"}
+    log_path = tmp_path / "logs" / "custom.[service].log"
+    monkeypatch.setenv("LOG_FILE_PATH", str(log_path))
+    monkeypatch.setattr(tasks, "AsyncSessionLocal", log_session_factory)
+    now = get_local_time()
+    rotated_file = log_path.parent / f"custom.[service].{(now - timedelta(days=10)).strftime('%Y-%m-%d_%H-%M-%S_%f')}.log.zip"
+    original_content = _write_rotated_log_file(
+        rotated_file,
+        "[2026-11-15 12:00:00.000] [INFO] [app.service:1]: policy race\n",
+        now - timedelta(days=10),
+        archive=True,
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
+        await _set_log_settings(client, headers, retention_days=7, max_entries=2)
+        scan_started = threading.Event()
+        release_scan = threading.Event()
+        original_list = tasks._list_old_rotated_log_files
+
+        def gated_list(log_path: Path, *, cutoff: float, batch_size: int) -> list[Path]:
+            candidates = original_list(log_path, cutoff=cutoff, batch_size=batch_size)
+            scan_started.set()
+            release_scan.wait(timeout=5)
+            return candidates
+
+        monkeypatch.setattr(tasks, "_list_old_rotated_log_files", gated_list)
+        batch_task = asyncio.create_task(tasks._cleanup_rotated_log_file_batch())
+        try:
+            await asyncio.wait_for(asyncio.to_thread(scan_started.wait, 5), timeout=5)
+            await _set_log_settings(client, headers, retention_days=30, max_entries=2)
+            release_scan.set()
+            assert await asyncio.wait_for(batch_task, timeout=5) is None
+            assert rotated_file.exists()
+            assert rotated_file.read_bytes() == original_content
+            settings = await client.get(SETTINGS_PATH, headers=headers)
+            assert settings.status_code == 200
+            assert settings.json()["data"]["log_retention_days"] == 30
+        finally:
+            release_scan.set()
+            batch_task.cancel()
+            await asyncio.gather(batch_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
