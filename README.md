@@ -4,147 +4,131 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/honestDS/MonoLight)
 
-MonoLight is a general-purpose autonomous agent runtime focused on safe execution and human-AI collaboration.
+**A self-hosted AI assistant platform that gets real work done while keeping you in control.**
 
 <p align="center">
   <img src="./docs/banner.webp" alt="MonoLight Banner" width="100%" />
 </p>
 
-## Our Vision
+Most AI assistants stop at chat. Once you let one run commands or edit files, a simple mistake can delete something you need.
 
-As agents evolve from answering questions to executing commands, modifying files, accessing networks, and managing long-running tasks, even a seemingly small judgment error can cause irreversible effects on real systems. MonoLight focuses on a central question: as we give AI greater autonomy to act, how can we keep that autonomy controllable, auditable, and trustworthy at the same time?
+MonoLight separates **the AI that does the work from the AI that checks the risks**. An independent audit model reviews commands and file changes before they happen. The system blocks high-risk actions or pauses to show you an approval card. If it asks for approval, it only proceeds when you approve. The entire process is logged for later review.
 
-MonoLight does not aim to remove humans from the loop entirely. Instead, it seeks to establish a clear safety boundary between human oversight and autonomous AI execution. Through pre-execution safety audits, explicit human confirmation, and complete execution records, critical actions can be reviewed before they happen and traced afterward.
+Use MonoLight in the web dashboard, or scan a QR code to connect it to WeChat and assign tasks from anywhere. Model API settings, prompts, conversations, and files are managed on your own machine.
 
-From everyday office tasks to server operations and complex automation workflows, MonoLight aims to turn the decision-making ability of large language models into real-world execution capability while reducing the risks introduced by autonomous actions as much as possible. Through continuous engineering practice and safety experimentation, we hope to explore a safer and more controllable operating model for human-AI collaborative agents.
+> [!IMPORTANT]
+> **Pull requests and feedback**: The project is still in early development and its architecture changes frequently. **We're not accepting pull requests yet.** Please open an issue to report a problem or suggest an improvement. Every piece of feedback matters.
 
 ---
 
-## PR / Issue Policy
+## What MonoLight Can Do for You
 
-> [!IMPORTANT]
-> The project is currently in an early stage of active development, and its architecture is still evolving rapidly. Pull Requests are not accepted for now. You are welcome to report issues or suggest improvements through Issues. Your feedback is highly valuable to us.
+### 1. Safe and under your control
+- **Separate models for execution and safety review (dual-model auditing)**: The primary model handles reasoning and tool calls. A separately configured audit model assesses risks before execution.
+- **Approval for high-risk actions**: MonoLight can block sensitive actions such as deleting files or changing system settings, or ask for approval. If approval is required, the action only runs after you approve it in the web dashboard or WeChat.
+- **Multi-user access and data isolation**: Role-based permissions keep users' platform-managed sessions, memories, and files separate. You control the deployment and data with SQLite or MySQL.
 
-## 0. Current Progress
-- Fixing remaining issues
-- Improving subagent tools
+### 2. More than chat: get work done
+- **File editing and delivery**: It can read, edit, and search local files, generate images, and send the resulting files or images directly to you.
+- **Commands and interactive terminals**: Supports one-off commands and persistent interactive terminals on Linux and Windows, suitable for builds, debugging, or command-line programs that require continued input.
+- **Web research**: Built-in web search and web page fetching let it check the latest information before doing the work.
+- **Parallel, background, and scheduled work**: MonoLight makes a checklist for complex tasks, can delegate work to multiple subagents in parallel, and combines their results. Run long jobs in the background or set a recurring schedule. MonoLight sends you the results when the work is done.
+- **Shared skill packages**: Administrators can add common workflows and scripts. For matching tasks, AI finds the relevant skill instructions and follows them.
 
-## 1. Core Features
+### 3. Learns what matters to you, on the web and in WeChat
+- **Cross-session long-term memory**: It remembers your preferences, habits, and project context so you do not need to repeat them. Background memory organization regularly consolidates memories and keeps them manageable.
+- **Private document knowledge base**: Upload documents for retrieval and Q&A. Vector retrieval and reranking help AI work from your internal documents.
+- **Web dashboard and WeChat access**: The Vue dashboard includes chat, approvals, model configuration, knowledge bases, memory management, scheduled tasks, and live and historical logs. API docs are available at `/docs`. Scan a QR code to connect WeChat via OpenClaw, then send text, images, or files to assign tasks, approve high-risk actions, and receive results.
+- **Flexible multi-model setup**: Compatible with OpenAI and DeepSeek API formats, and can fetch model lists from OpenRouter. Assign separate models for main chat, summarization, memory organization, safety auditing, and image generation, then route by priority and weight instead of relying on one model.
 
-MonoLight is more than a chat interface or a thin wrapper around one-off tool calls. It is an autonomous agent system designed to execute tasks continuously, accept human oversight, and preserve complete execution records.
+---
 
-- **Dual-model safety auditing**: Separates task execution from safety review. The primary model plans tasks and invokes tools, while an independently configured audit model evaluates risks before execution. High-risk operations can be blocked or converted into readable human-confirmation cards. Audit decisions, confirmation flows, and execution results are all traceable.
-- **Long-term memory and user preference management**: Supports cross-session long-term memory and user-level personalization. By combining relational storage with RAG retrieval, MonoLight can persist historical information and user preferences, perform hybrid retrieval, and relate retrieved information to the current context.
-- **Full-featured Shell**: In addition to ordinary one-shot shell commands, MonoLight supports interactive terminals through Windows ConPTY and Linux PTY. The AI can continuously read output, send follow-up input, query terminal status, resize the terminal, and close sessions proactively, enabling operation of TTY-dependent, interactive, or long-running command-line programs.
-- **Autonomous and continuous task execution**: Supports multi-turn tool use, parallel tool calls, background tasks, and scheduled tasks. Long-running work can continue in the background, users can inspect or cancel it, and a summary reply can be sent when the work completes.
-- **Subagent collaboration**: The primary agent can delegate tasks to multiple subagents to work in parallel, then combine their results to complete complex tasks.
-- **Knowledge, web, and file capabilities**: Supports document knowledge bases, vector retrieval, and reranking. The AI can query knowledge bases, search and crawl the web, generate images, write files, and send files back to users.
-- **Shared skills**: Administrators can provide shared skill packages. The AI can find the latest skills as needed, read their instructions, and use the included resources and scripts to complete tasks.
-- **Multi-model orchestration**: Connect and centrally manage multiple model channels. Different models can be selected for chat, context summarization, knowledge-base reranking, and image generation, with priority- and weight-based routing so that all workloads do not need to depend on a single model.
-- **IM platform integration**: Use the full agent experience directly from everyday messaging applications without staying in the browser. MonoLight currently supports WeChat OpenClaw QR-code integration, bidirectional text/image/file messaging, automatic merging of consecutive messages, in-chat tool calls, and safety confirmations. Background and scheduled tasks can proactively push results back to the platform, with automatic retry on delivery failure.
-- **Complete visual workspace**: Includes chat and session history, tool execution results, audit confirmation cards, knowledge bases, model channels, prompts, scheduled tasks, messaging platforms, and real-time/historical log management.
-- **Multi-user support and data isolation**: Supports users and roles while isolating session data between users. Each IM integration account can also be bound to a specific user and Profile.
-- **Self-hosting and data ownership**: Supports SQLite and MySQL, scaling from local personal deployment to multi-user environments. Model channels, prompts, and runtime data remain under the deployer's control.
+## Quick Start in 3 Steps
 
-## Runtime Requirements
+The prebuilt frontend is included by default, so **Node.js and npm are not required**.
 
-### Server Configuration
+### Prepare the Environment
 
-| Item | Minimum Requirement | Recommended Configuration |
+- **System configuration**: 2 CPU cores / 2 GB RAM minimum (2 CPU cores / 8 GB RAM recommended)
+- **Python**: 3.13 or later
+- **Model requirements**: Because MonoLight performs multi-turn tool calls, memory organization, and safety audits, the **main model** must support native Tool Calling and have a context window of **32K tokens or more** (**64K or more recommended**). Models with very small context windows are not recommended.
+
+### Startup Steps
+
+1. **Install backend dependencies** (run from the project root):
+
+   ```bash
+   python -m pip install -r requirements.txt
+   ```
+
+2. **Create and configure the root `.env` file** (choose either SQLite or MySQL):
+
+   ```dotenv
+   # Use SQLite by default (single-file database, ready to use)
+   DATABASE_URL=sqlite+aiosqlite:///./data/monolight.db
+
+   # To use MySQL instead, comment out the line above and enable the line below
+   # DATABASE_URL=mysql+aiomysql://username:password@127.0.0.1:3306/monolight
+
+   APP_HOST=0.0.0.0
+   APP_PORT=8001
+   APP_WORKERS=1
+   ```
+
+3. **Start with one command**:
+
+   ```bash
+   python start.py
+   ```
+
+After startup completes, the console prints `Dashboard access URL: ...`. Open that address in a browser and follow the **initialization wizard** to create an administrator account and enter the model API settings.
+
+> [!TIP]
+> `APP_HOST` must be an IP address (hostnames and `::` are not supported). `0.0.0.0` listens on all network interfaces; other devices should use the server's actual IP address. The printed loopback URL (`127.0.0.1`) is local to the server. When using a reverse proxy, `127.0.0.1` is recommended.
+
+---
+
+## Advanced Setup and Reference
+
+<details>
+<summary>Detailed context and output metrics for each model role</summary>
+
+The backend lets you configure separate chat models for main chat, context summarization, memory organization, and security auditing; image, audio, and video understanding plus image generation only require model support when the corresponding features are used.
+
+The table below uses tokens for context and maximum output lengths.
+
+| Model role | Minimum | Recommended |
 | --- | --- | --- |
-| Server configuration | 2 CPU cores / 2 GB RAM | 2 CPU cores / 8 GB RAM |
-| Python version | Python 3.13 or later | — |
+| Main chat model | 32K context / 16K max output, native tool calling | 64K+ context (128K+ for complex tasks) / 20K+ max output, multi-turn and parallel calls |
+| Context summarization model | 32K context / 8K max output | 64K+ context / 16K+ max output |
+| Memory organization model | 32K context / 16K max output | 64K+ context / 20K+ max output (45-item trigger requires >= 11,520 tokens; 50-item full capacity requires 12,800 tokens) |
+| Security audit model | 32K context / 4K max output | 64K+ context / 8K+ max output, strong instruction following |
 
-### Model Configuration
+> The system controls context size by automatically summarizing old history, truncating only overly long tool results from the current turn, and checking the budget before each request; saved historical tool results are not rewritten by the sliding window. If the current interaction still does not fit after old history is compacted, the selected model's context window is too small.
 
-MonoLight is designed for multi-turn tool use, context summarization, and continuous task execution. Its model requirements are therefore higher than those of a typical chat application. The "minimum requirements" below indicate the baseline for using the core Agent capabilities with reasonable completeness, not merely for basic conversation.
+</details>
 
-| Item | Minimum Requirement | Recommended Configuration |
-| --- | --- | --- |
-| Main chat model context window | 32K tokens | 64K tokens or more; 128K+ recommended for complex tool tasks |
-| Main chat model max output per request | 16K tokens | 20K tokens or more |
-| Summarization model context window | 32K tokens | 64K tokens or more |
-| Summarization model max output per request | 8K tokens | 16K tokens or more |
-| Memory-organization model context window | 32K tokens | 64K tokens or more |
-| Memory-organization model max output per request | 16K tokens | 20K tokens or more; the default 45-memory organization trigger requires at least 11,520 tokens, while organizing the full 50-memory capacity requires 12,800 tokens |
-| Audit model context window | 32K tokens | 64K tokens or more |
-| Audit model max output per request | 4K tokens | 8K tokens or more |
-| Tool calling | The main chat model must support native Tool/Function Calling, reliably produce valid arguments, and correctly process tool results | Stable multi-turn and parallel tool calling support |
-| Instruction following | All text-generation models must reliably distinguish System, User, Assistant, and Tool messages and continue following system constraints | Prefer models optimized for agents/tool use with strong instruction-following ability |
+<details>
+<summary>How MonoLight runs</summary>
 
-> [!IMPORTANT]
-> Models below these requirements may still work for simple chat or a subset of features, but they are not recommended for the complete MonoLight Agent workflow. The system controls context size through history summarization, one-time truncation of the current tool round, and a final request-budget check. Persisted historical tool results are not re-truncated or rewritten through a sliding window on later requests. If recent required interactions and tool results still cannot fit after older history has already been compressed, the model's context capacity is generally insufficient for that task. The main chat, context summarization, long-term memory organization, and safety audit workloads can use different models. At present, the main chat, summarization, memory-organization, and audit workloads all use model entries configured for chat usage.
+Running `python start.py` checks for the prebuilt frontend assets, initializes the system keys and database, and starts **one Web service plus three background Worker processes**:
+- **Web service**: Hosts the dashboard, HTTP/WebSocket endpoints, and conversation integrations.
+- **`general` Worker**: Handles messaging and scheduled tasks, general background jobs, and session replies. Each of these three roles uses a separate database lease.
+- **`memory` Worker**: Runs background jobs that organize and publish long-term memories and knowledge-base entries, including generating their embeddings.
+- **`terminal` Worker**: Hosts persistent interactive terminal sessions in a separate process for fault isolation.
 
-Image, audio, and video understanding, as well as image generation, are optional capabilities. They are only required when the corresponding features are used.
+If a Worker exits unexpectedly, the launcher cleans up the remaining processes. For multi-instance deployments, all instances must share the same database. Workers coordinate through leases, so another instance can take over after the previous node goes offline or its lease expires.
 
-## 2. Interaction Entry Points
+</details>
 
-- **Dashboard**: A modern management interface built with Vue 3 and Element Plus for smooth configuration and interaction.
-- **API documentation**: Built-in Swagger documentation at `/docs`, supporting authenticated access and business API calls.
+<details>
+<summary>Separate deployment, local development, and tests</summary>
 
-## 3. Roadmap
-
-- Core
-  - [ ] **Full multimodal support**: Extend beyond image, text, and file transfer to support video, audio, and other multimedia upload and interaction workflows.
-  - [ ] **Agent-managed system configuration tools**: Allow system configuration files to be dynamically adjusted and managed through conversations with the LLM.
-  - [ ] **WebUI analytics dashboard**: Provide real-time system health, user session data, model-call statistics, and other operational information for administrators.
-  - [ ] **Define a long-term memory storage standard**: Establish a general long-term memory storage format for data exchange with external systems.
-  - [ ] **Long-term memory import/export**: Allow users to export long-term memory in a standard format and import it back from that format.
-- Extensions
-  - [ ] **Enterprise-grade audit system**: Build on the platform's existing dual-model audit mechanism to automatically generate and deliver enterprise-grade audit reports, then immediately delete temporary audit data from the server after delivery to reduce the risk of tampering or leakage.
-  - [ ] **QQ messaging adapter**: Add messaging integration for the QQ platform.
-
-## 4. Technical Architecture
-
-Architecture documentation: [ARCHITECTURE.md](./ARCHITECTURE.md)
-
-Development guide: [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md)
-
-## Running the Services
-
-MonoLight consists of one Web service and three default long-lived Worker processes: `general`, `memory`, and `terminal`. `general` hosts the messaging-platform, background-task, and session-reply roles as three independently leased roles. The Web service can start multiple Web workers through `APP_WORKERS`. `messaging-platform`, `background-task`, `session-reply`, and `terminal` retain their Worker leases, while `memory` retains its job-claiming and job-lease mechanisms. Existing exclusivity and failover semantics remain unchanged.
-
-### Common Backend Setup
-
-All three deployment modes start by installing backend dependencies from the project root:
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-Configure the database, listen address, port, and number of Web workers in the root `.env` file. Choose either SQLite or MySQL for `DATABASE_URL`:
-
-```dotenv
-# SQLite
-DATABASE_URL=sqlite+aiosqlite:///./data/monolight.db
-
-# MySQL (replace the SQLite configuration above)
-# DATABASE_URL=mysql+aiomysql://username:password@127.0.0.1:3306/monolight
-
-APP_HOST=0.0.0.0
-APP_PORT=8001
-APP_WORKERS=1
-```
-
-`APP_HOST` defaults to `0.0.0.0` and accepts only IP address literals. Hostnames and the unspecified IPv6 address `::` are rejected. `0.0.0.0` means listening on all network interfaces. When configured this way, the `127.0.0.1` URL printed in the console is only reachable from the server itself; other devices must use the server's actual IP address or a reverse-proxy domain name. When exposing the service through a reverse proxy, `127.0.0.1` is recommended. The example port is `8001` and can be changed for your deployment environment.
-
-### Option 1: Integrated Deployment (Recommended)
-
-This is the default and recommended deployment mode. Release packages include the prebuilt Dashboard assets under `app/static/dashboard/`, so Node.js and npm are not required on the deployment machine. Run:
-
-```bash
-python start.py
-```
-
-The Dashboard, API, and WebSocket endpoints are served by the same Web service and therefore remain same-origin in the browser. `start.py` does not build the frontend; it only validates that the prebuilt assets exist. After startup completes, the console prints the English `Dashboard access URL: ...` address.
-
-The parent launcher first validates the prebuilt Dashboard assets. It then uses a short-lived initialization subprocess to validate system-key integrity, create/migrate the database schema, and complete system initialization. The Web service and all three long-lived Workers are started only after that subprocess succeeds. If a prerequisite fails, no Web service or long-lived Worker is started. After the long-lived processes are running, an abnormal exit from any process or a termination signal causes the launcher to clean up the remaining processes.
-
-### Option 2: Separate Frontend and Backend Deployment
+#### 1. Separate Frontend and Backend Deployment (requires Node.js and npm)
 
 The backend must still be started with `python start.py`. The current launcher still requires the prebuilt files under `app/static/dashboard/`, even if an external frontend does not use them, so they must not be removed.
 
-Building the frontend requires Node.js and npm. Keeping the browser same-origin is recommended: host the frontend with an independent static server and reverse-proxy `/api` (including WebSocket Upgrade requests) to the backend. In this mode, leave the following root `.env` variables commented out so the frontend uses `/api/v1` on the current browser origin:
+Building the frontend requires Node.js and npm. Keeping the browser same-origin is recommended: host the frontend with an independent static server and reverse-proxy `/api` (including WebSocket upgrades) to the backend. In this mode, leave the following root `.env` variables commented out so the frontend uses `/api/v1` on the current browser origin:
 
 ```dotenv
 # VUE_APP_API_BASE_URL=https://api.example.com/api/v1
@@ -159,21 +143,13 @@ npm ci
 npm run build
 ```
 
-Frontend install and build commands run from the `dashboard` directory, and `npm ci` uses the repository's `package-lock.json` for locked dependency versions. When adding or upgrading dependencies, commit the corresponding `package.json` and `package-lock.json` changes together.
-
-Build output is always written to `app/static/dashboard/`. Copy or publish those assets to the independent static server afterward.
+Build output is always written to `app/static/dashboard/`. Copy or publish those assets to the independent static server described above afterward.
 
 The initialization flow uses `SameSite=Strict` cookies. For direct cross-origin access, the frontend and backend should at minimum be HTTPS subdomains under the same site, such as `console.example.com` and `api.example.com`. Completely unrelated sites will cause the initialization session to fail. HTTPS and WSS are recommended for production deployments.
 
-### Option 3: Development Mode
+#### 2. Local Development
 
-Normally leave `VUE_APP_API_BASE_URL` and `VUE_APP_WS_BASE_URL` commented out in the root `.env` file. Start the backend from the project root in the first terminal:
-
-```bash
-python start.py
-```
-
-In a second terminal, enter `dashboard`. Install dependencies on the first run, then start the Vue development server:
+In terminal 1, run `python start.py` from the project root. In terminal 2, enter `dashboard` and start the hot-reload server. It automatically reads `APP_HOST` and `APP_PORT` from the root `.env` and proxies `/api` HTTP and WebSocket requests. Restart the development server after changing the address or port:
 
 ```bash
 cd dashboard
@@ -181,105 +157,121 @@ npm ci
 npm run serve
 ```
 
-The Vue development server reads `APP_HOST` and `APP_PORT` from the root `.env`, proxies `/api` HTTP and WebSocket requests to the backend, and provides hot reload. Restart `npm run serve` after changing `APP_HOST` or `APP_PORT`. You do not need to run `npm run build` after every frontend change during development.
-
-When debugging individual processes separately, first run global initialization once:
+For individual process debugging, run initialization once, then start each process separately:
 
 ```bash
 python -c "import asyncio; from start import initialize_system; asyncio.run(initialize_system())"
-```
-
-Then start the processes independently:
-
-```bash
 python main.py
 python -m app.workers.general
 python -m app.workers.memory
 python -m app.workers.terminal
 ```
 
-The original independent entry points `message_platform`, `background_task`, and `session_reply` remain available for targeted debugging. They use the same role leases as `general` and should not be started alongside `general` as part of the default deployment.
+The independent entry points `message_platform`, `background_task`, and `session_reply` are retained for targeted debugging only. Use `general` for routine deployment.
 
-### Multi-instance Deployment
+#### 3. Run Automated Tests
 
-All instances must connect to the same database. The messaging-platform, background-task, and session-reply roles inside `general` continue to contend for their respective leases independently. A Worker that does not acquire its corresponding lease remains on standby and automatically takes over after the current lease holder exits or the lease expires.
-
-## FAQ
-
-### Why does MonoLight exit silently when creating long-term memory on Windows, then exit again after a restart?
-
-**Symptoms**: With long-term memory enabled, creating a memory may terminate the entire system without a Python exception in the application logs. The WebUI may show a memory with an empty body and an in-progress status. Memory creation saves a placeholder first and publishes the content only after the vector write succeeds. Unfinished jobs resume after a restart and may trigger the same failure again. When any long-lived process exits abnormally, the launcher shuts down the remaining processes, making the entire service stop.
-
-**Diagnosis**: Open **Event Viewer → Windows Logs → Application** and look for an `Application Error` (event ID `1000`) involving `python.exe` around the time of the exit. If the faulting module is `MSVCP140.dll` and the exception code is `0xc0000005` (access violation), especially with an older runtime such as `14.36.32532.0`, prioritize checking compatibility between the Microsoft Visual C++ runtime and native dependencies such as Chroma. This error does not mean that the system is out of memory, and the DLL name alone does not prove that the file is corrupted.
-
-**Resolution**:
-
-1. Stop all MonoLight processes and back up the existing database and vector data.
-2. Install or repair the [latest official Microsoft Visual C++ v14 x64 Redistributable](https://aka.ms/vc14/vc_redist.x64.exe). Installing Visual Studio is not required. The runtime must be at least as recent as the build tools used for the native components; see [Microsoft's documentation](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
-3. Restart Windows if prompted by the installer, then start MonoLight and verify that unfinished jobs and newly created memories work correctly.
-
-> Changing Python versions or reinstalling pip dependencies usually does not update the system VC++ runtime. Do not download individual DLLs from third-party websites to overwrite system files, or delete the database or vector directories as a workaround. Runtime incompatibility must still be confirmed by retesting after the update. If the process still exits, retain the new faulting module, version, exception code, and native crash stack for further investigation.
-
-## Automated Tests
-
-The project includes automated tests covering unit tests, initialization logic, and API integration tests.
-
-### Running the Test Suite
-
-Run the full test suite from the project root:
+From the project root:
 
 ```bash
 PYTHONPATH=. pytest tests/
 ```
 
-## Project Preview
+</details>
 
-- Clean WebUI chat experience
+<details>
+<summary>FAQ: Why does MonoLight quit without an error when creating long-term memories on Windows?</summary>
+
+**Symptoms**: With long-term memory enabled, MonoLight may shut down while saving a memory, without a Python exception in the logs. The dashboard may show an empty memory marked "Processing." When the job resumes after a restart, it can trigger the same crash.
+
+**Likely cause**: In **Windows Event Viewer → Windows Logs → Application**, look for an error involving `python.exe`. If it lists `MSVCP140.dll` and exception code `0xc0000005` (access violation), an older Microsoft Visual C++ runtime such as `14.36.32532.0` may be incompatible with a native dependency such as Chroma.
+
+**Fix**:
+
+1. Stop all MonoLight processes and back up the database and vector data.
+2. Install or repair the [latest official Microsoft Visual C++ v14 x64 Redistributable](https://aka.ms/vc14/vc_redist.x64.exe). Visual Studio is not required; see [Microsoft's documentation](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
+3. Restart Windows, then start MonoLight again and verify that resumed jobs and newly created memories work correctly.
+
+> Do not reinstall pip dependencies or delete the database or vector data to fix this issue. Never overwrite the system's `MSVCP140.dll` with a copy from a third-party site.
+
+</details>
+
+---
+
+## Interface Preview
+
+Clear chat interface and task progress display:
+
 <p align="center">
-  <img src="./docs/screenshot.png" alt="MonoLight Dialog Page" width="100%" />
+  <img src="./docs/screenshot.png" alt="MonoLight Chat Interface" width="100%" />
 </p>
 
-- Rich configuration options
+Comprehensive backend management and configuration pages (model channels, knowledge bases, prompts, scheduled tasks, messaging platforms, and more):
+
 <p align="center">
-  <img src="./docs/screenshot2.png" alt="MonoLight Config Page" width="100%" />
+  <img src="./docs/screenshot2.png" alt="MonoLight Configuration 1" width="100%" />
 </p>
 <p align="center">
-  <img src="./docs/screenshot3.png" alt="MonoLight Config Page 1" width="100%" />
+  <img src="./docs/screenshot3.png" alt="MonoLight Configuration 2" width="100%" />
 </p>
 <p align="center">
-  <img src="./docs/screenshot4.png" alt="MonoLight Config Page 2" width="100%" />
+  <img src="./docs/screenshot4.png" alt="MonoLight Configuration 3" width="100%" />
 </p>
 <p align="center">
-  <img src="./docs/screenshot5.png" alt="MonoLight Config Page 3" width="100%" />
+  <img src="./docs/screenshot5.png" alt="MonoLight Configuration 4" width="100%" />
 </p>
 <p align="center">
-  <img src="./docs/screenshot6.png" alt="MonoLight Config Page 4" width="100%" />
+  <img src="./docs/screenshot6.png" alt="MonoLight Configuration 5" width="100%" />
 </p>
 
-- Detailed real-time logs
+Real-time logs for step-by-step troubleshooting:
+
 <p align="center">
-  <img src="./docs/screenshot7.png" alt="MonoLight Log Page" width="100%" />
+  <img src="./docs/screenshot7.png" alt="MonoLight Live Logs" width="100%" />
 </p>
 
-## AI Agent Development Rules
+---
+
+## Current Progress and Roadmap
+
+**Near-term focus**: Fix remaining issues and keep improving subagent collaboration tools.
+
+**What's next**:
+- **Core capabilities**
+  - [ ] **Full multimodal support**: Add audio and video uploads and interactions alongside text, images, and files.
+  - [ ] **Conversational system configuration**: Change and manage system settings by chatting with the AI.
+  - [ ] **Web UI analytics dashboard**: Show system status, session data, and model usage statistics.
+  - [ ] **Long-term memory standard and import/export**: Define a common storage format and support importing and exporting memories in that format.
+- **Integrations and extensions**
+  - [ ] **Enterprise audit reports**: Use the existing dual-model audit to automatically generate and send reports, then immediately delete temporary audit data from the server to reduce the risk of tampering or exposure.
+  - [ ] **QQ integration**: Add a QQ messaging adapter.
+
+---
+
+## Documentation and AI Agent Development Rules
+
+- Architecture: [ARCHITECTURE.md](./ARCHITECTURE.md)
+- Development guide: [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md)
 
 > [!IMPORTANT]
-> All AI Agents contributing to this project must strictly follow these development standards and architectural principles:
+> **AI Agent development rules**: All AI Agents contributing to this project must strictly follow these development standards and architectural principles:
 > 1. Read and follow the naming conventions, code style requirements (Ruff), and testing requirements in [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md).
 > 2. Refer to [ARCHITECTURE.md](./ARCHITECTURE.md) to ensure changes comply with the system design and module dependency rules.
 > 3. Before submitting any code, ensure that both `ruff check` and `ruff format` pass.
 > 4. Every added or modified test must be based strictly on the actual implementation of the target code. Before writing tests, an AI Agent must fully read and understand the relevant source code so that mocks and business flows match the real implementation. Tests based on assumptions or experience rather than the actual code are prohibited.
 
+---
+
 ## Acknowledgements
 
-MonoLight is built on the knowledge and inspiration of the open-source community. The following projects and communities provided important design inspiration during development:
+MonoLight draws on the work of the open-source community. The following projects and communities helped shape its design:
 
-- **[LinuxDo](https://linux.do)** - A new ideal-style community. The author has gained a large amount of AI-related knowledge and inspiration from this community.
-- **[New API](https://github.com/QuantumNous/new-api)** - A next-generation LLM gateway and AI asset management system. MonoLight's **model channel routing and multi-model scheduling** design was strongly inspired by this project.
-- **[AstrBot](https://github.com/AstrBotDevs/AstrBot)** - An open-source all-in-one Agentic chatbot platform. MonoLight's approach to **knowledge-base tooling and IM platform integration** draws on its excellent practices.
+- **[LinuxDo](https://linux.do)** - Provides cutting-edge AI knowledge and inspiration.
+- **[New API](https://github.com/QuantumNous/new-api)** - Inspired MonoLight's **model channel routing and multi-model scheduling**.
+- **[AstrBot](https://github.com/AstrBotDevs/AstrBot)** - Inspired MonoLight's approach to **using the knowledge base as a tool and integrating messaging platforms**.
 
-Thanks to every pioneer in the open-source community for exploring, building, and sharing.
+Thanks to the open-source community for exploring and sharing.
 
-## 5. License
+## License
 
 This project is open source under the AGPL-3.0 license.
