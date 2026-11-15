@@ -34,6 +34,7 @@ from app.core.constants import (
     ERR_SESSION_READ_MESSAGE_INVALID,
     ERR_SESSION_READ_ONLY,
     ERR_SESSION_TRANSPORT_CHANGE_ACTIVE,
+    ERR_SUBAGENT_NOT_FOUND,
     GUIDANCE_MESSAGE_PREFIX,
     GUIDANCE_MESSAGE_SUFFIX,
     MSG_BACKGROUND_TASK_DETAIL_SUCCESS,
@@ -46,6 +47,7 @@ from app.core.constants import (
     MSG_SESSION_UPDATED,
     MSG_TITLE_GENERATED,
     SESSION_MAX_TURNS_UPPER_BOUND,
+    SUBAGENT_BOARD_ACTIVE_PAGE_SIZE,
 )
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.session.message import message_crud
@@ -72,6 +74,7 @@ from app.core.security import get_current_user
 from app.core.session.cleanup import delete_session_data
 from app.core.session.notifier import session_notifier
 from app.core.session.source import default_show_tool_calls_for_source
+from app.core.session.subagent_board import get_session_subagent_detail, list_session_subagents
 from app.core.session_reply_queue.manager import (
     build_input_accepted_event,
     build_input_queued_event,
@@ -93,7 +96,7 @@ from app.models.message import (
 )
 from app.models.profile import ProfileConfig
 from app.models.session import ChatSession
-from app.providers.database import AsyncSessionLocal, get_db
+from app.providers.database import AsyncSessionLocal, ensure_sqlite_outer_transaction, get_db
 from app.schemas.response import (
     LLMChoice,
     LLMChoiceMessage,
@@ -497,6 +500,85 @@ async def get_session_todo(
         "todos": [dict(item) for item in plan.todos] if plan else [],
     }
     return StandardResponse.success(data=data, message=MSG_SESSION_TODO_SUCCESS)
+
+
+@router.get("/sessions/subagents")
+async def list_session_subagent_board(
+    session_id: str = Query(min_length=1),
+    recent_limit: int = Query(default=10, ge=1, le=100),
+    active_page: int = Query(default=1, ge=1),
+    selected_subagent_id: str | None = Query(default=None, min_length=1, max_length=32),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    uid = getattr(current_user, "uid", None)
+    is_admin = getattr(current_user, "is_superuser", False)
+    await ensure_sqlite_outer_transaction(db)
+    session = await get_session_for_user(
+        db,
+        session_id=session_id,
+        uid=uid,
+        is_admin=is_admin,
+    )
+    profile = await resolve_profile_for_session(db, uid=session.uid, session_id=session.session_id)
+    if not profile:
+        return StandardResponse.success(
+            data={
+                "active": [],
+                "recent": [],
+                "active_page": 1,
+                "active_page_size": SUBAGENT_BOARD_ACTIVE_PAGE_SIZE,
+                "active_total": 0,
+                "has_more_recent": False,
+                "profile_id": None,
+                "selected": None,
+            }
+        )
+    data = await list_session_subagents(
+        db,
+        uid=session.uid,
+        session_id=session.session_id,
+        profile_id=profile.id,
+        recent_limit=recent_limit,
+        active_page=active_page,
+        selected_subagent_id=selected_subagent_id,
+    )
+    return StandardResponse.success(data=data)
+
+
+@router.get("/sessions/subagents/{subagent_id}")
+async def get_session_subagent_board_detail(
+    subagent_id: str,
+    session_id: str = Query(min_length=1),
+    work_id: int | None = Query(default=None, gt=0),
+    before_post_id: int | None = Query(default=None, gt=0),
+    before_round_id: int | None = Query(default=None, gt=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    uid = getattr(current_user, "uid", None)
+    is_admin = getattr(current_user, "is_superuser", False)
+    await ensure_sqlite_outer_transaction(db)
+    session = await get_session_for_user(
+        db,
+        session_id=session_id,
+        uid=uid,
+        is_admin=is_admin,
+    )
+    profile = await resolve_profile_for_session(db, uid=session.uid, session_id=session.session_id)
+    if not profile:
+        raise ParameterException(ERR_SUBAGENT_NOT_FOUND)
+    data = await get_session_subagent_detail(
+        db,
+        uid=session.uid,
+        session_id=session.session_id,
+        profile_id=profile.id,
+        subagent_id=subagent_id,
+        work_id=work_id,
+        before_post_id=before_post_id,
+        before_round_id=before_round_id,
+    )
+    return StandardResponse.success(data=data)
 
 
 @router.post("/sessions/delete")

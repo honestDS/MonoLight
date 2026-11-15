@@ -7,22 +7,23 @@ export function createSessionTodoOverlay({ props, emit, storage }) {
   const summary = computed(() => summarizeTodoPlan(normalizedPlan.value))
   const storedCollapsed = getClientSetting('sessionTodoDrawerCollapsed', true, storage)
   const collapsed = ref(typeof storedCollapsed === 'boolean' ? storedCollapsed : true)
-  const expanded = computed(() => summary.value.total > 0 && !collapsed.value && !props.suppressed)
+  const expanded = computed(() => Boolean(props.sessionId) && !collapsed.value)
 
   const stopWatch = watch(
-    [expanded, () => summary.value.total, () => props.suppressed],
-    ([isExpanded, total, suppressed]) => {
-      if (isExpanded || total === 0 || suppressed) emit('expanded-change', isExpanded)
-    },
+    expanded,
+    isExpanded => emit('expanded-change', isExpanded),
     { immediate: true, flush: 'sync' }
   )
 
-  const handleDrawerAfterLeave = () => {
-    if (!expanded.value) emit('expanded-change', false)
+  const close = () => {
+    if (!expanded.value) return
+
+    collapsed.value = true
+    setClientSetting('sessionTodoDrawerCollapsed', true, storage)
   }
 
   const toggleCollapsed = () => {
-    if (props.suppressed) return
+    if (!props.sessionId) return
 
     collapsed.value = !collapsed.value
     setClientSetting('sessionTodoDrawerCollapsed', collapsed.value, storage)
@@ -38,7 +39,7 @@ export function createSessionTodoOverlay({ props, emit, storage }) {
     summary,
     collapsed,
     expanded,
-    handleDrawerAfterLeave,
+    close,
     toggleCollapsed,
     dispose
   }

@@ -110,6 +110,8 @@ export const chatApi = {
   }),
   // 获取当前会话 Todo
   sessionTodo: (sessionId) => request.get('/chat/sessions/todo', { params: { session_id: sessionId } }),
+  sessionSubagents: (sessionId, params = {}, config = {}) => request.get('/chat/sessions/subagents', { ...config, params: { ...params, session_id: sessionId } }),
+  sessionSubagentDetail: (sessionId, subagentId, params = {}, config = {}) => request.get(`/chat/sessions/subagents/${encodeURIComponent(subagentId)}`, { ...config, params: { ...params, session_id: sessionId } }),
   // 异步生成会话标题
   generateTitle: (data) => request.post('/chat/sessions/generate-title', data),
   // 创建外部会话引导

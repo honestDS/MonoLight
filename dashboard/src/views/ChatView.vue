@@ -141,6 +141,8 @@
         </Transition>
       </div>
 
+      <div id="chat-task-trigger-slot"></div>
+
       <ChatMessageList
         ref="messageList"
         v-model:active-collapse="activeCollapse"
@@ -409,12 +411,12 @@
           </div>
         </div>
       </div>
-
-      <SessionTodoPanel
-        :plan="currentTodoPlan"
-        :suppressed="moreOptionsVisible || moreOptionsOverlayActive"
-      />
     </div>
+    <SessionTodoPanel
+      :plan="currentTodoPlan"
+      :session-id="currentSessionId"
+      :profile-key="`${currentUid || ''}:${currentSessionProfileDisplayId ?? ''}`"
+    />
   </div>
 </template>
 

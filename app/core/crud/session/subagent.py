@@ -1,12 +1,14 @@
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, exists, or_, update
+from sqlalchemy import and_, case, delete, exists, func, or_, update
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 from sqlmodel import select
 
-from app.core.constants import SESSION_REPLY_CLEANUP_BATCH_SIZE, SUBAGENT_IDLE_RETENTION_HOURS
+from app.core.constants import SESSION_REPLY_CLEANUP_BATCH_SIZE, SUBAGENT_BOARD_POST_DISPLAY_CHARS, SUBAGENT_BOARD_PREVIEW_CHARS, SUBAGENT_IDLE_RETENTION_HOURS
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.utils.time import get_local_time
@@ -19,6 +21,17 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
 )
 from app.models.subagent import Subagent, SubagentBoardPost, SubagentToolCall, SubagentWork
+
+
+def _board_round_completed():
+    return or_(
+        SubagentWork.result.is_not(None),
+        SessionReplyWorkItem.status.in_((SessionReplyWorkStatus.FAILED, SessionReplyWorkStatus.CANCELLED)),
+        and_(
+            SessionReplyWorkItem.status == SessionReplyWorkStatus.SUCCEEDED,
+            SubagentWork.waiting_confirmation.is_(False),
+        ),
+    )
 
 
 class CRUDSubagent:
@@ -213,6 +226,123 @@ class CRUDSubagent:
             active_rows.append((subagent, work))
         return active_rows
 
+    def _board_scope(
+        self,
+        statement: Select,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        subagent_id: str | None = None,
+    ) -> Select:
+        statement = (
+            statement.select_from(Subagent)
+            .join(
+                SubagentWork,
+                (SubagentWork.child_work_id == Subagent.latest_child_work_id) & (SubagentWork.subagent_id == Subagent.id),
+            )
+            .join(SessionReplyWorkItem, SessionReplyWorkItem.id == SubagentWork.current_work_id)
+            .where(
+                Subagent.uid == uid,
+                Subagent.session_id == session_id,
+                Subagent.profile_id == profile_id,
+                SessionReplyWorkItem.subagent_id == Subagent.id,
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.session_id == session_id,
+                SessionReplyWorkItem.profile_id == profile_id,
+            )
+        )
+        if subagent_id is not None:
+            statement = statement.where(Subagent.id == subagent_id)
+        return statement
+
+    async def list_for_board(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        limit: int,
+        completed: bool | None,
+        offset: int = 0,
+        subagent_id: str | None = None,
+    ) -> list[RowMapping]:
+        latest_post_id = (
+            select(SubagentBoardPost.id)
+            .where(
+                SubagentBoardPost.uid == uid,
+                SubagentBoardPost.session_id == session_id,
+                SubagentBoardPost.profile_id == profile_id,
+                SubagentBoardPost.subagent_id == Subagent.id,
+                SubagentBoardPost.child_work_id == SubagentWork.child_work_id,
+            )
+            .order_by(SubagentBoardPost.id.desc())
+            .limit(1)
+            .correlate(Subagent, SubagentWork)
+            .scalar_subquery()
+        )
+        updated_at = case(
+            (SubagentBoardPost.created_at > SessionReplyWorkItem.updated_at, SubagentBoardPost.created_at),
+            else_=SessionReplyWorkItem.updated_at,
+        ).label("updated_at")
+        round_completed = _board_round_completed()
+        statement = select(
+            Subagent.id.label("subagent_id"),
+            Subagent.name.label("name"),
+            SubagentWork.child_work_id.label("work_id"),
+            SubagentWork.created_at.label("created_at"),
+            updated_at,
+            round_completed.label("completed"),
+            SubagentWork.result["status"].as_string().label("result_status"),
+            SessionReplyWorkItem.status.label("work_status"),
+            SessionReplyWorkItem.lock_until.label("lock_until"),
+            SessionReplyWorkItem.result_message_id.label("result_message_id"),
+            SessionReplyWorkItem.execution_state["response"]["skip_reply"].as_boolean().label("skip_reply"),
+            SubagentWork.waiting_confirmation.label("waiting_confirmation"),
+            SubagentBoardPost.id.label("latest_post_id"),
+            SubagentBoardPost.stage.label("post_stage"),
+            func.substr(SubagentBoardPost.content, 1, SUBAGENT_BOARD_PREVIEW_CHARS).label("post_preview"),
+        )
+        statement = self._board_scope(
+            statement,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            subagent_id=subagent_id,
+        ).outerjoin(SubagentBoardPost, SubagentBoardPost.id == latest_post_id)
+
+        if completed is True:
+            statement = statement.where(round_completed).order_by(updated_at.desc(), SubagentWork.child_work_id.desc())
+        elif completed is False:
+            statement = statement.where(~round_completed).order_by(
+                case(
+                    (SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM, 1),
+                    else_=0,
+                ).asc(),
+                SubagentWork.child_work_id.asc(),
+            )
+
+        result = await db.execute(statement.offset(offset).limit(limit))
+        return list(result.mappings().all())
+
+    async def count_active_for_board(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+    ) -> int:
+        statement = self._board_scope(
+            select(func.count()),
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+        ).where(~_board_round_completed())
+        result = await db.execute(statement)
+        return int(result.scalar_one())
+
     async def lock_parent_for_delivery(
         self,
         db: AsyncSession,
@@ -257,6 +387,20 @@ class CRUDSubagent:
             .execution_options(populate_existing=True)
         )
         return result.scalars().first()
+
+    async def list_board_rounds(
+        self,
+        db: AsyncSession,
+        *,
+        subagent_id: str,
+        limit: int,
+        before_id: int | None = None,
+    ) -> list[tuple[int, datetime]]:
+        statement = select(SubagentWork.child_work_id, SubagentWork.created_at).where(SubagentWork.subagent_id == subagent_id)
+        if before_id is not None:
+            statement = statement.where(SubagentWork.child_work_id < before_id)
+        result = await db.execute(statement.order_by(SubagentWork.child_work_id.desc()).limit(limit))
+        return list(result.all())
 
     async def get_round_for_work(self, db: AsyncSession, work: SessionReplyWorkItem) -> SubagentWork | None:
         execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
@@ -576,6 +720,41 @@ class CRUDSubagent:
             conditions.append(SubagentBoardPost.child_work_id == child_work_id)
         result = await db.execute(select(SubagentBoardPost).where(*conditions).order_by(SubagentBoardPost.id.asc()).execution_options(populate_existing=True))
         return list(result.scalars().all())
+
+    async def list_board_posts_page(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        subagent_id: str,
+        child_work_id: int,
+        before_id: int | None = None,
+        limit: int,
+    ) -> list[RowMapping]:
+        conditions = [
+            SubagentBoardPost.uid == uid,
+            SubagentBoardPost.session_id == session_id,
+            SubagentBoardPost.profile_id == profile_id,
+            SubagentBoardPost.subagent_id == subagent_id,
+            SubagentBoardPost.child_work_id == child_work_id,
+        ]
+        if before_id is not None:
+            conditions.append(SubagentBoardPost.id < before_id)
+        result = await db.execute(
+            select(
+                SubagentBoardPost.id,
+                SubagentBoardPost.child_work_id,
+                SubagentBoardPost.stage,
+                func.substr(SubagentBoardPost.content, 1, SUBAGENT_BOARD_POST_DISPLAY_CHARS + 1).label("content"),
+                SubagentBoardPost.created_at,
+            )
+            .where(*conditions)
+            .order_by(SubagentBoardPost.id.desc())
+            .limit(limit)
+        )
+        return list(result.mappings().all())
 
     async def get_latest_board_post(
         self,
