@@ -17,8 +17,13 @@ from app.core.constants import (
     TERMINAL_WATCH_TOOL_NAME,
 )
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.prompts import PROMPT_TOOL_INTERRUPTED
 from app.core.security import get_current_user
-from app.core.session_reply_queue.child_delivery import resume_child_work_for_parent
+from app.core.session_reply_queue.child_delivery import (
+    SUBAGENT_RESULT_NOTIFICATION_KIND,
+    build_subagent_notification_key,
+    resume_child_work_for_parent,
+)
 from app.core.session_reply_queue.child_recovery import reconcile_child_work
 from app.core.session_reply_queue.consumer import SessionReplyConsumer
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus
@@ -410,10 +415,9 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
             create_result = json.loads(create_result_message.content or "{}")
             assert create_result_message.tool_execution_status == "succeeded"
             assert create_result == {
-                "status": "succeeded",
+                "status": "queued",
                 "subagent_id": child.subagent_id,
                 "work_id": child_work_id,
-                "content": "子任务已完成",
             }
 
         parent_board_read_call = InternalToolCall(
@@ -577,7 +581,14 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
                 "name": AGENT_WORK_TOOL_NAME,
                 "arguments": create_call.arguments,
             }
-            assert completion_payload["results"] == [create_result]
+            assert completion_payload["results"] == [
+                {
+                    "status": "succeeded",
+                    "subagent_id": child.subagent_id,
+                    "work_id": child_work_id,
+                    "content": "子任务已完成",
+                }
+            ]
             marker_snapshot = [(row.id, row.dedupe_key, row.content) for row in markers_before]
 
         async with runtime.factory() as db:
@@ -825,10 +836,9 @@ async def test_agent_work_and_image_completion_resumes_parent_per_batch_and_keep
             child_result = InternalMessage.model_validate_json(result_message.content or "{}")
             assert child_result.tool_execution_status == "succeeded"
             assert json.loads(child_result.content or "{}") == {
-                "status": "succeeded",
+                "status": "queued",
                 "subagent_id": call.subagent_id,
                 "work_id": child_work_id,
-                "content": child_content,
             }
         parent_provider_start = len(runtime.provider_payloads)
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content="parent-final-marker"))
@@ -1430,10 +1440,9 @@ async def test_agent_work_two_children_are_delivered_in_batches(
                     result_payload = json.loads(result_message.content or "{}")
                     assert result_message.tool_execution_status == "succeeded"
                     assert result_payload == {
-                        "status": "succeeded",
+                        "status": "queued",
                         "subagent_id": call.subagent_id,
                         "work_id": call.child_work_id,
-                        "content": child_content,
                     }
                 markers = (await db.execute(select(Message).where(Message.session_id == runtime.session_id, Message.type == MessageType.SUBAGENT_RESULT).order_by(Message.id))).scalars().all()
                 assert len(markers) == 2
@@ -1486,7 +1495,7 @@ async def test_agent_work_two_children_are_delivered_in_batches(
                 await asyncio.gather(parent_recovery_task, return_exceptions=True)
 
 
-@pytest.mark.parametrize("interruption_point", ["before-result-save", "after-result-save"])
+@pytest.mark.parametrize("interruption_point", ["before-result-save", "after-result-save", "after-unknown-result-save"])
 @pytest.mark.parametrize("message_padding", ["", " \n"])
 @pytest.mark.asyncio
 async def test_agent_work_parent_commit_interrupt_recovers_submission_without_duplicate_submission(
@@ -1529,10 +1538,10 @@ async def test_agent_work_parent_commit_interrupt_recovers_submission_without_du
         parent_work_id = accepted_data["work_id"]
 
         original_save_tool_response = interactive_tools_module.save_tool_response
-        saved_queued_result_id: int | None = None
+        saved_result_id: int | None = None
 
         async def interrupt_queued_tool_result(*args, **kwargs):
-            nonlocal saved_queued_result_id
+            nonlocal saved_result_id
             tool_result = kwargs.get("tool_res")
             if tool_result is None and len(args) > 4:
                 tool_result = args[4]
@@ -1550,9 +1559,15 @@ async def test_agent_work_parent_commit_interrupt_recovers_submission_without_du
                 and isinstance(payload.get("subagent_id"), str)
                 and payload.get("subagent_id")
             ):
-                if interruption_point == "after-result-save":
+                if interruption_point == "after-unknown-result-save":
+                    tool_result.content = json.dumps(
+                        {"status": "execution_unknown", "error": PROMPT_TOOL_INTERRUPTED},
+                        ensure_ascii=False,
+                    )
+                    tool_result.tool_execution_status = "execution_unknown"
+                if interruption_point in {"after-result-save", "after-unknown-result-save"}:
                     saved_result = await original_save_tool_response(*args, **kwargs)
-                    saved_queued_result_id = saved_result.id
+                    saved_result_id = saved_result.id
                 raise asyncio.CancelledError("interrupted around queued child result save")
             return await original_save_tool_response(*args, **kwargs)
 
@@ -1561,6 +1576,9 @@ async def test_agent_work_parent_commit_interrupt_recovers_submission_without_du
             with pytest.raises(asyncio.CancelledError):
                 await runtime.run_next()
 
+        saved_result_content: str | None = None
+        saved_result_suffix: str | None = None
+        saved_result_execution_status: str | None = None
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
             assert parent is not None
@@ -1616,6 +1634,21 @@ async def test_agent_work_parent_commit_interrupt_recovers_submission_without_du
             checkpoint_assistants = [message for message in checkpoint_messages if message.role == MessageRole.ASSISTANT]
             assert sum(any(tool_call.id == actual_tool_call_id for tool_call in message.tool_calls or []) for message in checkpoint_assistants) == 1
             initial_counts = (len(subagents), len(children), len(child_rounds), len(calls))
+            if interruption_point in {"after-result-save", "after-unknown-result-save"}:
+                assert saved_result_id is not None
+                saved_result_row = await db.get(Message, saved_result_id)
+                assert saved_result_row is not None
+                saved_result_message = InternalMessage.model_validate_json(saved_result_row.content or "{}")
+                assert saved_result_message.tool_call_id == actual_tool_call_id
+                saved_result_content = saved_result_row.content
+                saved_result_suffix = saved_result_row.model_context_suffix
+                saved_result_execution_status = saved_result_message.tool_execution_status
+                if interruption_point == "after-unknown-result-save":
+                    assert saved_result_execution_status == "execution_unknown"
+                    assert json.loads(saved_result_message.content or "{}") == {
+                        "status": "execution_unknown",
+                        "error": PROMPT_TOOL_INTERRUPTED,
+                    }
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
@@ -1643,9 +1676,9 @@ async def test_agent_work_parent_commit_interrupt_recovers_submission_without_du
             assert call.tool_call_id == actual_tool_call_id
             assert call.tool_result_message_id is not None
             queued_result_id = call.tool_result_message_id
-            if interruption_point == "after-result-save":
-                assert saved_queued_result_id is not None
-                assert queued_result_id == saved_queued_result_id
+            if interruption_point in {"after-result-save", "after-unknown-result-save"}:
+                assert saved_result_id is not None
+                assert queued_result_id == saved_result_id
 
             result_rows = (
                 (
@@ -1671,13 +1704,35 @@ async def test_agent_work_parent_commit_interrupt_recovers_submission_without_du
                     matching_results.append((row, result, json.loads(result.content or "{}")))
             assert len(matching_results) == 1
             queued_row, queued_result, queued_payload = matching_results[0]
+            queued_result_content = queued_row.content
+            queued_result_suffix = queued_row.model_context_suffix
             assert queued_row.id == queued_result_id
             assert queued_result.tool_call_id == actual_tool_call_id
-            assert queued_payload == {
-                "status": "queued",
-                "work_id": child_work_id,
-                "subagent_id": calls[0].subagent_id,
-            }
+            if interruption_point in {"after-result-save", "after-unknown-result-save"}:
+                assert queued_row.content == saved_result_content
+                assert queued_row.model_context_suffix == saved_result_suffix
+                assert queued_result.tool_execution_status == saved_result_execution_status
+            if interruption_point == "after-unknown-result-save":
+                assert queued_payload == {
+                    "status": "execution_unknown",
+                    "error": PROMPT_TOOL_INTERRUPTED,
+                }
+            else:
+                assert queued_payload == {
+                    "status": "queued",
+                    "work_id": child_work_id,
+                    "subagent_id": calls[0].subagent_id,
+                }
+
+            child_checkpoint = await session_reply_work_item_crud.get_checkpoint(db, parent_work_id)
+            assert isinstance(child_checkpoint, dict)
+            assert isinstance(child_checkpoint.get("messages"), list)
+            checkpoint_results = [InternalMessage.model_validate(message) for message in child_checkpoint["messages"] if isinstance(message, dict) and message.get("role") == MessageRole.TOOL and message.get("tool_call_id") == actual_tool_call_id]
+            assert len(checkpoint_results) == 1
+            checkpoint_result = checkpoint_results[0]
+            assert checkpoint_result.id == queued_result_id
+            assert checkpoint_result.content == queued_result.content
+            assert checkpoint_result.tool_execution_status == queued_result.tool_execution_status
 
             subagents = (
                 (
@@ -1722,6 +1777,8 @@ async def test_agent_work_parent_commit_interrupt_recovers_submission_without_du
         assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
         assert not runtime.outputs
         assert any("child final result" in json.dumps(payload, ensure_ascii=False) for payload in runtime.provider_payloads[parent_provider_start:])
+        if interruption_point == "after-unknown-result-save":
+            assert PROMPT_TOOL_INTERRUPTED in json.dumps(runtime.provider_payloads[parent_provider_start:], ensure_ascii=False)
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
@@ -1767,14 +1824,32 @@ async def test_agent_work_parent_commit_interrupt_recovers_submission_without_du
             assert len(matching_results) == 1
             result_row, result, result_payload = matching_results[0]
             assert result_row.id == queued_result_id
+            assert result_row.content == queued_result_content
+            assert result_row.model_context_suffix == queued_result_suffix
             assert result.tool_call_id == actual_tool_call_id
-            assert result.tool_execution_status == "succeeded"
-            assert result_payload == {
-                "status": "succeeded",
-                "subagent_id": call.subagent_id,
-                "work_id": child_work_id,
-                "content": "child final result",
-            }
+            assert result.tool_execution_status == queued_result.tool_execution_status
+            assert result_payload == queued_payload
+            if interruption_point in {"after-result-save", "after-unknown-result-save"}:
+                assert result_row.content == saved_result_content
+                assert result_row.model_context_suffix == saved_result_suffix
+                assert result.tool_execution_status == saved_result_execution_status
+
+            markers = (
+                (
+                    await db.execute(
+                        select(Message).where(
+                            Message.session_id == parent.session_id,
+                            Message.uid == parent.uid,
+                            Message.profile_id == parent.profile_id,
+                            Message.type == MessageType.SUBAGENT_RESULT,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(markers) == 1
+            assert markers[0].dedupe_key == build_subagent_notification_key(parent, SUBAGENT_RESULT_NOTIFICATION_KIND, f"{call.subagent_id}:{call.tool_call_id}")
 
             subagents = (
                 (
@@ -1996,10 +2071,9 @@ async def test_agent_work_child_finishes_before_parent_reply_is_delivered_once(
             assert result_message.tool_call_id == actual_tool_call_id
             assert result_message.tool_execution_status == "succeeded"
             assert result_payload == {
-                "status": "succeeded",
+                "status": "queued",
                 "subagent_id": subagent_id,
                 "work_id": child_work_id,
-                "content": child_content,
             }
             assert not parent.execution_state.get("child_work_waits")
             markers = (

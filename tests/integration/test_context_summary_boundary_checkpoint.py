@@ -6,7 +6,10 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
+from app.core.constants import TOOL_CANCELLATION_SOURCE_MESSAGE_ID_KEY
+from app.core.context import ContextManager
 from app.core.utils.context_budget import calculate_context_summary_trigger_tokens
+from app.core.utils.context_messages import message_token_text
 from app.core.utils.context_summary import cleanup as cleanup_module
 from app.core.utils.context_summary import reduction as reduction_module
 from app.core.utils.context_summary import service as service_module
@@ -18,11 +21,21 @@ from app.core.utils.context_summary.common import (
     ContextSummaryState,
     ContextSummaryWorkInvalidError,
 )
-from app.core.utils.context_summary.snapshot import ContextSummarySnapshot
+from app.core.utils.context_summary.history import (
+    build_summary_fragment_plan,
+    iter_summary_fragments,
+    measure_complete_replacement_input,
+)
+from app.core.utils.context_summary.snapshot import (
+    ContextSummarySnapshot,
+    build_context_summary_snapshot,
+    iter_persistent_summary_rounds,
+)
 from app.core.utils.context_summary.stage import GeneratedSummaryResult
 from app.core.utils.dispatcher import context_summary_checkpoint as checkpoint_module
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.message_parser import parse_db_messages_to_internal
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage
 from app.models.message import InternalMessage, Message, MessageContentFormat, MessageRole, MessageType, StoredConversationSummary
 from app.models.session import ChatSession
@@ -443,6 +456,424 @@ async def test_user_checkpoint_uses_completed_tool_batch_boundary_and_preserves_
 
     db_session.expire_all()
     assert _message_snapshot(await _load_checkpoint_rows(db_session)) == raw_snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("competing_summary_through_id", [None, 1, 3])
+async def test_late_cancelled_tool_result_closes_fixed_user_boundary_without_crossing_new_messages(
+    db_session: AsyncSession,
+    monkeypatch,
+    competing_summary_through_id: int | None,
+):
+    current_content = "当前冻结用户原文"
+    later_content = "后来用户更新"
+    cancelled_error = "工具调用已取消"
+    cancelled_content = json.dumps(
+        {
+            "role": MessageRole.TOOL,
+            "type": MessageType.TOOL_RESULT,
+            "tool_call_id": "call-b",
+            "tool_execution_status": "execution_unknown",
+            "content": json.dumps(
+                {"type": "tool_cancellation", "status": "cancelled", "error": cancelled_error},
+                ensure_ascii=False,
+            ),
+            "tool_cancelled": True,
+        },
+        ensure_ascii=False,
+    )
+    cancelled_result = _message(
+        5,
+        MessageRole.TOOL,
+        message_type=MessageType.TOOL_RESULT,
+        content=cancelled_content,
+    )
+    cancelled_result.provider_metadata = {TOOL_CANCELLATION_SOURCE_MESSAGE_ID_KEY: 2}
+    normal_result = _tool_result(3, "call-a")
+    normal_result.content = json.dumps(
+        {
+            "role": MessageRole.TOOL,
+            "tool_call_id": "call-a",
+            "content": "stabletoolresult " * 2000,
+        },
+        ensure_ascii=False,
+    )
+
+    await _seed_checkpoint_case(
+        db_session,
+        [
+            _message(1, MessageRole.USER, content="旧用户原文"),
+            _tool_call(2, "call-a", "call-b"),
+            normal_result,
+            _checkpoint_user_message(4, current_content),
+            _tool_call(6, "call-new"),
+            _message(7, MessageRole.USER, content=later_content),
+        ],
+        monkeypatch,
+    )
+
+    blocked = await resolve_context_summary_boundary(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        expected_summary_message_id=None,
+        trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        fixed_upper_message_id=4,
+        page_size=1,
+    )
+    assert blocked.target_message_id is None
+
+    db_session.add(cancelled_result)
+    await db_session.commit()
+
+    stored_cancelled = await db_session.get(Message, 5)
+    assert stored_cancelled is not None
+    assert stored_cancelled.content == cancelled_content
+    assert stored_cancelled.provider_metadata == {TOOL_CANCELLATION_SOURCE_MESSAGE_ID_KEY: 2}
+
+    ready = await resolve_context_summary_boundary(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        expected_summary_message_id=None,
+        trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        fixed_upper_message_id=4,
+        page_size=1,
+    )
+    assert ready.target_message_id == 3
+    assert [(source_id, result.id) for source_id, result in ready.late_cancelled_tool_results] == [(2, 5)]
+    boundary_result = ready.late_cancelled_tool_results[0][1]
+    assert boundary_result.tool_call_id == "call-b"
+    assert boundary_result.tool_execution_status == "execution_unknown"
+    assert TOOL_CANCELLATION_SOURCE_MESSAGE_ID_KEY not in (boundary_result.provider_metadata or {})
+
+    raw_rows = await _load_checkpoint_rows(db_session)
+    raw_snapshot = _message_snapshot(raw_rows)
+    raw_provider_metadata = [(row.id, row.provider_metadata.copy() if isinstance(row.provider_metadata, dict) else row.provider_metadata) for row in raw_rows]
+    parsed_rows = parse_db_messages_to_internal(raw_rows)
+    current_user = next(message for message in parsed_rows if message.id == 4)
+    later_messages = [message for message in parsed_rows if message.id in {6, 7}]
+    original_messages_by_id = {message.id: message for message in parsed_rows if message.id in {4, 6, 7}}
+
+    persisted_history = await ContextManager.get_messages(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=1),
+        current_message=current_content,
+        before_id=4,
+    )
+    assert [message.id for message in persisted_history] == [1, 2, 3, 5]
+    persisted_cancelled = next(message for message in persisted_history if message.id == 5)
+    assert persisted_cancelled.tool_call_id == "call-b"
+    assert persisted_cancelled.tool_execution_status == "execution_unknown"
+    assert json.loads(persisted_cancelled.content or "{}") == {
+        "type": "tool_cancellation",
+        "status": "cancelled",
+        "error": cancelled_error,
+    }
+    assert TOOL_CANCELLATION_SOURCE_MESSAGE_ID_KEY not in (persisted_cancelled.provider_metadata or {})
+
+    checkpoint_profile = SimpleNamespace(id=1)
+    checkpoint_cfg = SimpleNamespace(other=SimpleNamespace(context_summary_threshold_percent=90))
+    captured_fragments: list[tuple[str, tuple[int, int]]] = []
+    max_fragment_tokens = 160
+
+    async def generate_summary(db, *, snapshot, **_kwargs):
+        fragment_plan = await build_summary_fragment_plan(
+            db,
+            session_id="session-1",
+            uid="user-1",
+            snapshot=snapshot,
+            max_fragment_tokens=max_fragment_tokens,
+        )
+        async for fragment in iter_summary_fragments(
+            db,
+            session_id="session-1",
+            uid="user-1",
+            snapshot=snapshot,
+            existing_summary=_kwargs.get("existing_summary"),
+            plan=fragment_plan,
+            max_fragment_tokens=max_fragment_tokens,
+        ):
+            captured_fragments.append((fragment.content, (fragment.message_start_id, fragment.message_end_id)))
+
+        assert captured_fragments
+        assert len(captured_fragments) >= 2
+        assert any(cancelled_error in content for content, _message_range in captured_fragments)
+        assert all(current_content not in content and later_content not in content for content, _message_range in captured_fragments)
+        assert all(1 <= message_start_id <= message_end_id <= 3 for _content, (message_start_id, message_end_id) in captured_fragments)
+        assert captured_fragments[-1][1][1] == 3
+
+        return GeneratedSummaryResult(
+            content="summary includes the late cancellation",
+            message_count=len(captured_fragments),
+            completed_stage=SimpleNamespace(stage_key="late-cancellation-checkpoint-test"),
+        )
+
+    monkeypatch.setattr(service_module, "generate_snapshot_summary_result", generate_summary)
+    competing_summary = "competing summary wins"
+    if competing_summary_through_id is not None:
+        original_persist_context_summary = service_module.persist_context_summary
+        competing_message_id = competing_summary_through_id
+
+        async def persist_with_competing_summary(**kwargs):
+            competing_kwargs = {
+                **kwargs,
+                "summary": StoredConversationSummary(conversation_summary=competing_summary).model_dump_json(exclude_none=True),
+                "message_id": competing_message_id,
+            }
+            competing_updated = await original_persist_context_summary(**competing_kwargs)
+            assert competing_updated is True
+            updated = await original_persist_context_summary(**kwargs)
+            assert updated is False
+            return updated
+
+        monkeypatch.setattr(service_module, "persist_context_summary", persist_with_competing_summary)
+
+    result = await checkpoint_module.apply_context_summary_checkpoint(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        profile=checkpoint_profile,
+        cfg=checkpoint_cfg,
+        messages=[
+            InternalMessage(role=MessageRole.SYSTEM, content="system prompt"),
+            *persisted_history,
+            current_user,
+            *later_messages,
+        ],
+        trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        fixed_upper_message_id=4,
+        context_window_k=8,
+        max_tokens=128,
+        tools=None,
+        force=True,
+    )
+
+    summary_message = next(message for message in result if message.conversation_summary is not None)
+    assert summary_message.conversation_summary is not None
+    if competing_summary_through_id == 1:
+        expected_summary_message_id = 1
+        expected_result_ids = [2, 3, 5, 4, 6, 7]
+    else:
+        expected_summary_message_id = 3
+        expected_result_ids = [4, 6, 7]
+    assert summary_message.conversation_summary.through_message_id == expected_summary_message_id
+    if competing_summary_through_id is None:
+        assert "summary includes the late cancellation" in summary_message.conversation_summary.content
+    else:
+        assert summary_message.conversation_summary.content == competing_summary
+    assert [message.id for message in result if message.id is not None] == expected_result_ids
+    if competing_summary_through_id == 1:
+        retained_cancelled = next(message for message in result if message.id == 5)
+        assert retained_cancelled.tool_call_id == "call-b"
+    else:
+        assert all(message.id != 5 for message in result)
+    retained_current = next(message for message in result if message.id == 4)
+    assert retained_current.content == current_content
+    for message_id in (6, 7):
+        retained_message = next(message for message in result if message.id == message_id)
+        assert retained_message.content == original_messages_by_id[message_id].content
+
+    session = await db_session.get(ChatSession, "session-1")
+    assert session is not None
+    await db_session.refresh(session)
+    assert session.context_summary_message_id == expected_summary_message_id
+    assert session.context_summary_revision == 1
+    assert session.context_content_revision == 0
+    assert session.context_summary is not None
+    if competing_summary_through_id is None:
+        assert "summary includes the late cancellation" in session.context_summary
+    else:
+        stored_summary = StoredConversationSummary.model_validate_json(session.context_summary)
+        assert stored_summary.conversation_summary == competing_summary
+    assert current_content not in session.context_summary
+    assert later_content not in session.context_summary
+
+    db_session.expire_all()
+    final_rows = await _load_checkpoint_rows(db_session)
+    assert _message_snapshot(final_rows) == raw_snapshot
+    assert [(row.id, row.provider_metadata.copy() if isinstance(row.provider_metadata, dict) else row.provider_metadata) for row in final_rows] == raw_provider_metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_tool_cancelled", [False, True])
+async def test_late_tool_result_is_not_resummarized_after_source_summary_coverage(
+    db_session: AsyncSession,
+    monkeypatch,
+    include_tool_cancelled: bool,
+):
+    current_content = "当前用户4"
+    next_content = "下一轮用户6"
+    late_error = f"迟到回执唯一错误-{include_tool_cancelled}"
+    if include_tool_cancelled:
+        late_body = {
+            "type": "tool_cancellation",
+            "status": "cancelled",
+            "error": late_error,
+        }
+    else:
+        late_body = {
+            "status": "execution_unknown",
+            "error": late_error,
+        }
+    late_payload = {
+        "role": MessageRole.TOOL,
+        "type": MessageType.TOOL_RESULT,
+        "tool_call_id": "call-b",
+        "tool_execution_status": "execution_unknown",
+        "content": json.dumps(late_body, ensure_ascii=False),
+    }
+    if include_tool_cancelled:
+        late_payload["tool_cancelled"] = True
+    late_result = _tool_result(5, "call-b")
+    late_result.content = json.dumps(late_payload, ensure_ascii=False)
+    late_result.provider_metadata = {TOOL_CANCELLATION_SOURCE_MESSAGE_ID_KEY: 2}
+
+    await _seed_checkpoint_case(
+        db_session,
+        [
+            _message(1, MessageRole.USER, content="旧用户1"),
+            _tool_call(2, "call-a", "call-b"),
+            _tool_result(3, "call-a"),
+            _message(4, MessageRole.USER, content=current_content),
+            late_result,
+        ],
+        monkeypatch,
+    )
+
+    first_boundary = await resolve_context_summary_boundary(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        expected_summary_message_id=None,
+        trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        fixed_upper_message_id=4,
+        page_size=1,
+    )
+    assert first_boundary.target_message_id == 3
+    assert [(source_id, result.id) for source_id, result in first_boundary.late_cancelled_tool_results] == [(2, 5)]
+
+    first_snapshot = await build_context_summary_snapshot(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        expected_summary_message_id=None,
+        before_id=None,
+        target_message_id=first_boundary.target_message_id,
+        late_cancelled_tool_results=first_boundary.late_cancelled_tool_results,
+        page_size=1,
+    )
+    first_rounds = [
+        round_messages
+        async for round_messages in iter_persistent_summary_rounds(
+            db_session,
+            session_id="session-1",
+            uid="user-1",
+            snapshot=first_snapshot,
+            page_size=1,
+        )
+    ]
+    assert first_snapshot.persistent_summary_target_id == 3
+    assert any(late_error in str(message.content) for round_messages in first_rounds for message in round_messages)
+
+    existing_summary = StoredConversationSummary(conversation_summary="已有摘要 through3").model_dump_json(exclude_none=True)
+    session = await db_session.get(ChatSession, "session-1")
+    assert session is not None
+    session.context_summary = existing_summary
+    session.context_summary_message_id = 3
+    await db_session.commit()
+    summary_metadata = (
+        session.context_summary,
+        session.context_summary_message_id,
+        session.context_summary_revision,
+        session.context_content_revision,
+    )
+
+    db_session.add(_message(6, MessageRole.USER, content=next_content))
+    await db_session.commit()
+    raw_rows = await _load_checkpoint_rows(db_session)
+    raw_snapshot = _message_snapshot(raw_rows)
+    raw_provider_metadata = [(row.id, row.provider_metadata.copy() if isinstance(row.provider_metadata, dict) else row.provider_metadata) for row in raw_rows]
+    parsed_rows = parse_db_messages_to_internal(raw_rows)
+    current_user = next(message for message in parsed_rows if message.id == 4)
+
+    second_boundary = await resolve_context_summary_boundary(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        expected_summary_message_id=3,
+        trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        fixed_upper_message_id=6,
+        page_size=1,
+    )
+    assert second_boundary.target_message_id == 5
+    assert second_boundary.covered_user_message_id == 4
+    assert second_boundary.covered_user_message_content == current_content
+    assert second_boundary.late_cancelled_tool_results == ()
+
+    second_snapshot = await build_context_summary_snapshot(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        expected_summary_message_id=3,
+        before_id=None,
+        target_message_id=second_boundary.target_message_id,
+        page_size=1,
+    )
+    assert second_snapshot.expected_summary_message_id == 3
+    assert second_snapshot.snapshot_max_message_id == 5
+    assert second_snapshot.persistent_summary_target_id == 5
+
+    max_fragment_tokens = 128
+    second_plan = await build_summary_fragment_plan(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        snapshot=second_snapshot,
+        max_fragment_tokens=max_fragment_tokens,
+    )
+    second_fragments = [
+        fragment
+        async for fragment in iter_summary_fragments(
+            db_session,
+            session_id="session-1",
+            uid="user-1",
+            snapshot=second_snapshot,
+            existing_summary=existing_summary,
+            plan=second_plan,
+            max_fragment_tokens=max_fragment_tokens,
+        )
+    ]
+    assert second_fragments
+    second_fragment_content = "\n".join(fragment.content for fragment in second_fragments)
+    assert current_content in second_fragment_content
+    assert late_error not in second_fragment_content
+    assert next_content not in second_fragment_content
+    assert second_fragments[-1].message_end_id == 5
+
+    expected_replacement_tokens = estimate_tokens(message_token_text(ContextSummaryState(content=existing_summary, message_id=3).as_message())) + estimate_tokens(message_token_text(current_user))
+    replacement_tokens = await measure_complete_replacement_input(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        snapshot=second_snapshot,
+        existing_summary=existing_summary,
+        page_size=1,
+    )
+    assert replacement_tokens == expected_replacement_tokens
+
+    db_session.expire_all()
+    assert _message_snapshot(await _load_checkpoint_rows(db_session)) == raw_snapshot
+    assert [(row.id, row.provider_metadata.copy() if isinstance(row.provider_metadata, dict) else row.provider_metadata) for row in await _load_checkpoint_rows(db_session)] == raw_provider_metadata
+    await db_session.refresh(session)
+    assert (
+        session.context_summary,
+        session.context_summary_message_id,
+        session.context_summary_revision,
+        session.context_content_revision,
+    ) == summary_metadata
 
 
 @pytest.mark.asyncio

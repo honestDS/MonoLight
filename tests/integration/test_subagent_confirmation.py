@@ -8,8 +8,9 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
-from app.core.constants import AGENT_WORK_TOOL_NAME, ERR_SUBAGENT_CANCELLED, FILE_TOOL_NAME
+from app.core.constants import AGENT_WORK_TOOL_NAME, ERR_SUBAGENT_CANCELLED, FILE_TOOL_NAME, SUBAGENT_RESULT_NOTIFICATION_KIND
 from app.core.i18n import t
+from app.core.session_reply_queue.child_delivery import build_subagent_notification_key
 from app.core.session_reply_queue.consumer import SessionReplyConsumer
 from app.models.audit import AuditRecord, AuditRecordStatus
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageRole, MessageType
@@ -23,6 +24,41 @@ from app.models.session_reply_work_item import (
 )
 from app.models.subagent import Subagent, SubagentToolCall, SubagentWork
 from app.providers.llm.client import LLMClient
+
+
+async def _assert_subagent_result_notification(
+    db: Any,
+    *,
+    runtime: Any,
+    call_id: int,
+    expected_result: dict[str, Any],
+) -> None:
+    call = await db.get(SubagentToolCall, call_id)
+    assert call is not None
+    parent = await db.get(SessionReplyWorkItem, call.parent_work_id)
+    assert parent is not None
+    notification_rows = (
+        (
+            await db.execute(
+                select(Message).where(
+                    Message.session_id == runtime.session_id,
+                    Message.uid == runtime.uid,
+                    Message.profile_id == runtime.profile.id,
+                    Message.type == MessageType.SUBAGENT_RESULT,
+                    Message.dedupe_key == build_subagent_notification_key(parent, SUBAGENT_RESULT_NOTIFICATION_KIND, f"{call.subagent_id}:{call.tool_call_id}"),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(notification_rows) == 1
+    notification = notification_rows[0]
+    assert notification.role == MessageRole.USER
+    notification_payload = json.loads(notification.content or "{}")
+    assert notification_payload["type"] == "external_work_resume"
+    assert notification_payload["source"] == "subagent"
+    assert notification_payload["results"] == [expected_result]
 
 
 @pytest.mark.parametrize("decision", ["同意", "拒绝"], ids=["approve", "reject"])
@@ -271,10 +307,23 @@ async def test_subagent_file_write_confirmation_round_returns_to_parent(
                 result_payload = json.loads(result_message.content or "{}")
                 assert result_message.tool_call_id == original_parent_tool_call_id
                 assert result_message.tool_execution_status == "succeeded"
-                assert result_payload["status"] == "succeeded"
-                assert result_payload["subagent_id"] == subagent.id
-                assert result_payload["work_id"] == child_work_id
-                assert result_payload["content"] == "子轮总结"
+                assert result_payload == {
+                    "status": "queued",
+                    "subagent_id": subagent.id,
+                    "work_id": child_work_id,
+                }
+                assert call.id is not None
+                await _assert_subagent_result_notification(
+                    db,
+                    runtime=runtime,
+                    call_id=call.id,
+                    expected_result={
+                        "status": "succeeded",
+                        "subagent_id": subagent.id,
+                        "work_id": child_work_id,
+                        "content": "子轮总结",
+                    },
+                )
                 assert record is not None and record.status == AuditRecordStatus.SUCCEEDED
 
             parent_provider_start = len(runtime.provider_payloads)
@@ -338,11 +387,24 @@ async def test_subagent_file_write_confirmation_round_returns_to_parent(
                 result_message = InternalMessage.model_validate_json(result_row.content or "{}")
                 result_payload = json.loads(result_message.content or "{}")
                 assert result_message.tool_call_id == original_parent_tool_call_id
-                assert result_message.tool_execution_status == "failed"
-                assert result_payload["status"] == "cancelled"
-                assert result_payload["subagent_id"] == subagent.id
-                assert result_payload["work_id"] == child_work_id
-                assert result_payload["reason"] == t(ERR_SUBAGENT_CANCELLED)
+                assert result_message.tool_execution_status == "succeeded"
+                assert result_payload == {
+                    "status": "queued",
+                    "subagent_id": subagent.id,
+                    "work_id": child_work_id,
+                }
+                assert call.id is not None
+                await _assert_subagent_result_notification(
+                    db,
+                    runtime=runtime,
+                    call_id=call.id,
+                    expected_result={
+                        "status": "cancelled",
+                        "subagent_id": subagent.id,
+                        "work_id": child_work_id,
+                        "reason": t(ERR_SUBAGENT_CANCELLED),
+                    },
+                )
                 assert record is not None and record.status == AuditRecordStatus.REJECTED
 
             parent_provider_start = len(runtime.provider_payloads)
@@ -535,11 +597,24 @@ async def test_subagent_cancel_round_returns_cancelled_result_to_parent(
             result_message = InternalMessage.model_validate_json(result_row.content or "{}")
             result_payload = json.loads(result_message.content or "{}")
             assert result_message.tool_call_id == original_tool_call_id
-            assert result_message.tool_execution_status == "failed"
-            assert result_payload["status"] == "cancelled"
-            assert result_payload["subagent_id"] == subagent_id
-            assert result_payload["work_id"] == child_work_id
-            assert result_payload["reason"] == t(ERR_SUBAGENT_CANCELLED)
+            assert result_message.tool_execution_status == "succeeded"
+            assert result_payload == {
+                "status": "queued",
+                "subagent_id": subagent_id,
+                "work_id": child_work_id,
+            }
+            assert call.id is not None
+            await _assert_subagent_result_notification(
+                db,
+                runtime=runtime,
+                call_id=call.id,
+                expected_result={
+                    "status": "cancelled",
+                    "subagent_id": subagent_id,
+                    "work_id": child_work_id,
+                    "reason": t(ERR_SUBAGENT_CANCELLED),
+                },
+            )
             instruction_rows = (
                 (
                     await db.execute(
@@ -808,11 +883,24 @@ async def test_running_subagent_file_tool_cancel_keeps_late_result_private(
                 cancellation_result = InternalMessage.model_validate_json(cancellation_result_row.content or "{}")
                 cancellation_payload = json.loads(cancellation_result.content or "{}")
                 assert cancellation_result.tool_call_id == original_parent_tool_call_id
-                assert cancellation_result.tool_execution_status == "failed"
-                assert cancellation_payload["status"] == "cancelled"
-                assert cancellation_payload["subagent_id"] == subagent_id
-                assert cancellation_payload["work_id"] == child_work_id
-                assert cancellation_payload["reason"] == t(ERR_SUBAGENT_CANCELLED)
+                assert cancellation_result.tool_execution_status == "succeeded"
+                assert cancellation_payload == {
+                    "status": "queued",
+                    "subagent_id": subagent_id,
+                    "work_id": child_work_id,
+                }
+                assert call.id is not None
+                await _assert_subagent_result_notification(
+                    db,
+                    runtime=runtime,
+                    call_id=call.id,
+                    expected_result={
+                        "status": "cancelled",
+                        "subagent_id": subagent_id,
+                        "work_id": child_work_id,
+                        "reason": t(ERR_SUBAGENT_CANCELLED),
+                    },
+                )
 
             release_file_tool.set()
             await asyncio.wait_for(file_tool_finished.wait(), timeout=10)

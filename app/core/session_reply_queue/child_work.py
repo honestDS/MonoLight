@@ -293,15 +293,6 @@ async def _existing_submission(
         profile_id=profile_id,
         touch=True,
     )
-    if call.delivered:
-        round_row = await subagent_crud.get_round(
-            db,
-            child_work_id=call.child_work_id,
-            subagent_id=call.subagent_id,
-        )
-        if round_row is None or not isinstance(round_row.result, dict):
-            raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID)
-        return build_subagent_work_result(call.subagent_id, round_row.result)
     return build_subagent_queued_result(call)
 
 

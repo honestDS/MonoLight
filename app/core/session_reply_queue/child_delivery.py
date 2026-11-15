@@ -5,7 +5,6 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation_results import replace_pending_tool_result
 from app.core.constants import (
     AGENT_WORK_TOOL_NAME,
     ERR_SUBAGENT_CONTEXT_INVALID,
@@ -149,32 +148,6 @@ async def _wake_waiting_parent(
     return True
 
 
-def _has_tool_call_context(messages: list[InternalMessage], call_ids: set[str]) -> bool:
-    return any(message.role == MessageRole.ASSISTANT and any(tool_call.id in call_ids for tool_call in (message.tool_calls or [])) for message in messages)
-
-
-def _replace_checkpoint_tool_result(
-    messages: list[InternalMessage],
-    *,
-    replacement: InternalMessage,
-    message_id: int,
-    call_ids: set[str],
-) -> bool:
-    index = next(
-        (index for index, message in enumerate(messages) if message.role == MessageRole.TOOL and message.id == message_id),
-        None,
-    )
-    if index is None:
-        index = next(
-            (index for index, message in enumerate(messages) if message.role == MessageRole.TOOL and message.tool_call_id in call_ids),
-            None,
-        )
-    if index is None:
-        return False
-    messages[index] = replacement.model_copy(deep=True)
-    return True
-
-
 def _build_resume_message(
     *,
     call_id: str,
@@ -203,34 +176,15 @@ def _build_resume_message(
     )
 
 
-def _build_result_ready_message(*, subagent_id: str, work_id: int) -> InternalMessage:
-    return InternalMessage(
-        role=MessageRole.USER,
-        type=MessageType.SUBAGENT_RESULT,
-        content=json.dumps(
-            {
-                "type": "subagent_result_ready",
-                "source": "subagent",
-                "subagent_id": subagent_id,
-                "work_id": work_id,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-    )
-
-
-async def _load_child_tool_result(
+async def _load_child_receipt_call_id(
     db: AsyncSession,
     *,
     parent,
     call,
     round_row,
-    message_id: int,
-) -> tuple[Message, InternalMessage]:
-    message = await message_crud.get(db, message_id)
-    if message is None or message.id != message_id or message.uid != parent.uid or message.session_id != parent.session_id or message.profile_id != parent.profile_id or message.role != MessageRole.TOOL or message.type != MessageType.TOOL_RESULT:
+) -> str:
+    message = await message_crud.get(db, call.tool_result_message_id)
+    if message is None or message.id != call.tool_result_message_id or message.uid != parent.uid or message.session_id != parent.session_id or message.profile_id != parent.profile_id or message.role != MessageRole.TOOL or message.type != MessageType.TOOL_RESULT:
         _invalid_context()
 
     try:
@@ -239,109 +193,38 @@ async def _load_child_tool_result(
     except (TypeError, ValueError):
         _invalid_context()
 
-    if stored.role != MessageRole.TOOL or not isinstance(stored.tool_call_id, str) or not stored.tool_call_id.strip() or not isinstance(payload, dict) or not _is_positive_int(payload.get("work_id")) or payload.get("work_id") != round_row.child_work_id or payload.get("subagent_id") != call.subagent_id:
+    if stored.role != MessageRole.TOOL or not isinstance(stored.tool_call_id, str) or not stored.tool_call_id.strip() or not isinstance(payload, dict):
         _invalid_context()
     if message.audit_tool_call_id is not None and message.audit_tool_call_id != stored.tool_call_id:
         _invalid_context()
 
     audit_record_id = message.audit_record_id
-    if audit_record_id is None:
-        if stored.tool_call_id != call.tool_call_id:
-            _invalid_context()
-    else:
-        if not _is_positive_int(audit_record_id):
-            _invalid_context()
-        binding = await audit_crud.get_execution_binding_for_tool_call(
-            db,
-            new_tool_call_id=call.tool_call_id,
-        )
-        if binding is None:
-            _invalid_context()
-        record, execution = binding
-        if record is None or execution is None or record.id != audit_record_id or record.uid != parent.uid or record.session_id != parent.session_id or execution.audit_record_id != record.id or execution.new_tool_call_id != call.tool_call_id:
-            _invalid_context()
-        details = await audit_crud.list_tool_details(db, record.id)
-        detail = next((item for item in details if item.id == execution.audit_tool_detail_id), None)
-        if detail is None or detail.original_tool_call_id != stored.tool_call_id or detail.tool_name != AGENT_WORK_TOOL_NAME:
-            _invalid_context()
-
-    return message, stored
-
-
-async def _apply_child_call_result(
-    db: AsyncSession,
-    *,
-    parent,
-    call,
-    round_row,
-    snapshot: dict[str, Any],
-    messages: list[InternalMessage],
-    turn_messages: list[InternalMessage] | None,
-) -> tuple[str, dict[str, Any], bool]:
-    pending_message, stored = await _load_child_tool_result(
-        db,
-        parent=parent,
-        call=call,
-        round_row=round_row,
-        message_id=call.tool_result_message_id,
-    )
-    try:
-        child_result = build_subagent_work_result(call.subagent_id, snapshot)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID) from exc
-    execution_status = {
-        "succeeded": "succeeded",
-        "execution_unknown": "execution_unknown",
-    }.get(snapshot.get("status"), "failed")
-    await replace_pending_tool_result(
-        db,
-        pending_message=pending_message,
-        original_tool_call_id=stored.tool_call_id,
-        content=json.dumps(child_result, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-        tool_execution_status=execution_status,
-        audit_record_id=pending_message.audit_record_id,
-    )
-    try:
-        replacement = InternalMessage.model_validate_json(pending_message.content or "{}")
-        replacement_payload = json.loads(replacement.content or "{}")
-    except (TypeError, ValueError) as exc:
-        raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID) from exc
-    if (
-        replacement.role != MessageRole.TOOL
-        or replacement.tool_call_id != stored.tool_call_id
-        or not isinstance(replacement_payload, dict)
-        or not _is_positive_int(replacement_payload.get("work_id"))
-        or replacement_payload.get("work_id") != round_row.child_work_id
-        or replacement_payload.get("subagent_id") != call.subagent_id
-    ):
+    execution_unknown = stored.tool_execution_status == "execution_unknown" and payload.get("status") == "execution_unknown" and "work_id" not in payload and "subagent_id" not in payload
+    if audit_record_id is None and stored.tool_call_id != call.tool_call_id:
         _invalid_context()
-    replacement.id = pending_message.id
-    replacement.type = pending_message.type
-    if pending_message.created_at is not None:
-        replacement.created_at = pending_message.created_at.timestamp()
-
-    call_ids = {call.tool_call_id, stored.tool_call_id}
-    has_context = _has_tool_call_context([*messages, *(turn_messages or [])], call_ids)
-    replaced = _replace_checkpoint_tool_result(
-        messages,
-        replacement=replacement,
-        message_id=call.tool_result_message_id,
-        call_ids=call_ids,
+    if audit_record_id is None and execution_unknown:
+        return stored.tool_call_id
+    if not _is_positive_int(payload.get("work_id")) or payload.get("work_id") != round_row.child_work_id or payload.get("subagent_id") != call.subagent_id:
+        _invalid_context()
+    if audit_record_id is None:
+        return stored.tool_call_id
+    if not _is_positive_int(audit_record_id):
+        _invalid_context()
+    binding = await audit_crud.get_execution_binding_for_tool_call(
+        db,
+        new_tool_call_id=call.tool_call_id,
     )
-    if turn_messages is not None:
-        replaced = (
-            _replace_checkpoint_tool_result(
-                turn_messages,
-                replacement=replacement,
-                message_id=call.tool_result_message_id,
-                call_ids=call_ids,
-            )
-            or replaced
-        )
-    needs_resume_message = not has_context or not replaced
-    call.delivered = True
-    db.add(call)
-    return stored.tool_call_id, replacement_payload, needs_resume_message
+    if binding is None:
+        _invalid_context()
+    record, execution = binding
+    if record is None or execution is None or record.id != audit_record_id or record.uid != parent.uid or record.session_id != parent.session_id or execution.audit_record_id != record.id or execution.new_tool_call_id != call.tool_call_id:
+        _invalid_context()
+    details = await audit_crud.list_tool_details(db, record.id)
+    detail = next((item for item in details if item.id == execution.audit_tool_detail_id), None)
+    if detail is None or detail.original_tool_call_id != stored.tool_call_id or detail.tool_name != AGENT_WORK_TOOL_NAME:
+        _invalid_context()
+
+    return stored.tool_call_id
 
 
 async def acknowledge_observed_child_results(
@@ -510,15 +393,14 @@ async def acknowledge_observed_child_results(
             if observed_message_id <= call.tool_result_message_id:
                 continue
 
-            await _apply_child_call_result(
+            await _load_child_receipt_call_id(
                 db,
                 parent=parent,
                 call=call,
                 round_row=round_row,
-                snapshot=snapshot,
-                messages=messages,
-                turn_messages=turn_messages,
             )
+            call.delivered = True
+            db.add(call)
             accepted_tool_call_ids.add(call.tool_call_id)
             break
 
@@ -530,9 +412,6 @@ async def acknowledge_observed_child_results(
         execution_state["child_work_waits"] = remaining_waits
     else:
         execution_state.pop("child_work_waits", None)
-    checkpoint["messages"] = _serialize_checkpoint_messages(messages)
-    if turn_messages is not None:
-        checkpoint["turn_messages"] = _serialize_checkpoint_messages(turn_messages)
 
 
 async def supersede_child_reports(
@@ -848,10 +727,13 @@ async def resume_child_work_for_parent(
         checkpoint = await reply_work_crud.get_checkpoint(db, parent_work_id)
         if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("messages"), list):
             _invalid_context()
-        messages = _parse_checkpoint_messages(checkpoint["messages"])
-        turn_messages = None
-        if "turn_messages" in checkpoint:
-            turn_messages = _parse_checkpoint_messages(checkpoint["turn_messages"])
+        messages = checkpoint["messages"]
+        checkpoint_message_ids: set[int] = set()
+        for message in messages:
+            if not isinstance(message, dict):
+                _invalid_context()
+            if _is_positive_int(message.get("id")):
+                checkpoint_message_ids.add(message["id"])
         pending_resume_message_ids: list[Any] = []
         existing_pending_resume_message_ids = checkpoint.get("pending_resume_message_ids")
         if isinstance(existing_pending_resume_message_ids, list):
@@ -862,53 +744,42 @@ async def resume_child_work_for_parent(
         remaining_slots: list[dict[str, Any]] = []
         remaining_receipts: list[dict[str, Any]] = []
         delivered_child_work_ids: list[int] = []
-        is_live_parent = not isinstance(state.get("frozen_context_message_ids"), list)
-        checkpoint_message_ids = {message.id for message in messages if _is_positive_int(message.id)}
-        turn_message_ids = {message.id for message in turn_messages if _is_positive_int(message.id)} if turn_messages is not None else set()
-        pending_notifications: list[tuple[InternalMessage, str, bool]] = []
+        pending_notifications: list[tuple[InternalMessage, str]] = []
         for slot, call, round_row, wakeable in validated_slots:
             snapshot = round_row.result
-            if not isinstance(snapshot, dict):
-                if wakeable:
-                    remaining_slots.append(slot)
-                elif not call.delivered:
-                    remaining_receipts.append(slot)
-                continue
-            if call.delivered:
+            has_result = isinstance(snapshot, dict)
+            if not has_result and wakeable:
+                remaining_slots.append(slot)
+            if not has_result and not wakeable and not call.delivered:
+                remaining_receipts.append(slot)
+            if not has_result or call.delivered:
                 continue
 
-            if wakeable:
-                delivered_child_work_ids.append(round_row.child_work_id)
-            call_id, replacement_payload, needs_resume_message = await _apply_child_call_result(
+            call_id = await _load_child_receipt_call_id(
                 db,
                 parent=parent,
                 call=call,
                 round_row=round_row,
-                snapshot=snapshot,
-                messages=messages,
-                turn_messages=turn_messages,
             )
             if wakeable:
-                if is_live_parent or needs_resume_message:
-                    notification = _build_resume_message(
-                        call_id=call_id,
-                        arguments=call.arguments,
-                        result=replacement_payload,
-                    )
-                    include_in_turn = needs_resume_message
-                else:
-                    notification = _build_result_ready_message(
-                        subagent_id=call.subagent_id,
-                        work_id=round_row.child_work_id,
-                    )
-                    include_in_turn = False
+                delivered_child_work_ids.append(round_row.child_work_id)
+                try:
+                    child_result = build_subagent_work_result(call.subagent_id, snapshot)
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ParameterException(ERR_SUBAGENT_CONTEXT_INVALID) from exc
+                notification = _build_resume_message(
+                    call_id=call_id,
+                    arguments=call.arguments,
+                    result=child_result,
+                )
                 pending_notifications.append(
                     (
                         notification,
                         build_subagent_notification_key(work, SUBAGENT_RESULT_NOTIFICATION_KIND, f"{call.subagent_id}:{call.tool_call_id}"),
-                        include_in_turn,
                     )
                 )
+            call.delivered = True
+            db.add(call)
 
         for post in new_board_posts:
             board_message = InternalMessage(
@@ -932,13 +803,12 @@ async def resume_child_work_for_parent(
                 (
                     board_message,
                     build_subagent_notification_key(work, SUBAGENT_BOARD_NOTIFICATION_KIND, f"{post.subagent_id}:{post.id}"),
-                    False,
                 )
             )
 
         if pending_notifications:
             message_work_id = await reply_work_crud.get_message_work_id(db, parent)
-            for notification, dedupe_key, include_in_turn in pending_notifications:
+            for notification, dedupe_key in pending_notifications:
                 marker = await save_message(
                     db,
                     parent.session_id,
@@ -959,15 +829,9 @@ async def resume_child_work_for_parent(
                 if marker.id not in pending_resume_message_ids:
                     pending_resume_message_ids.append(marker.id)
                 if marker.id not in checkpoint_message_ids:
-                    messages.append(notification)
+                    messages.append(notification.model_dump(mode="json", exclude_none=True))
                     checkpoint_message_ids.add(marker.id)
-                if include_in_turn and turn_messages is not None and marker.id not in turn_message_ids:
-                    turn_messages.append(notification.model_copy(deep=True))
-                    turn_message_ids.add(marker.id)
 
-        checkpoint["messages"] = _serialize_checkpoint_messages(messages)
-        if turn_messages is not None:
-            checkpoint["turn_messages"] = _serialize_checkpoint_messages(turn_messages)
         if pending_resume_message_ids:
             checkpoint["pending_resume_message_ids"] = pending_resume_message_ids
         else:

@@ -834,6 +834,32 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             await db.flush()
         return audit_ids
 
+    async def list_cancelled_for_origin_work(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        origin_work_id: int,
+        origin_work_identity: str,
+    ) -> list[BackgroundTask]:
+        result = await db.execute(
+            select(BackgroundTask)
+            .where(
+                BackgroundTask.uid == uid,
+                BackgroundTask.session_id == session_id,
+                BackgroundTask.profile_id == profile_id,
+                BackgroundTask.status == BackgroundTaskStatus.CANCELLED,
+                BackgroundTask.extra["origin_work_id"].as_integer() == origin_work_id,
+                BackgroundTask.extra["origin_work_identity"].as_string() == origin_work_identity,
+            )
+            .order_by(BackgroundTask.id.asc())
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
     async def list_startup_audit_record_ids(self, db: AsyncSession, *, before: datetime | None = None) -> set[int]:
         conditions = [
             BackgroundTask.audit_record_id.is_not(None),

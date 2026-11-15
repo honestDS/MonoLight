@@ -50,6 +50,10 @@ async def save_assistant_message(
     # 清洗 Markdown 标记
     ai_msg = process_markdown_response(ai_msg, enable_markdown)
 
+    save_commit = True
+    if claim_info and ai_msg.tool_calls:
+        save_commit = False
+
     saved_msg = await save_message(
         db,
         session_id,
@@ -61,7 +65,24 @@ async def save_assistant_message(
         is_processed=True,
         dedupe_key=dedupe_key,
         created_at=created_at,
+        commit=save_commit,
     )
+
+    if claim_info and ai_msg.tool_calls:
+        work = await session_reply_work_item_crud.get(db, work_id)
+        if work is None:
+            await db.rollback()
+            raise asyncio.CancelledError(t(ERR_SESSION_REPLY_LEASE_LOST))
+        await db.refresh(work)
+
+        execution_state = dict(work.execution_state or {})
+        tool_call_message_ids = list(execution_state.get("tool_call_message_ids") or [])
+        if saved_msg.id not in tool_call_message_ids:
+            tool_call_message_ids.append(saved_msg.id)
+            execution_state["tool_call_message_ids"] = tool_call_message_ids
+            work.execution_state = execution_state
+        await db.commit()
+
     ai_msg.id = saved_msg.id
     ai_msg.created_at = saved_msg.created_at
     ai_msg.type = saved_msg.type

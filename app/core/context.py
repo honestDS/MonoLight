@@ -13,7 +13,7 @@ from app.core.log import get_logger
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
 from app.core.utils.assistant_files import model_visible_message_content
 from app.core.utils.context_budget import ensure_configured_request_capacity_available
-from app.core.utils.message_parser import parse_db_messages_to_internal
+from app.core.utils.message_parser import StoredToolCallState, parse_db_messages_to_internal
 from app.models.message import (
     InternalMessage,
     Message,
@@ -75,6 +75,27 @@ class ContextManager:
             if last_id is None:
                 break
             page_before_id = last_id
+
+        if isinstance(before_id, int) and not isinstance(before_id, bool) and before_id > 0:
+            tool_state = StoredToolCallState(session_id=session_id, uid=uid)
+            for message in reversed(raw_history):
+                tool_state.observe(message)
+
+            if tool_state.pending:
+                late_rows = await message_crud.list_late_cancelled_tool_results(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    source_message_ids=sorted({source_id for source_id, _tool_call_id in tool_state.pending}),
+                    after_id=before_id - 1,
+                )
+                accepted_rows = []
+                for late_row in late_rows:
+                    if late_row.id is None or late_row.id < before_id:
+                        continue
+                    if tool_state.accept_late_tool_result(late_row) is not None:
+                        accepted_rows.append(late_row)
+                return [*reversed(accepted_rows), *raw_history]
 
         return raw_history
 

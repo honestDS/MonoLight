@@ -1251,6 +1251,33 @@ class CRUDSessionReplyWorkItem:
             checkpoint_messages=checkpoint_message_count,
         )
 
+    async def list_cancelled_with_tool_calls(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+    ) -> list[SessionReplyWorkItem]:
+        result = await db.execute(
+            select(SessionReplyWorkItem)
+            .where(
+                SessionReplyWorkItem.uid == uid,
+                SessionReplyWorkItem.session_id == session_id,
+                SessionReplyWorkItem.status == SessionReplyWorkStatus.CANCELLED,
+                or_(
+                    SessionReplyWorkItem.execution_state["tool_call_message_ids"].as_string().is_not(None),
+                    and_(
+                        SessionReplyWorkItem.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+                        SessionReplyWorkItem.source_type == SessionReplySourceType.AUDIT_RECORD,
+                    ),
+                ),
+            )
+            .order_by(SessionReplyWorkItem.id.asc())
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
     async def cancel_session(
         self,
         db: AsyncSession,

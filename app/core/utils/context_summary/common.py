@@ -69,6 +69,7 @@ class ContextSummaryState:
     revision: int = field(default=0, compare=False, repr=False)
     content_revision: int = field(default=0, compare=False, repr=False)
     covered_user_request: InternalMessage | None = field(default=None, compare=False, repr=False)
+    late_cancelled_result_ids: frozenset[int] = field(default_factory=frozenset, compare=False, repr=False)
 
     def as_message(self) -> InternalMessage | None:
         if not self.content or self.message_id is None:

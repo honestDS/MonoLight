@@ -14,6 +14,10 @@ from app.core.constants import (
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.exceptions import BaseBusinessException, LLMContextLengthException
+from app.core.session_reply_queue.child_delivery import (
+    SUBAGENT_RESULT_NOTIFICATION_KIND,
+    build_subagent_notification_key,
+)
 from app.core.utils.context_budget import calculate_context_summary_trigger_tokens
 from app.models.channel import ModelChannel
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
@@ -231,17 +235,48 @@ async def _assert_failed_child_delivery(runtime, parent_work_id: int, child_work
         assert tool_result.role == MessageRole.TOOL
         assert tool_result.type == MessageType.TOOL_RESULT
         tool_result_message = InternalMessage.model_validate_json(tool_result.content or "{}")
-        assert tool_result_message.tool_execution_status == "failed"
+        assert tool_result_message.tool_execution_status == "succeeded"
         tool_result_payload = json.loads(tool_result_message.content or "{}")
         assert tool_result_payload == {
             "subagent_id": call.subagent_id,
             "work_id": child_work_id,
-            "status": "failed",
-            "reason": expected_error,
+            "status": "queued",
         }
 
         parent = await db.get(SessionReplyWorkItem, parent_work_id)
         assert parent is not None
+
+        notification_rows = (
+            (
+                await db.execute(
+                    select(Message).where(
+                        Message.session_id == runtime.session_id,
+                        Message.uid == runtime.uid,
+                        Message.profile_id == runtime.profile.id,
+                        Message.type == MessageType.SUBAGENT_RESULT,
+                        Message.dedupe_key
+                        == build_subagent_notification_key(
+                            parent,
+                            SUBAGENT_RESULT_NOTIFICATION_KIND,
+                            f"{call.subagent_id}:{call.tool_call_id}",
+                        ),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(notification_rows) == 1
+        notification_payload = json.loads(notification_rows[0].content or "{}")
+        assert notification_payload["results"] == [
+            {
+                "subagent_id": call.subagent_id,
+                "work_id": child_work_id,
+                "status": "failed",
+                "reason": expected_error,
+            }
+        ]
+
         assert parent.status == SessionReplyWorkStatus.READY_FOR_LLM
 
     assert await runtime.run_next(independent_only=True) is None
@@ -506,11 +541,42 @@ async def test_subagent_end_session_skip_reply_is_delivered_as_compact_success(i
             assert json.loads(tool_result_message.content or "{}") == {
                 "subagent_id": call.subagent_id,
                 "work_id": child_work_id,
-                "status": "ended_without_reply",
+                "status": "queued",
             }
 
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
             assert parent is not None
+
+            notification_rows = (
+                (
+                    await db.execute(
+                        select(Message).where(
+                            Message.session_id == runtime.session_id,
+                            Message.uid == runtime.uid,
+                            Message.profile_id == runtime.profile.id,
+                            Message.type == MessageType.SUBAGENT_RESULT,
+                            Message.dedupe_key
+                            == build_subagent_notification_key(
+                                parent,
+                                SUBAGENT_RESULT_NOTIFICATION_KIND,
+                                f"{call.subagent_id}:{call.tool_call_id}",
+                            ),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(notification_rows) == 1
+            notification_payload = json.loads(notification_rows[0].content or "{}")
+            assert notification_payload["results"] == [
+                {
+                    "subagent_id": call.subagent_id,
+                    "work_id": child_work_id,
+                    "status": "ended_without_reply",
+                }
+            ]
+
             assert parent.status == SessionReplyWorkStatus.READY_FOR_LLM
 
         parent_content = "parent continued after the child ended without a reply"

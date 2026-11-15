@@ -34,6 +34,7 @@ ERR_PARALLEL_LIMIT_EXCEEDED = "Too many parallel tool calls. Requested: {request
 
 # Tool execution interrupted
 PROMPT_TOOL_INTERRUPTED = "The execution of this tool was interrupted (possibly due to a new user message or system restart). The result is unknown. Please check if the action was completed and decide the next step."
+PROMPT_TOOL_RESULT_UNKNOWN_AFTER_REPLY_FAILURE = "The reply ended before a tool result was recorded. The result is unknown. Check the tool status or effects before deciding what to do next. Do not retry automatically."
 
 # Background task proactive reply prompts
 TERMINAL_AUTO_WATCH_RESUME_INSTRUCTION_PROMPT = (

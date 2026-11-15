@@ -169,7 +169,17 @@ async def apply_context_summary_checkpoint(
     if summary_message is None:
         return messages
 
-    retained_messages = [message for message in messages if message.role != MessageRole.SYSTEM and not is_context_summary_message(message) and (message.id is None or message.id > (state.message_id or 0))]
+    retained_messages = []
+    for message in messages:
+        if message.role == MessageRole.SYSTEM:
+            continue
+        if is_context_summary_message(message):
+            continue
+        if message.id in state.late_cancelled_result_ids:
+            continue
+        if message.id is not None and message.id <= (state.message_id or 0):
+            continue
+        retained_messages.append(message)
     return [
         *system_messages,
         summary_message,

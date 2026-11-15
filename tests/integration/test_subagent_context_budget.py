@@ -335,8 +335,7 @@ async def _assert_child_report_and_deliver_to_parent(
         assert result_payload == {
             "subagent_id": call.subagent_id,
             "work_id": call.child_work_id,
-            "status": "succeeded",
-            "content": report,
+            "status": "queued",
         }
 
 

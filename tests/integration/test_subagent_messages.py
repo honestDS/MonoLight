@@ -409,8 +409,7 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
                     assert result_payload == {
                         "subagent_id": subagent_id,
                         "work_id": child_work_id,
-                        "status": "succeeded",
-                        "content": child_summary,
+                        "status": "queued",
                     }
                     result_operations.append(call.arguments["operation"])
                 assert set(result_operations) == {"create", "send_message"}
@@ -484,6 +483,14 @@ async def test_running_subagent_reads_appended_message_on_next_model_request(
             _, resume_payload = second_resume_entries[0]
             assert resume_payload["source"] == "subagent"
             assert resume_payload["tool_call"]["id"] == second_parent_call_id
+            assert resume_payload["results"] == [
+                {
+                    "subagent_id": subagent_id,
+                    "work_id": child_work_id,
+                    "status": "succeeded",
+                    "content": child_summary,
+                }
+            ]
 
             history_response = await runtime.client.get(
                 "/api/v1/chat/sessions/history",
@@ -1036,8 +1043,7 @@ async def test_saved_child_text_with_late_message_stays_in_same_round(
                     assert result_payload == {
                         "subagent_id": subagent_id,
                         "work_id": child_work_id,
-                        "status": "succeeded",
-                        "content": final_text,
+                        "status": "queued",
                     }
             assert len(late_rows) == 1 and late_rows[0].is_processed is True
 
@@ -1047,6 +1053,7 @@ async def test_saved_child_text_with_late_message_stays_in_same_round(
             assert second_done is not None and second_done.id == second_parent_work_id
             assert second_done.status == SessionReplyWorkStatus.SUCCEEDED
             assert len(runtime.provider_payloads) == parent_provider_start + 1
+            assert final_text in json.dumps(runtime.provider_payloads[parent_provider_start:], ensure_ascii=False)
             provider_before_empty = len(runtime.provider_payloads)
             assert await runtime.run_next(independent_only=False) is None
             assert len(runtime.provider_payloads) == provider_before_empty

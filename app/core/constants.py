@@ -1071,6 +1071,7 @@ ERR_TERMINAL_SESSION_DELETED = "ERR_TERMINAL_SESSION_DELETED"
 # Session reply execution state keys
 SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY = "active_audit_execution"
 SESSION_REPLY_WORK_CLAIM_INFO_KEY = "session_reply_work_claim"
+TOOL_CANCELLATION_SOURCE_MESSAGE_ID_KEY = "tool_cancellation_source_message_id"
 
 # Session reply execution constants
 SESSION_REPLY_POLL_INTERVAL_SECONDS = 0.2

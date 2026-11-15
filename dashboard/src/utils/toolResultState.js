@@ -141,6 +141,17 @@ const getNestedToolResultContent = message => {
   return payload ? parseObjectContent(payload.result) : null
 }
 
+export const isToolResultCancelled = message => {
+  const backgroundPayload = getBackgroundToolResultPayload(message)
+  if (backgroundPayload) {
+    return backgroundPayload.tool_cancelled === true
+  }
+
+  if (message?.type === 'background_result') return false
+  const payload = getOrdinaryToolResultPayload(message)
+  return payload?.wrapper?.tool_cancelled === true
+}
+
 export const isToolResultPending = message => {
   const info = getToolResultInfo(message)
   if (!info || info.kind !== 'ordinary') return false
@@ -233,15 +244,18 @@ export const projectToolResultMessage = message => {
   if (!payload) return message
 
   const toolCall = payload.tool_call
+  const projectedContent = {
+    role: 'tool',
+    tool_call_id: toolCall.id,
+    content: typeof payload.task === 'string' ? payload.task : JSON.stringify(payload.task)
+  }
+  if (payload.tool_cancelled === true) projectedContent.tool_cancelled = true
+
   return {
     ...message,
     role: 'tool',
     type: 'tool_result',
-    content: JSON.stringify({
-      role: 'tool',
-      tool_call_id: toolCall.id,
-      content: typeof payload.task === 'string' ? payload.task : JSON.stringify(payload.task)
-    }),
+    content: JSON.stringify(projectedContent),
     tool_call: toolCall
   }
 }

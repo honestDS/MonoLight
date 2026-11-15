@@ -18,7 +18,7 @@ from app.core.utils.context_summary.snapshot import CONTEXT_SUMMARY_SCAN_PAGE_SI
 from app.core.utils.context_summary.split import SummarySourceUnit, iter_round_source_units
 from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshots
-from app.core.utils.message_parser import parse_db_messages_to_internal
+from app.core.utils.message_parser import is_tool_result_covered_by_summary, parse_db_messages_to_internal
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
 
@@ -87,6 +87,16 @@ async def measure_complete_replacement_input(
     if target_id is None:
         return total_tokens
 
+    if snapshot.late_cancelled_tool_results:
+        total_tokens += sum(
+            estimate_tokens(
+                message_token_text(result),
+                model_id=model_id,
+                protocol=protocol,
+            )
+            for _source_id, result in snapshot.late_cancelled_tool_results
+        )
+
     page_after_id = snapshot.expected_summary_message_id
     fixed_before_id = target_id + 1
     while True:
@@ -102,7 +112,12 @@ async def measure_complete_replacement_input(
         if not page:
             break
 
-        parsed_page = strip_session_todo_snapshots(parse_db_messages_to_internal(page))
+        filtered_page = []
+        for row in page:
+            if is_tool_result_covered_by_summary(row, snapshot.expected_summary_message_id):
+                continue
+            filtered_page.append(row)
+        parsed_page = strip_session_todo_snapshots(parse_db_messages_to_internal(filtered_page))
         total_tokens += sum(
             estimate_tokens(
                 _request_message_token_text(message),

@@ -212,6 +212,8 @@ def build_summary_work_identity(
     }
     if snapshot.source_key is not None:
         snapshot_payload_data["source_key"] = snapshot.source_key
+    if snapshot.late_cancelled_tool_results:
+        snapshot_payload_data["late_cancelled_tool_result_ids"] = [result.id for _source_message_id, result in snapshot.late_cancelled_tool_results]
     snapshot_payload = json.dumps(
         snapshot_payload_data,
         sort_keys=True,

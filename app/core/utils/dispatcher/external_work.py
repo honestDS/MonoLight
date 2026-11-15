@@ -9,6 +9,7 @@ from app.core.constants import (
     TERMINAL_WATCH_TOOL_NAME,
 )
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.subagent import subagent_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.models.message import InternalMessage, InternalToolCall
@@ -99,6 +100,25 @@ async def build_terminal_wait_response(
         raise RuntimeError(t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
 
     origin_work_id, worker_id = claim_info
+    if pure_response is not None:
+        filtered_pending_tools: list[dict] = []
+        # 派发回执保持原样，是否还需等待以已保存的交付状态为准。
+        for slot in pure_response["pending_tools"]:
+            call = None
+            if "child_work_id" in slot:
+                call = await subagent_crud.get_call(
+                    db,
+                    parent_work_id=origin_work_id,
+                    tool_call_id=slot["tool_call_id"],
+                )
+            if call is not None and call.delivered is True and call.child_work_id == slot.get("child_work_id") and call.subagent_id == slot.get("subagent_id"):
+                continue
+            filtered_pending_tools.append(slot)
+        if filtered_pending_tools:
+            pure_response["pending_tools"] = filtered_pending_tools
+        else:
+            pure_response = None
+
     tool_calls_by_id = {tool_call.id: tool_call for tool_call in tool_calls}
     terminal_candidates: dict[str, tuple[InternalToolCall, InternalMessage]] = {}
     for tool_result in tool_results:

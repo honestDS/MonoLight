@@ -128,6 +128,7 @@ async def _source_invalid_confirmed_tool_response(
 @dataclass
 class _ConfirmedToolResultReplacementState:
     db: Any
+    work: SessionReplyWorkItem
     pending_tool_results: Any
     audit_record_id: int
     messages: list[InternalMessage]
@@ -140,14 +141,27 @@ async def _append_confirmed_tool_result(
     original_tool_call_id: str,
     tool_result: InternalMessage,
 ) -> InternalMessage:
+    queued_background_task_id = get_queued_background_task_id(tool_result.content)
+    if queued_background_task_id is not None:
+        await ensure_session_reply_work_claim(replacement_state.db)
+        await replacement_state.db.refresh(replacement_state.work)
+    pending_message = replacement_state.pending_tool_results[original_tool_call_id]
     sanitized_content = await replace_pending_tool_result(
         replacement_state.db,
-        pending_message=replacement_state.pending_tool_results[original_tool_call_id],
+        pending_message=pending_message,
         original_tool_call_id=original_tool_call_id,
         content=tool_result.content,
         tool_execution_status=tool_result.tool_execution_status,
         audit_record_id=replacement_state.audit_record_id,
     )
+    if queued_background_task_id is not None and isinstance(pending_message.id, int) and not isinstance(pending_message.id, bool) and pending_message.id > 0:
+        execution_state = dict(replacement_state.work.execution_state) if isinstance(replacement_state.work.execution_state, dict) else {}
+        existing_message_ids = execution_state.get("external_tool_result_message_ids")
+        message_ids = list(existing_message_ids) if isinstance(existing_message_ids, list) else []
+        if pending_message.id not in message_ids:
+            message_ids.append(pending_message.id)
+        execution_state["external_tool_result_message_ids"] = message_ids
+        replacement_state.work.execution_state = execution_state
     stored_tool_result = tool_result.model_copy(deep=True)
     stored_tool_result.content = sanitized_content
     stored_tool_result.id = replacement_state.pending_tool_results[original_tool_call_id].id
@@ -478,6 +492,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
     turn_messages = [confirmed_message]
     replacement_state = _ConfirmedToolResultReplacementState(
         db=db,
+        work=work,
         pending_tool_results=pending_tool_results,
         audit_record_id=audit_record_id,
         messages=messages,

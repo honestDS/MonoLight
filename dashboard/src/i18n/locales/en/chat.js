@@ -91,6 +91,8 @@ export default {
   tool_count: '{count} tools',
   tool_status_calling: 'Running',
   tool_status_returned: 'Returned',
+  tool_status_cancelled: 'Cancelled',
+  tool_status_partially_cancelled: 'Partially cancelled',
   tool_arguments: 'Arguments',
   tool_output: 'Result',
   thinking_process: 'Thinking',

@@ -789,6 +789,9 @@ async def test_fail_executor_sends_event_before_marking_terminal(monkeypatch):
     sent_events = []
 
     class FakeSession:
+        async def refresh(self, _object):
+            return None
+
         async def commit(self) -> None:
             return None
 

@@ -3,7 +3,6 @@ from copy import deepcopy
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation_results import replace_pending_tool_result
 from app.core.constants import AGENT_WORK_TOOL_NAME, ERR_SUBAGENT_CONTEXT_INVALID, SUBAGENT_QUEUED_RECOVERY_MESSAGE_KIND
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.message import message_crud
@@ -13,6 +12,7 @@ from app.core.exceptions import ParameterException
 from app.core.session_reply_queue.child_delivery import build_subagent_notification_key
 from app.core.session_reply_queue.child_work import build_subagent_queued_result
 from app.core.utils.dispatcher.save_message import save_message
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem
 from app.models.subagent import SubagentToolCall
@@ -130,9 +130,9 @@ async def _recover_result(db: AsyncSession, work: SessionReplyWorkItem, call: Su
     if row is None:
         row = await _history_result(db, work, assistant, call.tool_call_id)
 
-    queued = build_subagent_queued_result(call)
-    queued_content = json.dumps(queued, ensure_ascii=False)
     if row is None:
+        queued = build_subagent_queued_result(call)
+        queued_content = json.dumps(queued, ensure_ascii=False)
         result = InternalMessage(role=MessageRole.TOOL, tool_call_id=call.tool_call_id, content=queued_content)
         dedupe_key = build_subagent_notification_key(work, SUBAGENT_QUEUED_RECOVERY_MESSAGE_KIND, f"{call.subagent_id}:{call.tool_call_id}")
         saved = await save_message(
@@ -163,14 +163,20 @@ async def _recover_result(db: AsyncSession, work: SessionReplyWorkItem, call: Su
         _bad()
     if not isinstance(payload, dict):
         _bad()
-    if payload.get("status") == "queued":
-        if not _valid_id(payload.get("work_id")) or payload.get("work_id") != call.child_work_id or payload.get("subagent_id") != call.subagent_id:
-            _bad()
-        return result
-    if result.tool_execution_status != "execution_unknown" and payload.get("status") != "execution_unknown":
+    if payload.get("status") == "queued" and (not _valid_id(payload.get("work_id")) or payload.get("work_id") != call.child_work_id or payload.get("subagent_id") != call.subagent_id):
         _bad()
-    await replace_pending_tool_result(db, pending_message=row, original_tool_call_id=call.tool_call_id, content=queued_content, tool_execution_status=None, audit_record_id=None)
-    return InternalMessage(role=MessageRole.TOOL, tool_call_id=call.tool_call_id, content=queued_content, id=row.id)
+    if payload.get("status") != "queued" and not (result.tool_execution_status == "execution_unknown" and payload.get("status") == "execution_unknown" and "work_id" not in payload and "subagent_id" not in payload):
+        _bad()
+
+    parsed_results = parse_db_messages_to_internal([row])
+    if len(parsed_results) != 1:
+        _bad()
+    restored_result = parsed_results[0]
+    if checkpoint_result is not None and checkpoint_result.id == row.id and checkpoint_result.created_at is not None:
+        restored_result.created_at = checkpoint_result.created_at
+    else:
+        restored_result.created_at = row.created_at.timestamp()
+    return restored_result
 
 
 async def recover_child_work_wait(db: AsyncSession, *, work: SessionReplyWorkItem, worker_id: str) -> dict | None:
@@ -285,6 +291,11 @@ async def recover_child_work_wait(db: AsyncSession, *, work: SessionReplyWorkIte
     restored_assistant, tool_results = restored_tail_group
     non_child_tool_calls = [tool_call for tool_call in restored_assistant.tool_calls or [] if tool_call.id not in tail_child_call_ids and tool_call.name != AGENT_WORK_TOOL_NAME]
     non_child_tool_results = [result for result in tool_results if result.tool_call_id not in tail_child_call_ids]
+    latest_child_work_waits = work.execution_state.get("child_work_waits")
+    if isinstance(latest_child_work_waits, list):
+        tail_child_slots = [dict(slot) for slot in latest_child_work_waits if isinstance(slot, dict) and slot.get("tool_call_id") in tail_child_call_ids]
+    else:
+        tail_child_slots = []
     external_wait = await build_terminal_wait_response(
         db,
         uid=work.uid,
@@ -296,4 +307,6 @@ async def recover_child_work_wait(db: AsyncSession, *, work: SessionReplyWorkIte
     pending_tools = list(tail_child_slots)
     if external_wait is not None:
         pending_tools.extend(external_wait["pending_tools"])
+    if not pending_tools:
+        return None
     return {"status": "waiting_external_work", "pending_tools": pending_tools}

@@ -13,7 +13,7 @@ from sqlmodel import (
     select,
 )
 
-from app.core.constants import END_SESSION_TOOL_NAME, ERR_VALUE_MUST_BE_BETWEEN
+from app.core.constants import END_SESSION_TOOL_NAME, ERR_VALUE_MUST_BE_BETWEEN, TOOL_CANCELLATION_SOURCE_MESSAGE_ID_KEY
 from app.core.crud.base import CRUDBase
 from app.core.crud.session.reply_stream_event import context_summary_running_expression
 from app.core.i18n import t
@@ -386,6 +386,32 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         result = await db.execute(stmt)
         return result.scalars().all()
 
+    async def list_audit_tool_results(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        audit_record_id: int,
+    ) -> list[Message]:
+        result = await db.execute(
+            select(Message)
+            .where(
+                Message.uid == uid,
+                Message.session_id == session_id,
+                Message.profile_id == profile_id,
+                Message.audit_record_id == audit_record_id,
+                Message.role == MessageRole.TOOL,
+                Message.type == MessageType.TOOL_RESULT,
+                Message.audit_tool_call_id.is_not(None),
+            )
+            .order_by(Message.id.asc())
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
     async def get_history_forward_by_id(
         self,
         db: AsyncSession,
@@ -393,6 +419,9 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         session_id: str,
         uid: str,
         work_id: int | None = None,
+        profile_id: int | None = None,
+        message_types: tuple[MessageType, ...] | None = None,
+        lock_for_update: bool = False,
         after_id: int | None = None,
         before_id: int | None = None,
         page_after_id: int | None = None,
@@ -410,13 +439,54 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
 
         work_filter = Message.work_id.is_(None) if work_id is None else Message.work_id == work_id
         stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(work_filter).where(Message.type != MessageType.GUIDANCE).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
+        if profile_id is not None:
+            stmt = stmt.where(Message.profile_id == profile_id)
+        if message_types is not None:
+            stmt = stmt.where(Message.type.in_(message_types))
         if lower_bound is not None:
             stmt = stmt.where(Message.id > lower_bound)
         if before_id is not None:
             stmt = stmt.where(Message.id < before_id)
 
-        result = await db.execute(stmt.order_by(Message.id.asc()).limit(limit).execution_options(populate_existing=True))
+        stmt = stmt.order_by(Message.id.asc()).limit(limit).execution_options(populate_existing=True)
+        if lock_for_update:
+            stmt = stmt.with_for_update()
+        result = await db.execute(stmt)
         return result.scalars().all()
+
+    async def list_late_cancelled_tool_results(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        source_message_ids: list[int],
+        after_id: int,
+    ) -> list[Message]:
+        if not source_message_ids:
+            return []
+
+        messages: list[Message] = []
+        source_message_id = Message.provider_metadata[TOOL_CANCELLATION_SOURCE_MESSAGE_ID_KEY].as_integer()
+        for index in range(0, len(source_message_ids), 200):
+            source_batch = source_message_ids[index : index + 200]
+            result = await db.execute(
+                select(Message)
+                .where(
+                    Message.uid == uid,
+                    Message.session_id == session_id,
+                    Message.work_id.is_(None),
+                    Message.role == MessageRole.TOOL,
+                    Message.type == MessageType.TOOL_RESULT,
+                    Message.id > after_id,
+                    source_message_id.in_(source_batch),
+                )
+                .order_by(Message.id.asc())
+            )
+            messages.extend(result.scalars().all())
+
+        messages.sort(key=lambda message: message.id)
+        return messages
 
     async def list_recallable_chat_page(
         self,

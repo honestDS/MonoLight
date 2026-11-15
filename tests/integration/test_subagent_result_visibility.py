@@ -147,6 +147,21 @@ async def test_subagent_result_delivery_is_hidden_from_user_history_but_kept_for
             assert call.delivered is False
             assert call.tool_result_message_id is not None
             tool_result_id = call.tool_result_message_id
+            original_tool_result = await db.get(Message, tool_result_id)
+            assert original_tool_result is not None
+            original_tool_result_message = InternalMessage.model_validate_json(original_tool_result.content or "{}")
+            original_tool_result_payload = json.loads(original_tool_result_message.content or "{}")
+            original_tool_result_snapshot = (
+                original_tool_result.content,
+                original_tool_result.model_context_suffix,
+                original_tool_result_message.type,
+                original_tool_result_message.tool_execution_status,
+            )
+            assert original_tool_result_payload == {
+                "subagent_id": call.subagent_id,
+                "work_id": child_work_id,
+                "status": "queued",
+            }
 
         initial_reply_response = await runtime.client.get(f"/api/v1/chat/reply-works/{parent_work_id}")
         assert initial_reply_response.status_code == 200
@@ -176,16 +191,21 @@ async def test_subagent_result_delivery_is_hidden_from_user_history_but_kept_for
             assert tool_result.role == MessageRole.TOOL
             assert tool_result.type == MessageType.TOOL_RESULT
             tool_result_message = InternalMessage.model_validate_json(tool_result.content or "{}")
-            assert tool_result_message.type == MessageType.TOOL_RESULT
+            assert (
+                tool_result.content,
+                tool_result.model_context_suffix,
+                tool_result_message.type,
+                tool_result_message.tool_execution_status,
+            ) == original_tool_result_snapshot
             assert tool_result_message.tool_call_id == call.tool_call_id
             tool_result_payload = json.loads(tool_result_message.content or "{}")
+            assert tool_result_payload == original_tool_result_payload
             expected_child_result = {
                 "subagent_id": call.subagent_id,
                 "work_id": child_work_id,
                 "status": "succeeded",
                 "content": child_summary,
             }
-            assert tool_result_payload == expected_child_result
 
             markers = (await db.execute(select(Message).where(Message.session_id == runtime.session_id, Message.type == MessageType.SUBAGENT_RESULT).order_by(Message.id))).scalars().all()
             assert len(markers) == 1

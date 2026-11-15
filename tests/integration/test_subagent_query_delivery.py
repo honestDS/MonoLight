@@ -100,6 +100,8 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
             assert profile is not None
             configs = deepcopy(profile.configs)
             configs["tool"]["enabled_tools"] = list(dict.fromkeys([*configs["tool"]["enabled_tools"], AGENT_WORK_TOOL_NAME]))
+            if with_todo_snapshot:
+                configs["tool"]["executor_max_workers"] = 1
             profile.configs = configs
             await db.commit()
 
@@ -110,6 +112,10 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
         summary_a = "query-delivery-child-A-complete-summary"
         summary_b = "query-delivery-child-B-complete-summary"
         parent_summary = "query-delivery-parent-final-summary"
+        in_progress_todo_snapshot = {
+            "revision": 1,
+            "todos": [{"content": "verify-child-delivery", "status": "in_progress"}],
+        }
         create_calls = [
             InternalToolCall(
                 id="query-delivery-create-a",
@@ -133,6 +139,20 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
         )
         assert accepted.status_code == 200
         parent_work_id = accepted.json()["data"]["work_id"]
+
+        if with_todo_snapshot:
+            async with runtime.factory() as db:
+                todo_write = await session_todo_crud.write(
+                    db,
+                    uid=runtime.uid,
+                    session_id=runtime.session_id,
+                    todos=[{"content": "verify-child-delivery", "status": "in_progress"}],
+                    expected_revision=0,
+                )
+                assert todo_write.written is True
+                assert todo_write.plan is not None
+                assert todo_write.plan.revision == 1
+                assert todo_write.plan.todos == [{"content": "verify-child-delivery", "status": "in_progress"}]
 
         waiting = await runtime.run_next(independent_only=False)
         assert waiting is not None
@@ -179,6 +199,16 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
             b_call_id = call_b.id
             b_result_message_id = call_b.tool_result_message_id
             b_subagent_id = call_b.subagent_id
+            b_result = await db.get(Message, b_result_message_id)
+            assert b_result is not None
+            b_result_content = b_result.content
+            b_result_model_context_suffix = b_result.model_context_suffix
+            b_result_message_snapshot = InternalMessage.model_validate_json(b_result_content or "{}")
+            if with_todo_snapshot:
+                assert json.loads(b_result_model_context_suffix) == {"current_session_todo": in_progress_todo_snapshot}
+            else:
+                assert json.loads(b_result_model_context_suffix) == {}
+            b_result_tool_execution_status = b_result_message_snapshot.tool_execution_status
             b_create_arguments = deepcopy(call_b.arguments)
             waits = parent.execution_state.get("child_work_waits")
             assert isinstance(waits, list)
@@ -207,13 +237,13 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
                     db,
                     uid=runtime.uid,
                     session_id=runtime.session_id,
-                    todos=[{"content": "verify-child-delivery", "status": "in_progress"}],
-                    expected_revision=0,
+                    todos=[{"content": "verify-child-delivery", "status": "completed"}],
+                    expected_revision=1,
                 )
                 assert todo_write.written is True
                 assert todo_write.plan is not None
-                assert todo_write.plan.revision == 1
-                assert todo_write.plan.todos == [{"content": "verify-child-delivery", "status": "in_progress"}]
+                assert todo_write.plan.revision == 2
+                assert todo_write.plan.todos == [{"content": "verify-child-delivery", "status": "completed"}]
 
         query_arguments = {"operation": "query_result", "subagent_id": b_subagent_id}
         if query_with_work_id:
@@ -284,8 +314,8 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
         assert len(query_payloads) == 1
         assert len(final_payloads) == 1
         expected_todo_snapshot = {
-            "revision": 1,
-            "todos": [{"content": "verify-child-delivery", "status": "in_progress"}],
+            "revision": 2,
+            "todos": [{"content": "verify-child-delivery", "status": "completed"}],
         }
         final_payload_dump = json.dumps(final_payloads[0], ensure_ascii=False)
         query_output_payload = _provider_function_call_output(
@@ -304,7 +334,11 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
             name=AGENT_WORK_TOOL_NAME,
             arguments=b_create_arguments,
         )
-        _assert_completed_subagent_result(b_create_output["tool_result"], subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
+        assert b_create_output["tool_result"] == {
+            "subagent_id": b_subagent_id,
+            "work_id": child_b_work_id,
+            "status": "queued",
+        }
 
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
@@ -319,11 +353,13 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
             assert call_b.tool_result_message_id == b_result_message_id
             b_result_row = await db.get(Message, b_result_message_id)
             assert b_result_row is not None
+            assert b_result_row.content == b_result_content
+            assert b_result_row.model_context_suffix == b_result_model_context_suffix
             b_result_message = InternalMessage.model_validate_json(b_result_row.content or "{}")
             b_result_payload = json.loads(b_result_message.content or "{}")
             assert b_result_message.tool_call_id == call_b.tool_call_id
-            assert b_result_message.tool_execution_status == "succeeded"
-            _assert_completed_subagent_result(b_result_payload, subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
+            assert b_result_message.tool_execution_status == b_result_tool_execution_status
+            assert b_result_message.content == b_result_message_snapshot.content
 
             b_round = await db.get(SubagentWork, child_b_work_id)
             assert b_round is not None and b_round.result is not None
@@ -354,10 +390,16 @@ async def test_completed_subagent_query_does_not_reawaken_parent(
                     if message.role == MessageRole.TOOL and message.tool_call_id == call_b.tool_call_id:
                         checkpoint_b_results.append(message)
             assert checkpoint_b_results
+            expected_b_checkpoint_content = b_result_message_snapshot.content or ""
             for result_message in checkpoint_b_results:
-                assert result_message.tool_execution_status == "succeeded"
-                result_payload = json.loads(result_message.content or "{}")
-                _assert_completed_subagent_result(result_payload, subagent_id=b_subagent_id, work_id=child_b_work_id, content=summary_b)
+                assert result_message.content == expected_b_checkpoint_content
+                assert result_message.tool_execution_status == b_result_tool_execution_status
+                if with_todo_snapshot:
+                    assert result_message.current_session_todo == in_progress_todo_snapshot
+                else:
+                    assert result_message.current_session_todo is None
+                result_payload, _ = json.JSONDecoder().raw_decode(result_message.content or "{}")
+                assert result_payload == b_result_payload
 
             markers = (await db.execute(select(Message).where(Message.session_id == runtime.session_id, Message.type == MessageType.SUBAGENT_RESULT).order_by(Message.id))).scalars().all()
             assert len(markers) == 1

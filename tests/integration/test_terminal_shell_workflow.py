@@ -16,6 +16,7 @@ import app.core.terminal.session_runtime_commands as terminal_runtime_commands_m
 import app.core.terminal.session_runtime_core as terminal_runtime_core_module
 import app.core.terminal.session_runtime_state as terminal_runtime_state_module
 import app.core.terminal.worker_coordinator as terminal_worker_module
+import app.core.tools.terminal as terminal_tool_module
 from app.core.audit.confirmation_lifecycle import stop_interactive_reply
 from app.core.constants import (
     ERR_TERMINAL_COMMAND_REQUEST_CONFLICT,
@@ -74,6 +75,7 @@ async def isolated_terminal_database(database_factory, monkeypatch):
             terminal_runtime_core_module,
             terminal_runtime_state_module,
             terminal_runtime_commands_module,
+            terminal_tool_module,
         ):
             monkeypatch.setattr(module, "AsyncSessionLocal", factory)
 

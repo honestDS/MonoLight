@@ -5,6 +5,7 @@ from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
+from app.core.session.tool_cancellation import complete_cancelled_tool_results
 from app.core.session_reply_queue.executor_audit import (
     _mark_audit_execution_unknown_reliably,
     get_bound_audit_execution,
@@ -42,6 +43,10 @@ async def clear_background_tasks_on_startup() -> int:
 
         summary_count = await session_reply_work_item_crud.cancel_background_tool_summaries(db, error=error, before=startup_at, commit=False)
         external_work_count = await external_work_crud.cancel_all_waiting(db, error=error, before=startup_at, commit=False)
+        if summary_count or external_work_count:
+            completion_scopes = sorted({(work.uid, work.session_id) for work in startup_work_items})
+            for uid, session_id in completion_scopes:
+                await complete_cancelled_tool_results(db, uid=uid, session_id=session_id)
         await db.commit()
     return background_task_count + summary_count + external_work_count
 

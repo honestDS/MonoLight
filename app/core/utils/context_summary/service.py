@@ -452,7 +452,12 @@ async def _ensure_context_summary(
         target_message_id=boundary.target_message_id if boundary is not None else None,
         model_excluded_message_ids=model_excluded_message_ids,
         content_revision=state.content_revision,
+        late_cancelled_tool_results=boundary.late_cancelled_tool_results if boundary is not None else (),
     )
+    late_cancelled_result_ids = frozenset(result.id for _source_message_id, result in snapshot.late_cancelled_tool_results if result.id is not None)
+    fixed_request_messages_for_budget = fixed_request_messages
+    if fixed_request_messages_for_budget is not None and late_cancelled_result_ids:
+        fixed_request_messages_for_budget = [message for message in fixed_request_messages_for_budget if message.id not in late_cancelled_result_ids]
     history_tokens, history_message_count = await measure_snapshot_history(
         db,
         session_id=session_id,
@@ -464,8 +469,8 @@ async def _ensure_context_summary(
     )
     await ensure_context_summary_work_valid(combined_work_validity_checker)
     request_usage = None
-    if fixed_request_messages is not None:
-        materialized_fixed_request_messages = materialize_user_environment_prompts(fixed_request_messages)
+    if fixed_request_messages_for_budget is not None:
+        materialized_fixed_request_messages = materialize_user_environment_prompts(fixed_request_messages_for_budget)
         summary_message = state.as_message()
         summary_tokens = (
             estimate_tokens(
@@ -622,15 +627,15 @@ async def _ensure_context_summary(
 
     def measure_final_request_tokens(candidate: str) -> int:
         summary_content = build_summary_content(candidate)
-        if fixed_request_messages is not None:
+        if fixed_request_messages_for_budget is not None:
             candidate_message_id = snapshot.persistent_summary_target_id or state.message_id
             candidate_summary_message = ContextSummaryState(
                 content=summary_content,
                 message_id=candidate_message_id,
                 covered_user_request=covered_user_request,
             ).as_message()
-            fixed_system_messages = [message for message in fixed_request_messages if message.role == MessageRole.SYSTEM]
-            fixed_non_system_messages = [message for message in fixed_request_messages if message.role != MessageRole.SYSTEM]
+            fixed_system_messages = [message for message in fixed_request_messages_for_budget if message.role == MessageRole.SYSTEM]
+            fixed_non_system_messages = [message for message in fixed_request_messages_for_budget if message.role != MessageRole.SYSTEM]
             candidate_request_messages = [
                 *fixed_system_messages,
                 *([candidate_summary_message] if candidate_summary_message is not None else []),
@@ -782,13 +787,20 @@ async def _ensure_context_summary(
         message_id=target_message_id,
     )
     if not updated:
-        return await get_context_summary_state(db, session_id=session_id, uid=uid)
+        latest_state = await get_context_summary_state(db, session_id=session_id, uid=uid)
+        result_ids = set(latest_state.late_cancelled_result_ids)
+        if latest_state.content_revision == state.content_revision:
+            for source_id, result in snapshot.late_cancelled_tool_results:
+                if source_id <= (latest_state.message_id or 0) and result.id is not None:
+                    result_ids.add(result.id)
+        return replace(latest_state, late_cancelled_result_ids=frozenset(result_ids))
     return ContextSummaryState(
         content=candidate_summary,
         message_id=target_message_id,
         revision=state.revision + 1,
         content_revision=state.content_revision,
         covered_user_request=covered_user_request,
+        late_cancelled_result_ids=late_cancelled_result_ids,
     )
 
 

@@ -509,16 +509,20 @@ export const createHarness = async (t, options = {}) => {
       apiState.completionRequests.push(request)
       return request.promise
     },
-    replyWorkStatus: async workId => ({
-      data: {
-        data: {
-          work_id: workId,
-          status: 'succeeded',
-          session_id: route.query.session_id,
-          response: null
-        }
-      }
-    }),
+    replyWorkStatus: workId => {
+      const planned = resolvePlan(options.replyWorkStatus, { workId })
+      return Promise.resolve(planned === undefined
+        ? {
+            work_id: workId,
+            status: 'succeeded',
+            session_id: route.query.session_id,
+            response: null
+          }
+        : planned).then(value => {
+        if (value instanceof Error) throw value
+        return { data: { data: value } }
+      })
+    },
     sessionsActivity: () => {
       const index = apiState.activityRequests.length
       const planned = Array.isArray(options.activities)

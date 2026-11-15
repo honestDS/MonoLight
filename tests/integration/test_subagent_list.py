@@ -764,10 +764,9 @@ async def test_list_during_parent_child_conversation_reports_only_unfinished_sub
             child_result_payload = json.loads(child_result_message.content or "{}")
             assert child_result_message.tool_execution_status == "succeeded"
             assert child_result_payload == {
-                "status": "succeeded",
+                "status": "queued",
                 "subagent_id": pending_subagent_id,
                 "work_id": pending_child_work_id,
-                "content": second_summary,
             }
             final_list_results = await persisted_list_results(db, uid=runtime.uid, session_id=runtime.session_id, profile_id=runtime.profile.id)
             assert len(final_list_results) == 2

@@ -2,6 +2,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
+from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import (
     InternalMessage,
@@ -23,6 +24,7 @@ async def save_tool_response(
 ) -> InternalMessage:
     stored_tool_res = tool_res.model_copy()
 
+    await ensure_session_reply_work_claim(db, commit=False)
     saved_msg = await save_message(
         db,
         session_id,

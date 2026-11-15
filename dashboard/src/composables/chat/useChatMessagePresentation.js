@@ -15,6 +15,7 @@ import { resolveChatActivityNotice } from '../../utils/chatPresentation.js'
 import {
   getBackgroundToolResultPayload,
   getToolResultCallId,
+  isToolResultCancelled,
   isToolResultPending,
   mergeToolResultMessage,
   projectToolResultMessage
@@ -306,9 +307,22 @@ export function useChatMessagePresentation({ props, t }) {
     if (!pair?.resultMessage) return false
     return !isToolResultPending(pair.resultMessage)
   }
+  const getToolPairStatus = (pair) => {
+    if (!isToolPairReturned(pair)) return t('chat.tool_status_calling')
+    if (isToolResultCancelled(pair.resultMessage)) return t('chat.tool_status_cancelled')
+    return t('chat.tool_status_returned')
+  }
   const isToolGroupReturned = group => Boolean(group?.pairs?.length) && group.pairs.every(isToolPairReturned)
   const getToolGroupStateClass = group => isToolGroupReturned(group) ? 'is-result' : 'is-call'
-  const getToolGroupStatus = group => t(isToolGroupReturned(group) ? 'chat.tool_status_returned' : 'chat.tool_status_calling')
+  const getToolGroupStatus = (group) => {
+    const pairs = group?.pairs || []
+    if (!pairs.length || pairs.some(pair => !isToolPairReturned(pair))) return t('chat.tool_status_calling')
+
+    const cancelledPairCount = pairs.filter(pair => isToolResultCancelled(pair.resultMessage)).length
+    if (cancelledPairCount === pairs.length) return t('chat.tool_status_cancelled')
+    if (cancelledPairCount > 0) return t('chat.tool_status_partially_cancelled')
+    return t('chat.tool_status_returned')
+  }
 
   const parseAssistantFilesContent = (content) => {
     try {
@@ -352,6 +366,7 @@ export function useChatMessagePresentation({ props, t }) {
     displayMessages,
     activityNotice,
     getToolPairTitle,
+    getToolPairStatus,
     isToolPairReturned,
     getToolGroupStateClass,
     getToolGroupStatus,

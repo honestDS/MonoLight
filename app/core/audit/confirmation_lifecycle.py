@@ -10,6 +10,7 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.crud.terminal.session import terminal_session_crud
 from app.core.i18n import t
+from app.core.session.tool_cancellation import complete_cancelled_tool_results
 from app.core.terminal.audit_lifecycle import stop_terminal_sessions
 from app.models.audit import AuditRecordStatus
 
@@ -103,6 +104,7 @@ async def stop_interactive_reply(
             )
             if projection is not None and projection.status_update is not None:
                 status_updates.append(projection.status_update)
+        await complete_cancelled_tool_results(db, uid=uid, session_id=session_id)
         await db.commit()
     except Exception:
         await db.rollback()

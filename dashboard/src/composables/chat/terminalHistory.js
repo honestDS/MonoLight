@@ -104,6 +104,16 @@ const findToolCallIndex = (messages, toolCallId) => {
   return messages.findIndex(message => getToolMessageDedupeKeys(message).includes(`tool_call:${toolCallId}`))
 }
 
+const moveToolCallBeforeResult = (messages, messageIndex, toolCallId) => {
+  const resultIndex = messages.findIndex(message =>
+    getToolResultCallId(message) === String(toolCallId)
+  )
+  if (resultIndex === -1 || resultIndex >= messageIndex) return
+
+  const [message] = messages.splice(messageIndex, 1)
+  messages.splice(resultIndex, 0, message)
+}
+
 export const insertTerminalHistory = (
   messagesRef,
   aiMessages,
@@ -265,6 +275,7 @@ export const processStreamToolStart = (messagesRef, toolCall, thinkingId, respon
       request_id: existingMsg.request_id || requestId,
       work_id: existingMsg.work_id || workId
     }
+    moveToolCallBeforeResult(messagesRef.value, existingIdx, toolCall.id)
     return
   }
 
@@ -293,6 +304,7 @@ export const processStreamToolStart = (messagesRef, toolCall, thinkingId, respon
       request_id: existingMsg.request_id || requestId,
       work_id: existingMsg.work_id || workId
     }
+    moveToolCallBeforeResult(messagesRef.value, sameResponseToolCallIdx, toolCall.id)
     return
   }
 
@@ -333,6 +345,15 @@ export const processStreamToolStart = (messagesRef, toolCall, thinkingId, respon
     newMsg.id = streamedContentMsg.id
     newMsg.created_at = streamedContentMsg.created_at || newMsg.created_at
     messagesRef.value[streamedContentIdx] = newMsg
+    moveToolCallBeforeResult(messagesRef.value, streamedContentIdx, toolCall.id)
+    return
+  }
+
+  const toolResultIdx = messagesRef.value.findIndex(message =>
+    getToolResultCallId(message) === String(toolCall.id)
+  )
+  if (toolResultIdx !== -1) {
+    messagesRef.value.splice(toolResultIdx, 0, newMsg)
     return
   }
 

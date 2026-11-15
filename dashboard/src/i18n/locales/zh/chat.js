@@ -107,6 +107,8 @@ export default {
   tool_count: '{count} 项',
   tool_status_calling: '调用中',
   tool_status_returned: '已返回',
+  tool_status_cancelled: '已取消',
+  tool_status_partially_cancelled: '部分取消',
   tool_arguments: '调用参数',
   tool_output: '返回结果',
   thinking_process: '思考过程',

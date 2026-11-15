@@ -10,7 +10,7 @@ from app.core.constants import ERR_VALUE_MUST_BE_POSITIVE
 from app.core.crud.session.message import message_crud
 from app.core.i18n import t
 from app.core.utils.dispatcher.session_todo_snapshot import strip_session_todo_snapshots
-from app.core.utils.message_parser import parse_db_messages_to_internal
+from app.core.utils.message_parser import is_tool_result_covered_by_summary, parse_db_messages_to_internal
 from app.models.message import InternalMessage, Message, MessageRole
 
 CONTEXT_SUMMARY_SCAN_PAGE_SIZE = 200
@@ -30,6 +30,7 @@ class ContextSummarySnapshot:
     content_revision: int = 0
     frozen_rounds: tuple[tuple[InternalMessage, ...], ...] | None = None
     source_key: str | None = None
+    late_cancelled_tool_results: tuple[tuple[int, InternalMessage], ...] = ()
 
     @property
     def has_persistent_history(self) -> bool:
@@ -93,6 +94,7 @@ async def build_context_summary_snapshot(
     model_excluded_message_ids: list[int] | tuple[int, ...] | None = None,
     page_size: int = CONTEXT_SUMMARY_SCAN_PAGE_SIZE,
     content_revision: int = 0,
+    late_cancelled_tool_results: tuple[tuple[int, InternalMessage], ...] = (),
 ) -> ContextSummarySnapshot:
     normalized_frozen_ids = tuple(frozen_user_message_ids or ())
     normalized_excluded_ids = tuple(model_excluded_message_ids or ())
@@ -146,7 +148,12 @@ async def build_context_summary_snapshot(
             break
         page_before_id = last_id
 
-    recent_messages = tuple(parse_db_messages_to_internal(list(reversed(recent_raw_desc))))
+    filtered_recent_raw_desc: list[Message] = []
+    for message in recent_raw_desc:
+        if is_tool_result_covered_by_summary(message, expected_summary_message_id):
+            continue
+        filtered_recent_raw_desc.append(message)
+    recent_messages = tuple(parse_db_messages_to_internal(list(reversed(filtered_recent_raw_desc))))
     return ContextSummarySnapshot(
         expected_summary_message_id=expected_summary_message_id,
         snapshot_before_id=snapshot_before_id,
@@ -157,6 +164,7 @@ async def build_context_summary_snapshot(
         recent_messages=recent_messages,
         model_excluded_message_ids=normalized_excluded_ids,
         content_revision=content_revision,
+        late_cancelled_tool_results=late_cancelled_tool_results,
     )
 
 
@@ -182,6 +190,35 @@ async def iter_persistent_summary_rounds(
     if target_id is None:
         return
     fixed_before_id = target_id + 1
+    late_results_by_source_id: dict[int, list[InternalMessage]] = {}
+    for source_id, result in snapshot.late_cancelled_tool_results:
+        late_results_by_source_id.setdefault(source_id, []).append(result)
+
+    def _parse_summary_round(round_messages: list[Message]) -> list[InternalMessage]:
+        filtered_round_messages: list[Message] = []
+        for item in round_messages:
+            if item.id in snapshot.model_excluded_message_ids:
+                continue
+            if is_tool_result_covered_by_summary(item, snapshot.expected_summary_message_id):
+                continue
+            filtered_round_messages.append(item)
+        parsed_round = strip_session_todo_snapshots(parse_db_messages_to_internal(filtered_round_messages))
+        if parsed_round and round_messages and is_tool_result_covered_by_summary(round_messages[-1], snapshot.expected_summary_message_id):
+            parsed_round[-1] = parsed_round[-1].model_copy(update={"id": round_messages[-1].id})
+        if not parsed_round or not late_results_by_source_id:
+            return parsed_round
+
+        projected_round: list[InternalMessage] = []
+        for message in parsed_round:
+            projected_round.append(message)
+            if message.role != MessageRole.ASSISTANT or message.id is None:
+                continue
+            for result in late_results_by_source_id.get(message.id, ()):
+                copied_result = result.model_copy(deep=True)
+                # 此处只为摘要分片覆盖保留历史编号，不改变真实回执编号。
+                copied_result.id = message.id
+                projected_round.append(copied_result)
+        return projected_round
 
     while True:
         page = await message_crud.get_history_forward_by_id(
@@ -198,7 +235,7 @@ async def iter_persistent_summary_rounds(
 
         for message in page:
             if current_round and message.role == MessageRole.USER:
-                parsed_round = strip_session_todo_snapshots(parse_db_messages_to_internal([item for item in current_round if item.id not in snapshot.model_excluded_message_ids]))
+                parsed_round = _parse_summary_round(current_round)
                 if parsed_round:
                     yield parsed_round
                 current_round = []
@@ -213,6 +250,6 @@ async def iter_persistent_summary_rounds(
         page_after_id = last_id
 
     if current_round:
-        parsed_round = strip_session_todo_snapshots(parse_db_messages_to_internal([item for item in current_round if item.id not in snapshot.model_excluded_message_ids]))
+        parsed_round = _parse_summary_round(current_round)
         if parsed_round:
             yield parsed_round

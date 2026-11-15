@@ -5,6 +5,7 @@ import {
   getBackgroundToolResultPayload,
   getOriginalToolResultMessageId,
   getToolResultCallId,
+  isToolResultCancelled,
   isToolResultPending,
   mergeToolResultIntoList,
   mergeToolResultMessage,
@@ -18,20 +19,28 @@ const makeToolResult = ({
   id,
   responseId,
   workId,
-  dbId
+  dbId,
+  toolCancelled,
+  toolExecutionStatus
 } = {}) => {
-  const serializedResult = JSON.stringify({
+  const toolPayload = {
     role: 'tool',
     tool_call_id: callId,
     content: result
-  })
+  }
+  if (toolCancelled !== undefined) toolPayload.tool_cancelled = toolCancelled
+  if (toolExecutionStatus !== undefined) toolPayload.tool_execution_status = toolExecutionStatus
+
+  const serializedResult = JSON.stringify(toolPayload)
   const message = serialized
     ? { role: 'assistant', content: serializedResult }
     : {
         role: 'tool',
         type: 'tool_result',
         tool_call_id: callId,
-        content: result
+        content: result,
+        ...(toolCancelled === undefined ? {} : { tool_cancelled: toolCancelled }),
+        ...(toolExecutionStatus === undefined ? {} : { tool_execution_status: toolExecutionStatus })
       }
 
   return {
@@ -63,7 +72,9 @@ const makeMarker = ({
   callId = 'call-1',
   task = 'completed',
   dbId,
-  originalId
+  originalId,
+  toolCancelled,
+  executionStatus
 } = {}) => {
   const payload = {
     type: 'background_tool_result',
@@ -74,6 +85,8 @@ const makeMarker = ({
     },
     task
   }
+  if (toolCancelled !== undefined) payload.tool_cancelled = toolCancelled
+  if (executionStatus !== undefined) payload.execution_status = executionStatus
   if (originalId !== undefined) payload.original_tool_result_message_id = originalId
 
   return {
@@ -288,6 +301,154 @@ test('projects marker body and tool metadata, while pending requires a valid tas
     })),
     false
   )
+})
+
+test('recognizes only cancelled tool result statuses across supported message shapes', () => {
+  const cancelledResult = JSON.stringify({
+    type: 'tool_cancellation',
+    status: 'cancelled',
+    error: 'cancelled'
+  })
+  const cancelledMessages = [
+    makeToolResult({
+      callId: 'call-cancelled-top-level',
+      result: cancelledResult,
+      toolCancelled: true,
+      toolExecutionStatus: 'execution_unknown'
+    }),
+    makeToolResult({
+      callId: 'call-cancelled-serialized',
+      result: cancelledResult,
+      serialized: true,
+      toolCancelled: true,
+      toolExecutionStatus: 'execution_unknown'
+    }),
+    makeMarker({
+      callId: 'call-cancelled-background',
+      task: { status: 'cancelled', error: 'cancelled' },
+      toolCancelled: true,
+      executionStatus: 'execution_unknown'
+    })
+  ]
+
+  for (const message of cancelledMessages) assert.equal(isToolResultCancelled(message), true)
+  assert.equal(isToolResultCancelled(projectToolResultMessage(cancelledMessages[2])), true)
+
+  const successfulToolBody = makeToolResult({
+    callId: 'call-successful-body',
+    result: JSON.stringify({ status: 'succeeded', tool_cancelled: true }),
+    serialized: true,
+    toolExecutionStatus: 'succeeded'
+  })
+  const notCancelledMessages = [
+    makeToolResult({
+      callId: 'call-body-cancelled',
+      result: cancelledResult,
+      toolExecutionStatus: 'execution_unknown'
+    }),
+    successfulToolBody,
+    makeMarker({
+      callId: 'call-background-task-body',
+      task: { status: 'cancelled', error: 'cancelled', tool_cancelled: true },
+      executionStatus: 'execution_unknown'
+    }),
+    makeToolResult({ callId: 'call-string-true', result: cancelledResult, toolCancelled: 'true' }),
+    makeToolResult({ callId: 'call-false', result: cancelledResult, toolCancelled: false }),
+    makeMarker({
+      callId: 'call-background-string-true',
+      task: { status: 'cancelled', error: 'cancelled' },
+      toolCancelled: 'true'
+    }),
+    makeMarker({
+      callId: 'call-background-false',
+      task: { status: 'cancelled', error: 'cancelled' },
+      toolCancelled: false
+    }),
+    makeToolResult({
+      callId: 'call-execution-unknown',
+      result: JSON.stringify({ status: 'execution_unknown' }),
+      toolExecutionStatus: 'execution_unknown'
+    })
+  ]
+  for (const message of notCancelledMessages) assert.equal(isToolResultCancelled(message), false)
+
+  assert.equal(
+    isToolResultCancelled({
+      role: 'user',
+      content: JSON.stringify({ status: 'cancelled' })
+    }),
+    false
+  )
+  assert.equal(isToolResultCancelled(makeToolResult({ result: '{bad json' })), false)
+  assert.equal(isToolResultCancelled(makeMarker({ task: '{bad json' })), false)
+})
+
+test('keeps repeated cancelled updates idempotent and protects them from stale queued results', () => {
+  const cancelledResult = JSON.stringify({
+    type: 'tool_cancellation',
+    status: 'cancelled',
+    error: 'cancelled'
+  })
+  const toolResultsUpdate = makeToolResult({
+    callId: 'call-cancelled',
+    result: cancelledResult,
+    id: 'ui-cancelled',
+    responseId: 'response-cancelled',
+    workId: 'work-cancelled',
+    toolCancelled: true,
+    toolExecutionStatus: 'execution_unknown'
+  })
+  const history = makeToolResult({
+    callId: 'call-cancelled',
+    result: cancelledResult,
+    serialized: true,
+    dbId: 700,
+    toolCancelled: true,
+    toolExecutionStatus: 'execution_unknown'
+  })
+  const other = makeToolResult({
+    callId: 'call-other',
+    result: JSON.stringify({ status: 'succeeded' })
+  })
+  const source = [toolResultsUpdate, history, other]
+  const before = structuredClone(source)
+  const merged = [toolResultsUpdate, toolResultsUpdate, history, history, other, other]
+    .reduce(mergeToolResultIntoList, [])
+  const cancelled = merged.find(message => getToolResultCallId(message) === 'call-cancelled')
+  const otherResult = merged.find(message => getToolResultCallId(message) === 'call-other')
+
+  assert.equal(merged.length, 2)
+  assert.equal(isToolResultCancelled(cancelled), true)
+  assert.equal(isToolResultCancelled(otherResult), false)
+  assert.equal(JSON.parse(otherResult.content).status, 'succeeded')
+  assert.deepEqual(source, before)
+
+  const queued = makeQueued({
+    callId: 'call-order',
+    id: 'ui-order',
+    responseId: 'response-order',
+    workId: 'work-order',
+    dbId: 11
+  })
+  const cancelledUpdate = makeToolResult({
+    callId: 'call-order',
+    result: cancelledResult,
+    id: 'ui-order',
+    responseId: 'response-order',
+    workId: 'work-order',
+    dbId: 12,
+    toolCancelled: true,
+    toolExecutionStatus: 'execution_unknown'
+  })
+  const orderInputs = [queued, cancelledUpdate]
+  const orderBefore = structuredClone(orderInputs)
+  const cancelledThenQueued = [cancelledUpdate, queued].reduce(mergeToolResultIntoList, [])
+  const queuedThenCancelled = [queued, cancelledUpdate].reduce(mergeToolResultIntoList, [])
+
+  assert.deepEqual(cancelledThenQueued, queuedThenCancelled)
+  assert.equal(cancelledThenQueued.length, 1)
+  assert.equal(isToolResultCancelled(cancelledThenQueued[0]), true)
+  assert.deepEqual(orderInputs, orderBefore)
 })
 
 test('does not mutate input messages and keeps same output from different calls separate', () => {

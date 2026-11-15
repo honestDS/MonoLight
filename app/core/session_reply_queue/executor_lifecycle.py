@@ -23,6 +23,7 @@ from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.message_platforms.notifier import send_session_event
+from app.core.session.tool_cancellation import complete_cancelled_tool_results_for_work
 from app.core.session_reply_queue.child_checkpoint import recover_child_work_wait
 from app.core.session_reply_queue.child_delivery import deliver_child_work_results, resume_child_work_for_parent
 from app.core.session_reply_queue.child_lifecycle import finish_child_work, prepare_child_completion
@@ -422,6 +423,14 @@ async def fail_session_reply_work(
             event_sent=event_sent,
             commit=False,
         )
+        if updated:
+            current = await session_reply_work_item_crud.get(db, work_id)
+            await db.refresh(current)
+            work = current
+            current_execution_state = current.execution_state if isinstance(current.execution_state, dict) else {}
+            # 子代理私有检查点由后续轮恢复，不在此补齐会话历史回执。
+            if current.subagent_id is None and (current_execution_state.get("tool_call_message_ids") or current.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION):
+                await complete_cancelled_tool_results_for_work(db, work=current)
         if updated and work.subagent_id is not None:
             await finish_child_work(db, work=work)
         deliver_child_results = updated and work.subagent_id is not None

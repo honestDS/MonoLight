@@ -21,6 +21,7 @@ from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
+from app.models.session import ChatSession
 from app.models.session_event import SessionEvent
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.models.subagent import SubagentToolCall
@@ -31,6 +32,22 @@ def _message_payload(message: Message) -> dict:
     payload = json.loads(stored.content or "{}")
     assert isinstance(payload, dict)
     return payload
+
+
+def _message_receipt_snapshot(message: Message) -> tuple[str | None, str | None, dict, str | None]:
+    stored = InternalMessage.model_validate_json(message.content or "{}")
+    payload = json.loads(stored.content or "{}")
+    assert isinstance(payload, dict)
+    return message.content, message.model_context_suffix, payload, stored.tool_execution_status
+
+
+def _context_summary_snapshot(session: ChatSession) -> tuple[str | None, int | None, int, int]:
+    return (
+        session.context_summary,
+        session.context_summary_message_id,
+        session.context_summary_revision,
+        session.context_content_revision,
+    )
 
 
 def _checkpoint_messages(checkpoint: dict, key: str) -> list[InternalMessage]:
@@ -133,12 +150,62 @@ async def _query_transaction_case(image_chat_runtime):
             b_tool_call_id = call_b.tool_call_id
             b_subagent_id = call_b.subagent_id
             b_result_message_id = call_b.tool_result_message_id
+            b_result = await db.get(Message, b_result_message_id)
+            assert b_result is not None
+            b_result_snapshot = _message_receipt_snapshot(b_result)
+            assert b_result_snapshot[2]["status"] == "queued"
+
+            existing_user_messages = (
+                (
+                    await db.execute(
+                        select(Message)
+                        .where(
+                            Message.session_id == runtime.session_id,
+                            Message.uid == runtime.uid,
+                            Message.profile_id == runtime.profile.id,
+                            Message.role == MessageRole.USER,
+                            Message.type == MessageType.TEXT,
+                            Message.work_id.is_(None),
+                        )
+                        .order_by(Message.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(existing_user_messages) == 1
+            summary_message_id = existing_user_messages[0].id
+            assert summary_message_id is not None
+            session = await db.get(ChatSession, runtime.session_id)
+            assert session is not None
+            session.context_summary = "persisted-parent-summary-before-child-delivery"
+            session.context_summary_message_id = summary_message_id
+            session.context_summary_revision = 7
+            session.context_content_revision = 3
+            db.add(session)
+            await db.commit()
+            await db.refresh(session)
+            context_summary_snapshot = _context_summary_snapshot(session)
+            assert context_summary_snapshot == (
+                "persisted-parent-summary-before-child-delivery",
+                summary_message_id,
+                7,
+                3,
+            )
 
         runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=summary_a))
         child_a_done = await runtime.run_next(independent_only=True)
         assert child_a_done is not None
         assert child_a_done.id == child_a_work_id
         assert child_a_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        async with runtime.factory() as db:
+            session = await db.get(ChatSession, runtime.session_id)
+            b_result = await db.get(Message, b_result_message_id)
+            assert session is not None and b_result is not None
+            assert _context_summary_snapshot(session) == context_summary_snapshot
+            assert _message_receipt_snapshot(b_result) == b_result_snapshot
+            assert _message_payload(b_result)["status"] == "queued"
 
         worker_id = "query-transaction-worker"
         async with runtime.factory() as db:
@@ -160,6 +227,14 @@ async def _query_transaction_case(image_chat_runtime):
         assert child_b_done is not None
         assert child_b_done.id == child_b_work_id
         assert child_b_done.status == SessionReplyWorkStatus.SUCCEEDED
+
+        async with runtime.factory() as db:
+            session = await db.get(ChatSession, runtime.session_id)
+            b_result = await db.get(Message, b_result_message_id)
+            assert session is not None and b_result is not None
+            assert _context_summary_snapshot(session) == context_summary_snapshot
+            assert _message_receipt_snapshot(b_result) == b_result_snapshot
+            assert _message_payload(b_result)["status"] == "queued"
 
         query_call = InternalToolCall(
             id="query-transaction-query-b",
@@ -254,10 +329,13 @@ async def _query_transaction_case(image_chat_runtime):
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
             b_call = await db.get(SubagentToolCall, b_call_id)
             b_result = await db.get(Message, b_result_message_id)
-            assert parent is not None and b_call is not None and b_result is not None
+            session = await db.get(ChatSession, runtime.session_id)
+            assert parent is not None and b_call is not None and b_result is not None and session is not None
             assert parent.status == SessionReplyWorkStatus.RUNNING
             assert b_call.delivered is False
             assert _message_payload(b_result)["status"] == "queued"
+            assert _message_receipt_snapshot(b_result) == b_result_snapshot
+            assert _context_summary_snapshot(session) == context_summary_snapshot
             waits = parent.execution_state.get("child_work_waits")
             assert isinstance(waits, list)
             assert any(slot.get("child_work_id") == child_b_work_id for slot in waits if isinstance(slot, dict))
@@ -270,13 +348,16 @@ async def _query_transaction_case(image_chat_runtime):
             "child_b_work_id": child_b_work_id,
             "b_call_id": b_call_id,
             "b_tool_call_id": b_tool_call_id,
+            "b_subagent_id": b_subagent_id,
             "b_result_message_id": b_result_message_id,
+            "b_result_snapshot": b_result_snapshot,
             "query_call_id": query_call.id,
             "query_result_message_id": query_result_message_id,
             "query_result_payload": query_result_payload,
             "summary_b": summary_b,
             "worker_id": worker_id,
             "checkpoint": pending_checkpoint,
+            "context_summary_snapshot": context_summary_snapshot,
             "notification_snapshot": notification_snapshot,
         }
 
@@ -322,11 +403,14 @@ async def test_query_delivery_checkpoint_save_failure_rolls_back(
             b_call = await db.get(SubagentToolCall, case["b_call_id"])
             b_result = await db.get(Message, case["b_result_message_id"])
             query_result = await db.get(Message, case["query_result_message_id"])
-            assert parent is not None and b_call is not None and b_result is not None and query_result is not None
+            session = await db.get(ChatSession, runtime.session_id)
+            assert parent is not None and b_call is not None and b_result is not None and query_result is not None and session is not None
             assert parent.status == SessionReplyWorkStatus.RUNNING
             assert parent.locked_by == worker_id
             assert b_call.delivered is False
             assert _message_payload(b_result)["status"] == "queued"
+            assert _message_receipt_snapshot(b_result) == case["b_result_snapshot"]
+            assert _context_summary_snapshot(session) == case["context_summary_snapshot"]
             waits = parent.execution_state.get("child_work_waits")
             assert isinstance(waits, list)
             assert any(slot.get("child_work_id") == case["child_b_work_id"] for slot in waits if isinstance(slot, dict))
@@ -358,11 +442,14 @@ async def test_query_delivery_checkpoint_save_failure_rolls_back(
             parent = await reply_work_crud.get(db, parent_work_id)
             b_call = await db.get(SubagentToolCall, case["b_call_id"])
             b_result = await db.get(Message, case["b_result_message_id"])
-            assert parent is not None and b_call is not None and b_result is not None
+            session = await db.get(ChatSession, runtime.session_id)
+            assert parent is not None and b_call is not None and b_result is not None and session is not None
             assert parent.status == SessionReplyWorkStatus.RUNNING
             assert b_call.delivered is True
             assert "child_work_waits" not in parent.execution_state
-            assert _message_payload(b_result)["status"] == "succeeded"
+            assert _message_payload(b_result)["status"] == "queued"
+            assert _message_receipt_snapshot(b_result) == case["b_result_snapshot"]
+            assert _context_summary_snapshot(session) == case["context_summary_snapshot"]
             persisted = await reply_work_crud.get_checkpoint(db, parent_work_id)
             assert isinstance(persisted, dict)
             assert _checkpoint_query_result(persisted, case["query_call_id"]).id == case["query_result_message_id"]
@@ -398,11 +485,14 @@ async def test_query_delivery_rejects_stale_executor_and_recovers_with_new_worke
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
             b_call = await db.get(SubagentToolCall, case["b_call_id"])
             b_result = await db.get(Message, case["b_result_message_id"])
-            assert parent is not None and b_call is not None and b_result is not None
+            session = await db.get(ChatSession, runtime.session_id)
+            assert parent is not None and b_call is not None and b_result is not None and session is not None
             assert parent.status == SessionReplyWorkStatus.RUNNING
             assert parent.locked_by == new_worker_id
             assert b_call.delivered is False
             assert _message_payload(b_result)["status"] == "queued"
+            assert _message_receipt_snapshot(b_result) == case["b_result_snapshot"]
+            assert _context_summary_snapshot(session) == case["context_summary_snapshot"]
             waits = parent.execution_state.get("child_work_waits")
             assert isinstance(waits, list)
             assert any(slot.get("child_work_id") == case["child_b_work_id"] for slot in waits if isinstance(slot, dict))
@@ -425,10 +515,15 @@ async def test_query_delivery_rejects_stale_executor_and_recovers_with_new_worke
             assert json.loads(restored_result.content or "{}") == case["query_result_payload"]
             parent = await reply_work_crud.get(db, parent_work_id)
             b_call = await db.get(SubagentToolCall, case["b_call_id"])
-            assert parent is not None and b_call is not None
+            b_result = await db.get(Message, case["b_result_message_id"])
+            session = await db.get(ChatSession, runtime.session_id)
+            assert parent is not None and b_call is not None and b_result is not None and session is not None
             assert parent.locked_by == new_worker_id
             assert b_call.delivered is True
             assert "child_work_waits" not in parent.execution_state
+            assert _message_payload(b_result)["status"] == "queued"
+            assert _message_receipt_snapshot(b_result) == case["b_result_snapshot"]
+            assert _context_summary_snapshot(session) == case["context_summary_snapshot"]
             assert await deliver_child_work_results(db, child_work_id=case["child_b_work_id"]) == 0
             assert await resume_child_work_for_parent(db, parent_work_id=parent_work_id) is False
             assert await reconcile_child_work(db) == 0
@@ -477,13 +572,16 @@ async def test_query_delivery_checkpoint_survives_database_reopen(image_chat_run
             b_result = await db.get(Message, case["b_result_message_id"])
             query_result = await db.get(Message, case["query_result_message_id"])
             persisted = await reply_work_crud.get_checkpoint(db, parent_work_id)
-            assert parent is not None and b_call is not None and b_result is not None and query_result is not None
+            session = await db.get(ChatSession, runtime.session_id)
+            assert parent is not None and b_call is not None and b_result is not None and query_result is not None and session is not None
             assert isinstance(persisted, dict)
             assert parent.status == SessionReplyWorkStatus.RUNNING
             assert parent.locked_by == worker_id
             assert b_call.delivered is True
             assert "child_work_waits" not in parent.execution_state
-            assert _message_payload(b_result)["status"] == "succeeded"
+            assert _message_payload(b_result)["status"] == "queued"
+            assert _message_receipt_snapshot(b_result) == case["b_result_snapshot"]
+            assert _context_summary_snapshot(session) == case["context_summary_snapshot"]
             assert _message_payload(query_result) == case["query_result_payload"]
             assert _checkpoint_query_result(persisted, case["query_call_id"]).id == case["query_result_message_id"]
             assert await _notification_snapshot(db, runtime.session_id) == case["notification_snapshot"]
@@ -591,10 +689,13 @@ async def test_query_delivery_requires_a_complete_current_persisted_result(image
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
             b_call = await db.get(SubagentToolCall, case["b_call_id"])
             b_result = await db.get(Message, case["b_result_message_id"])
-            assert parent is not None and b_call is not None and b_result is not None
+            session = await db.get(ChatSession, runtime.session_id)
+            assert parent is not None and b_call is not None and b_result is not None and session is not None
             assert parent.status == SessionReplyWorkStatus.RUNNING
             assert b_call.delivered is False
             assert _message_payload(b_result)["status"] == "queued"
+            assert _message_receipt_snapshot(b_result) == case["b_result_snapshot"]
+            assert _context_summary_snapshot(session) == case["context_summary_snapshot"]
             waits = parent.execution_state.get("child_work_waits")
             assert isinstance(waits, list)
             assert any(slot.get("child_work_id") == case["child_b_work_id"] for slot in waits if isinstance(slot, dict))
@@ -615,18 +716,29 @@ async def test_query_delivery_requires_a_complete_current_persisted_result(image
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
             b_call = await db.get(SubagentToolCall, case["b_call_id"])
             b_result = await db.get(Message, case["b_result_message_id"])
-            assert parent is not None and b_call is not None and b_result is not None
+            session = await db.get(ChatSession, runtime.session_id)
+            assert parent is not None and b_call is not None and b_result is not None and session is not None
             assert parent.status == SessionReplyWorkStatus.READY_FOR_LLM
             assert b_call.delivered is True
             assert "child_work_waits" not in parent.execution_state
             b_payload = _message_payload(b_result)
-            assert b_payload["status"] == "succeeded"
-            assert b_payload["content"] == case["summary_b"]
+            assert b_payload["status"] == "queued"
+            assert _message_receipt_snapshot(b_result) == case["b_result_snapshot"]
+            assert _context_summary_snapshot(session) == case["context_summary_snapshot"]
             notification_snapshot = await _notification_snapshot(db, runtime.session_id)
             baseline_marker_ids = {marker[0] for marker in case["notification_snapshot"][0]}
             new_markers = [marker for marker in notification_snapshot[0] if marker[0] not in baseline_marker_ids]
             assert len(new_markers) == 1
             assert case["summary_b"] in (new_markers[0][2] or "")
+            notification_payload = json.loads(new_markers[0][2] or "{}")
+            assert notification_payload["results"] == [
+                {
+                    "subagent_id": case["b_subagent_id"],
+                    "work_id": case["child_b_work_id"],
+                    "status": "succeeded",
+                    "content": case["summary_b"],
+                }
+            ]
             baseline_ready_events = [event for event in case["notification_snapshot"][1] if event[2].get("type") == "work_ready" and event[2].get("work_id") == parent_work_id]
             ready_events = [event for event in notification_snapshot[1] if event[2].get("type") == "work_ready" and event[2].get("work_id") == parent_work_id]
             assert len(ready_events) == len(baseline_ready_events) + 1
@@ -722,13 +834,16 @@ async def test_query_delivery_save_and_automatic_delivery_race_without_duplicate
             b_result = await db.get(Message, case["b_result_message_id"])
             query_result = await db.get(Message, case["query_result_message_id"])
             persisted = await reply_work_crud.get_checkpoint(db, parent_work_id)
-            assert parent is not None and b_call is not None and b_result is not None and query_result is not None
+            session = await db.get(ChatSession, runtime.session_id)
+            assert parent is not None and b_call is not None and b_result is not None and query_result is not None and session is not None
             assert isinstance(persisted, dict)
             assert parent.status == SessionReplyWorkStatus.SUCCEEDED
             assert b_call.delivered is True
             assert "child_work_waits" not in parent.execution_state
             b_result_payload = _message_payload(b_result)
-            assert b_result_payload["content"] == case["summary_b"]
+            assert b_result_payload["status"] == "queued"
+            assert _message_receipt_snapshot(b_result) == case["b_result_snapshot"]
+            assert _context_summary_snapshot(session) == case["context_summary_snapshot"]
             assert _message_payload(query_result) == case["query_result_payload"]
             assert _checkpoint_query_result(persisted, case["query_call_id"]).id == case["query_result_message_id"]
             b_result_rows = []
@@ -752,8 +867,9 @@ async def test_query_delivery_save_and_automatic_delivery_race_without_duplicate
             assert len(b_result_rows) == 1
             persisted_b_result_row, persisted_b_result = b_result_rows[0]
             assert persisted_b_result_row.id == case["b_result_message_id"]
+            assert _message_receipt_snapshot(persisted_b_result_row) == case["b_result_snapshot"]
             assert json.loads(persisted_b_result.content or "{}") == b_result_payload
-            assert persisted_b_result.tool_execution_status == "succeeded"
+            assert persisted_b_result.tool_execution_status == case["b_result_snapshot"][3]
             assert await _notification_snapshot(db, runtime.session_id) == case["notification_snapshot"]
             assert await reconcile_child_work(db) == 0
             assert await _notification_snapshot(db, runtime.session_id) == case["notification_snapshot"]
