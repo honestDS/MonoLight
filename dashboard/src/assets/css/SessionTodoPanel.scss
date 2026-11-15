@@ -12,57 +12,7 @@
   @include wrap-content;
 }
 
-.session-task-trigger {
-  position: absolute;
-  top: 10px;
-  right: 12px;
-  z-index: 16;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  height: 36px;
-  padding: 0 12px;
-  box-sizing: border-box;
-  color: var(--el-text-color-regular);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  background: var(--glass-surface-background);
-  border: 1px solid var(--glass-surface-border);
-  border-radius: var(--radius-pill);
-  box-shadow: var(--glass-surface-shadow);
-  backdrop-filter: var(--glass-surface-backdrop-filter);
-  -webkit-backdrop-filter: var(--glass-surface-backdrop-filter);
-  touch-action: manipulation;
-  transition: color 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
-
-  &:hover,
-  &.is-active {
-    color: var(--el-text-color-primary);
-    background: var(--el-color-primary-light-9);
-    border-color: var(--el-color-primary-light-5);
-  }
-
-  &:active {
-    color: var(--el-text-color-primary);
-    background: var(--el-color-primary-light-8);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--el-color-primary);
-    outline-offset: 2px;
-  }
-}
-
-.session-task-panel-icon {
-  display: block;
-  flex: 0 0 18px;
-  width: 18px;
-  height: 18px;
+.session-task-trigger > .session-task-panel-icon {
   stroke-width: 1.5;
 }
 
@@ -709,7 +659,6 @@
 @media (prefers-reduced-motion: reduce) {
   .session-task-panel-enter-active,
   .session-task-panel-leave-active,
-  .session-task-trigger,
   .subagent-card,
   .session-task-tabs :deep(.el-collapse-item__wrap),
   .session-task-tabs :deep(.el-collapse-item__header),

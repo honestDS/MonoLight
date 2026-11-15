@@ -307,7 +307,7 @@ const createHarness = async (t, options = {}) => {
   let module
   scope.run(() => {
     vm.runInContext(
-      `${chatViewScript}\nglobalThis.__module = { handleSelectSession, handleCreateNewSession, currentSessionId, inputMsg, messages, sessionEngaged, deferredContentSessionId, currentUid, groupedSessions, collapsedGroups, toggleGroup }`,
+      `${chatViewScript}\nglobalThis.__module = { handleSelectSession, handleCreateNewSession, currentSessionId, inputMsg, messages, sessionEngaged, deferredContentSessionId, currentUid, groupedSessions, collapsedGroups, toggleGroup, sessionsPanelOpen, toggleSessionsPanel, closeSessionsPanel }`,
       context,
       { filename: 'ChatView.vue?script-setup' }
     )
@@ -348,6 +348,39 @@ const createHarness = async (t, options = {}) => {
   t.after(() => harness.unmount())
   return harness
 }
+
+test('session panel toggles and closes when navigating sessions or a new session', async t => {
+  const sessions = [createSession('A'), createSession('B')]
+  const harness = await createHarness(t, { sessions })
+
+  assert.equal(harness.module.sessionsPanelOpen.value, false)
+  harness.module.closeSessionsPanel()
+  assert.equal(harness.module.sessionsPanelOpen.value, false)
+
+  await harness.module.toggleSessionsPanel()
+  assert.equal(harness.module.sessionsPanelOpen.value, true)
+  await harness.module.toggleSessionsPanel()
+  assert.equal(harness.module.sessionsPanelOpen.value, false)
+
+  await harness.module.toggleSessionsPanel()
+  assert.equal(harness.module.sessionsPanelOpen.value, true)
+  harness.module.handleSelectSession(harness.session('B'))
+  await harness.flush()
+  assert.equal(harness.module.sessionsPanelOpen.value, false)
+  assert.equal(harness.chat.currentSessionId.value, 'B')
+  assert.equal(harness.chat.messages.value[0].session_id, 'B')
+  assert.deepEqual(harness.url().query, { session_id: 'B' })
+
+  await harness.module.toggleSessionsPanel()
+  assert.equal(harness.module.sessionsPanelOpen.value, true)
+  harness.module.handleCreateNewSession()
+  await harness.flush()
+  assert.equal(harness.module.sessionsPanelOpen.value, false)
+  assert.equal(harness.chat.currentSessionId.value, null)
+  assert.deepEqual(harness.chat.messages.value, [])
+  assert.equal(harness.chat.inputMsg.value, '')
+  assert.deepEqual(harness.url().query, {})
+})
 
 test('deep links consume task_open, manual navigation survives refresh, and preserves unrelated URL parts', async t => {
   const sessions = [createSession('A'), createSession('B')]

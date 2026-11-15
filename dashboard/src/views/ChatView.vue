@@ -1,148 +1,129 @@
 <template>
   <div class="chat-view-container">
+    <Transition name="sessions-panel">
+      <aside
+        v-show="sessionsPanelOpen"
+        ref="sessionsPanelRef"
+        id="chat-sessions-panel"
+        class="sessions-panel"
+        aria-labelledby="chat-sessions-panel-title"
+        :inert="!sessionsPanelOpen"
+        @keydown.esc.stop="closeSessionsPanel"
+      >
+        <div class="sidebar-header">
+          <h2 id="chat-sessions-panel-title" ref="sessionsPanelTitleRef" tabindex="-1">
+            {{ $t('chat.sessions_title') }}
+          </h2>
+          <div class="sidebar-actions">
+            <button
+              type="button"
+              class="sidebar-icon"
+              :aria-label="$t('chat.new_session_title')"
+              :title="$t('chat.new_session_title')"
+              @click.stop="handleCreateNewSession"
+            >
+              <el-icon aria-hidden="true"><Plus /></el-icon>
+            </button>
+            <button
+              type="button"
+              class="sidebar-icon refresh-icon"
+              :class="{ loading: sessionsLoading }"
+              :aria-label="$t('chat.refresh_sessions')"
+              :title="$t('chat.refresh_sessions')"
+              :disabled="sessionsLoading"
+              :aria-busy="sessionsLoading"
+              @click.stop="loadSessions"
+            >
+              <el-icon class="refresh-icon-glyph" aria-hidden="true"><Refresh /></el-icon>
+            </button>
+          </div>
+        </div>
+        <div class="sessions-list">
+          <template v-for="group in groupedSessions" :key="group.key">
+            <button
+              type="button"
+              :class="['session-group-title', { 'is-collapsed': collapsedGroups.has(group.key) }]"
+              :aria-expanded="!collapsedGroups.has(group.key)"
+              @click="toggleGroup(group.key)"
+            >
+              <span class="session-group-title-text" :title="group.label">{{ group.label }}</span>
+              <el-icon class="session-group-chevron" aria-hidden="true"><ArrowDown /></el-icon>
+            </button>
+            <Transition
+              @before-enter="handleSessionGroupBeforeEnter"
+              @enter="handleSessionGroupEnter"
+              @after-enter="resetSessionGroupTransition"
+              @before-leave="handleSessionGroupBeforeLeave"
+              @leave="handleSessionGroupLeave"
+              @after-leave="resetSessionGroupTransition"
+            >
+              <div
+                v-show="!collapsedGroups.has(group.key)"
+                :inert="collapsedGroups.has(group.key)"
+                class="session-group-body"
+              >
+                <div
+                  v-for="session in group.sessions"
+                  :key="session.session_id"
+                  :data-session-id="session.session_id"
+                  :class="['session-item', { active: currentSessionId === session.session_id }]"
+                >
+                  <button
+                    type="button"
+                    class="session-content"
+                    :aria-current="currentSessionId === session.session_id ? 'page' : undefined"
+                    @click="handleSelectSession(session)"
+                  >
+                    <span class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
+                      <span :id="`chat-session-title-${session.session_id}`" class="session-title-text">
+                        <template v-if="typingSessionId === session.session_id">
+                          <span
+                            v-for="(char, index) in session.title"
+                            :key="index"
+                            class="typing-char"
+                          >{{ char }}</span>
+                        </template>
+                        <template v-else>
+                          {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
+                        </template>
+                      </span>
+                      <span
+                        v-if="session.is_loading"
+                        class="session-loading-indicator"
+                        :title="$t('chat.session_reply_in_progress')"
+                        role="status"
+                        aria-live="polite"
+                      ></span>
+                    </span>
+                    <span class="session-meta" :title="`${$t('chat.session_source')}: ${formatSessionSource(session.source) || '-'}`">
+                      <span v-if="session.source" class="session-source">{{ formatSessionSource(session.source) }}</span>
+                    </span>
+                  </button>
+                  <div class="session-actions">
+                    <button
+                      type="button"
+                      class="delete-icon"
+                      :aria-label="$t('common.delete')"
+                      :title="$t('common.delete')"
+                      :aria-describedby="`chat-session-title-${session.session_id}`"
+                      @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"
+                    >
+                      <el-icon aria-hidden="true"><Delete /></el-icon>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </Transition>
+          </template>
+          <div v-if="groupedSessions.length === 0 && !sessionsLoading" class="empty-tip">
+            {{ $t('chat.no_sessions') }}
+          </div>
+        </div>
+      </aside>
+    </Transition>
+
     <!-- 聊天主区域 -->
     <div ref="chatMainRef" class="chat-main" :class="{ 'is-welcome': !sessionEngaged }">
-      <!-- 会话入口：左上角浮动控制组 + 按需展开的覆盖式会话面板 -->
-      <div
-        v-click-outside="closeSessionsPanel"
-        class="chat-side-controls"
-        @keydown.esc="closeSessionsPanel"
-      >
-        <div class="chat-side-trigger-group glass-surface">
-          <el-tooltip
-            :content="$t(sessionsPanelOpen ? 'chat.collapse_sessions' : 'chat.expand_sessions')"
-            placement="bottom-start"
-            :show-after="300"
-          >
-            <button
-              type="button"
-              class="chat-side-trigger"
-              :class="{ 'is-active': sessionsPanelOpen }"
-              :aria-expanded="sessionsPanelOpen"
-              aria-controls="chat-sessions-panel"
-              :aria-label="$t(sessionsPanelOpen ? 'chat.collapse_sessions' : 'chat.expand_sessions')"
-              @click="toggleSessionsPanel"
-            >
-              <el-icon><ChatLineSquare /></el-icon>
-            </button>
-          </el-tooltip>
-          <span class="chat-side-trigger-divider" aria-hidden="true"></span>
-          <el-tooltip
-            :content="$t('chat.new_session_title')"
-            placement="bottom-start"
-            :show-after="300"
-          >
-            <button
-              type="button"
-              class="chat-side-trigger"
-              :aria-label="$t('chat.new_session_title')"
-              @click="handleCreateNewSession"
-            >
-              <el-icon><Plus /></el-icon>
-            </button>
-          </el-tooltip>
-        </div>
-
-        <Transition name="sessions-panel">
-          <div
-            v-show="sessionsPanelOpen"
-            id="chat-sessions-panel"
-            class="sessions-panel glass-surface"
-            role="region"
-            :aria-label="$t('chat.sessions_title')"
-          >
-            <div class="sidebar-header">
-              <span>{{ $t('chat.sessions_title') }}</span>
-              <div class="sidebar-actions">
-                <el-icon
-                  class="sidebar-icon"
-                  :title="$t('chat.new_session_title')"
-                  @click.stop="handleCreateNewSession"
-                ><Plus /></el-icon>
-                <el-icon
-                  class="sidebar-icon refresh-icon"
-                  :class="{ loading: sessionsLoading }"
-                  :title="$t('chat.refresh_sessions')"
-                  @click.stop="loadSessions"
-                ><Refresh class="refresh-icon-glyph" aria-hidden="true" /></el-icon>
-              </div>
-            </div>
-            <div class="sessions-list">
-              <template v-for="group in groupedSessions" :key="group.key">
-                <div
-                  :class="['session-group-title', { 'is-collapsed': collapsedGroups.has(group.key) }]"
-                  role="button"
-                  :aria-expanded="!collapsedGroups.has(group.key)"
-                  tabindex="0"
-                  @click="toggleGroup(group.key)"
-                  @keydown.enter.prevent="toggleGroup(group.key)"
-                  @keydown.space.prevent="toggleGroup(group.key)"
-                >
-                  <span class="session-group-title-text" :title="group.label">{{ group.label }}</span>
-                  <el-icon class="session-group-chevron" aria-hidden="true"><ArrowDown /></el-icon>
-                </div>
-                <Transition
-                  @before-enter="handleSessionGroupBeforeEnter"
-                  @enter="handleSessionGroupEnter"
-                  @after-enter="resetSessionGroupTransition"
-                  @before-leave="handleSessionGroupBeforeLeave"
-                  @leave="handleSessionGroupLeave"
-                  @after-leave="resetSessionGroupTransition"
-                >
-                  <div
-                    v-show="!collapsedGroups.has(group.key)"
-                    class="session-group-body"
-                  >
-                    <div
-                      v-for="session in group.sessions"
-                      :key="session.session_id"
-                      :data-session-id="session.session_id"
-                      :class="['session-item', { active: currentSessionId === session.session_id }]"
-                      @click="handleSelectSession(session)"
-                    >
-                      <div class="session-content">
-                        <div class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
-                          <span class="session-title-text">
-                            <template v-if="typingSessionId === session.session_id">
-                              <span
-                                v-for="(char, index) in session.title"
-                                :key="index"
-                                class="typing-char"
-                              >{{ char }}</span>
-                            </template>
-                            <template v-else>
-                              {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
-                            </template>
-                          </span>
-                          <span
-                            v-if="session.is_loading"
-                            class="session-loading-indicator"
-                            :title="$t('chat.session_reply_in_progress')"
-                            role="status"
-                            aria-live="polite"
-                          ></span>
-                        </div>
-                        <div class="session-meta" :title="`${$t('chat.session_source')}: ${formatSessionSource(session.source) || '-'}`">
-                          <span v-if="session.source" class="session-source">{{ formatSessionSource(session.source) }}</span>
-                        </div>
-                      </div>
-                      <div class="session-actions">
-                        <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
-                      </div>
-                    </div>
-                  </div>
-                </Transition>
-              </template>
-              <div v-if="groupedSessions.length === 0 && !sessionsLoading" class="empty-tip">
-                {{ $t('chat.no_sessions') }}
-              </div>
-            </div>
-          </div>
-        </Transition>
-      </div>
-
-      <div id="chat-task-trigger-slot"></div>
-
       <ChatMessageList
         ref="messageList"
         v-model:active-collapse="activeCollapse"
@@ -181,6 +162,35 @@
             :session-info="currentSessionInfo"
             :context-summarizing="isContextSummarizing"
           />
+
+          <div class="chat-composer-actions">
+            <button
+              ref="sessionsTriggerRef"
+              type="button"
+              class="chat-composer-action"
+              :aria-expanded="sessionsPanelOpen"
+              aria-controls="chat-sessions-panel"
+              :aria-label="$t(sessionsPanelOpen ? 'chat.collapse_sessions' : 'chat.expand_sessions')"
+              :title="$t(sessionsPanelOpen ? 'chat.collapse_sessions' : 'chat.expand_sessions')"
+              @click="toggleSessionsPanel"
+              @keydown.esc.stop="closeSessionsPanel"
+            >
+              <el-icon aria-hidden="true"><ChatLineSquare /></el-icon>
+              <span>{{ $t('chat.sessions_title') }}</span>
+            </button>
+            <button
+              type="button"
+              class="chat-composer-action"
+              :aria-label="$t('chat.new_session_title')"
+              :title="$t('chat.new_session_title')"
+              @click="handleCreateNewSession"
+            >
+              <el-icon aria-hidden="true"><Plus /></el-icon>
+              <span>{{ $t('chat.new_session_title') }}</span>
+            </button>
+            <div id="chat-task-trigger-slot" class="chat-composer-action-slot"></div>
+            <div id="chat-request-metadata-trigger-slot" class="chat-composer-action-slot"></div>
+          </div>
 
           <div class="input-controls">
             <div ref="chatInputBoxRef" class="chat-input-box">
@@ -422,7 +432,7 @@
 
 <script setup>
 import { ref, inject } from 'vue'
-import { ElMessage, ClickOutside as vClickOutside } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { ChatLineSquare, Delete, InfoFilled, Plus, Refresh, UploadFilled, ArrowDown } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
@@ -510,6 +520,9 @@ const {
   chatInputBoxRef,
   moreOptionsWidth,
   sessionsPanelOpen,
+  sessionsPanelRef,
+  sessionsPanelTitleRef,
+  sessionsTriggerRef,
   toggleSessionsPanel,
   closeSessionsPanel,
   collapsedGroups,

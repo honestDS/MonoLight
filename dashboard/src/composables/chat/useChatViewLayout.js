@@ -1,4 +1,4 @@
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { groupChatSessions } from '../../utils/chatPresentation.js'
 
 export function useChatViewLayout({ chat, translate, currentUid = ref(null) }) {
@@ -27,13 +27,28 @@ export function useChatViewLayout({ chat, translate, currentUid = ref(null) }) {
     chatInputResizeObserver?.disconnect()
   })
 
-  // 覆盖式会话面板开关状态：默认收起，选中会话、点击面板外部或按下 Esc 时收起
+  // 左侧并排会话面板开关状态：默认收起
   const sessionsPanelOpen = ref(false)
-  const toggleSessionsPanel = () => {
-    sessionsPanelOpen.value = !sessionsPanelOpen.value
-  }
+  const sessionsPanelRef = ref(null)
+  const sessionsPanelTitleRef = ref(null)
+  const sessionsTriggerRef = ref(null)
   const closeSessionsPanel = () => {
+    if (!sessionsPanelOpen.value) return
+    const panel = sessionsPanelRef.value
+    if (panel && panel.contains(panel.ownerDocument.activeElement)) {
+      sessionsTriggerRef.value?.focus({ preventScroll: true })
+    }
     sessionsPanelOpen.value = false
+  }
+  const toggleSessionsPanel = async () => {
+    if (sessionsPanelOpen.value) {
+      closeSessionsPanel()
+      return
+    }
+    sessionsPanelOpen.value = true
+    await nextTick()
+    if (!sessionsPanelOpen.value) return
+    sessionsPanelTitleRef.value?.focus({ preventScroll: true })
   }
 
   // 按用户归属和日期划分的折叠会话分组 key
@@ -106,6 +121,9 @@ export function useChatViewLayout({ chat, translate, currentUid = ref(null) }) {
     chatInputBoxRef,
     moreOptionsWidth,
     sessionsPanelOpen,
+    sessionsPanelRef,
+    sessionsPanelTitleRef,
+    sessionsTriggerRef,
     toggleSessionsPanel,
     closeSessionsPanel,
     collapsedGroups,

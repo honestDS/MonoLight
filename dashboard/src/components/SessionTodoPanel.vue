@@ -4,8 +4,7 @@
       v-if="props.sessionId"
       ref="triggerRef"
       type="button"
-      class="session-task-trigger glass-surface"
-      :class="{ 'is-active': expanded }"
+      class="chat-composer-action session-task-trigger"
       :aria-expanded="expanded"
       aria-controls="session-task-panel"
       :aria-label="t(expanded ? 'chat.task_panel_collapse' : 'chat.task_panel_expand')"
@@ -24,13 +23,14 @@
         <rect x="2.5" y="2.5" width="15" height="15" rx="1.5" />
         <path d="M13 2.5v15" />
       </svg>
-      <span>{{ t('chat.task_panel_button') }}</span>
+      <span>{{ t('chat.task_panel_title') }}</span>
     </button>
   </Teleport>
 
   <Transition name="session-task-panel">
     <el-aside
       v-show="expanded"
+      :inert="!expanded"
       id="session-task-panel"
       class="session-task-panel"
       width="360px"
