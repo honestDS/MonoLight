@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import heapq
 import os
 import re
@@ -20,7 +21,7 @@ from app.core.constants import (
 from app.core.crud.system.log import system_log_crud
 from app.core.crud.system.setting import system_setting_crud
 from app.core.i18n import t
-from app.core.log import get_logger
+from app.core.log import get_logger, log_file_rotation_lock
 from app.core.paths import DEFAULT_LOG_FILE_PATH, TEMP_DIR, TOOLS_LOG_FILENAME
 from app.core.user.file_cleanup import recover_user_file_cleanup
 from app.core.utils.time import get_local_time
@@ -170,14 +171,16 @@ async def _cleanup_system_log_batch() -> int | None:
         return await system_log_crud.delete_log_ids(db, ids=log_ids)
 
 
-def _list_old_rotated_log_files(log_path: Path, *, cutoff: float, batch_size: int) -> list[Path]:
+def _list_old_log_files(log_path: Path, *, cutoff: float, batch_size: int) -> list[Path]:
     if batch_size <= 0:
         return []
 
     timestamp_pattern = r"\.\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d{6}"
     service_pattern = rf"{re.escape(log_path.stem)}(?:\.\d+)?{timestamp_pattern}(?:\.\d+)?{re.escape(log_path.suffix)}\.zip"
+    service_log_pattern = rf"{re.escape(log_path.stem)}(?:\.\d+)?{re.escape(log_path.suffix)}"
     tools_log_path = Path(TOOLS_LOG_FILENAME)
     tools_pattern = rf"{re.escape(tools_log_path.stem)}(?:\.\d+)?{timestamp_pattern}(?:\.\d+)?{re.escape(tools_log_path.suffix)}"
+    tools_log_pattern = rf"{re.escape(tools_log_path.stem)}(?:\.\d+)?{re.escape(tools_log_path.suffix)}"
     candidates: list[Path] = []
 
     try:
@@ -187,7 +190,7 @@ def _list_old_rotated_log_files(log_path: Path, *, cutoff: float, batch_size: in
 
     with entries:
         for entry in entries:
-            if re.fullmatch(service_pattern, entry.name) is None and re.fullmatch(tools_pattern, entry.name) is None:
+            if all(re.fullmatch(pattern, entry.name) is None for pattern in (service_pattern, service_log_pattern, tools_pattern, tools_log_pattern)):
                 continue
 
             path = Path(entry.path)
@@ -209,22 +212,56 @@ def _list_old_rotated_log_files(log_path: Path, *, cutoff: float, batch_size: in
     return candidates
 
 
-def _delete_rotated_log_files(paths: list[Path], *, cutoff: float) -> int:
+def _unlink_inactive_log_file(path: Path, *, cutoff: float) -> bool:
+    if os.name == "nt":
+        # Windows 的共享或锁冲突表示文件仍在使用，正常跳过。
+        try:
+            path.unlink()
+        except OSError as error:
+            if getattr(error, "winerror", None) in (32, 33):
+                return False
+            raise
+        return True
+
+    # 仅在取得独占锁后删除，仍被写入器持有共享锁的文件会跳过。
+    import fcntl
+
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            if e.errno not in (errno.EACCES, errno.EAGAIN):
+                raise
+            return False
+
+        fd_stat = os.fstat(fd)
+        path_stat = path.stat(follow_symlinks=False)
+        if not S_ISREG(fd_stat.st_mode) or not S_ISREG(path_stat.st_mode):
+            return False
+        if fd_stat.st_dev != path_stat.st_dev or fd_stat.st_ino != path_stat.st_ino:
+            return False
+        if fd_stat.st_mtime >= cutoff or path_stat.st_mtime >= cutoff:
+            return False
+        path.unlink()
+        return True
+    finally:
+        os.close(fd)
+
+
+def _delete_log_files(paths: list[Path], *, cutoff: float) -> int:
     deleted_count = 0
     for path in paths:
         try:
-            stat_result = path.stat(follow_symlinks=False)
-        except FileNotFoundError:
-            continue
-        except OSError as e:
-            logger.bind(path=str(path)).warning(t(ERR_LOG_CLEANER_FAILED, message=str(e)))
-            continue
-
-        if not S_ISREG(stat_result.st_mode) or stat_result.st_mtime >= cutoff:
-            continue
-
-        try:
-            path.unlink()
+            with log_file_rotation_lock(path.parent, blocking=False) as acquired:
+                if not acquired:
+                    continue
+                # 同一锁覆盖轮转，避免在轮转过程中检查或删除路径。
+                stat_result = path.stat(follow_symlinks=False)
+                if not S_ISREG(stat_result.st_mode) or stat_result.st_mtime >= cutoff:
+                    continue
+                if not _unlink_inactive_log_file(path, cutoff=cutoff):
+                    continue
         except FileNotFoundError:
             continue
         except OSError as e:
@@ -236,7 +273,7 @@ def _delete_rotated_log_files(paths: list[Path], *, cutoff: float) -> int:
     return deleted_count
 
 
-async def _cleanup_rotated_log_file_batch() -> int | None:
+async def _cleanup_log_file_batch() -> int | None:
     async with AsyncSessionLocal() as db:
         await ensure_sqlite_outer_transaction(db)
         retention_days, _ = await system_setting_crud.get_log_retention(db)
@@ -244,7 +281,7 @@ async def _cleanup_rotated_log_file_batch() -> int | None:
     cutoff = (get_local_time() - timedelta(days=retention_days)).timestamp()
     log_path = Path(os.getenv("LOG_FILE_PATH", str(DEFAULT_LOG_FILE_PATH)))
     paths = await asyncio.to_thread(
-        _list_old_rotated_log_files,
+        _list_old_log_files,
         log_path,
         cutoff=cutoff,
         batch_size=SYSTEM_LOG_CLEANUP_BATCH_SIZE,
@@ -259,7 +296,7 @@ async def _cleanup_rotated_log_file_batch() -> int | None:
         current_retention_days, _ = await system_setting_crud.get_log_retention(db, lock_for_update=True)
         if current_retention_days != retention_days:
             return None
-        return await asyncio.to_thread(_delete_rotated_log_files, paths, cutoff=cutoff)
+        return await asyncio.to_thread(_delete_log_files, paths, cutoff=cutoff)
 
 
 async def background_log_cleaner(*, interval_seconds: float = SYSTEM_LOG_CLEANUP_INTERVAL_SECONDS) -> None:
@@ -279,7 +316,7 @@ async def background_log_file_cleaner(*, interval_seconds: float = SYSTEM_LOG_CL
     while True:
         pause_seconds = interval_seconds
         try:
-            deleted_count = await _cleanup_rotated_log_file_batch()
+            deleted_count = await _cleanup_log_file_batch()
             if deleted_count is None or deleted_count == SYSTEM_LOG_CLEANUP_BATCH_SIZE:
                 pause_seconds = SYSTEM_LOG_CLEANUP_BATCH_PAUSE_SECONDS
         except Exception as e:

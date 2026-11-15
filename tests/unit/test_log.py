@@ -10,7 +10,7 @@ from loguru import logger as loguru_logger
 from app.core.log import LogManager, agent_log_context, get_logger
 from app.core.log.redaction import redact_log_text
 from app.core.paths import TOOLS_LOG_FILENAME
-from app.tasks import _delete_rotated_log_files, _list_old_rotated_log_files
+from app.tasks import _delete_log_files, _list_old_log_files
 
 
 def _redact_and_assert_removed(text, *sensitive_values):
@@ -414,32 +414,39 @@ def _tools_rotated_name(timestamp: str, identifier=None, count=None) -> str:
 
 
 @pytest.mark.parametrize("log_name", ["monolight.log", "service.[blue].txt", "service"])
-def test_rotated_log_files_match_configured_service_and_tools_by_mtime(tmp_path, log_name):
+def test_log_files_match_configured_service_and_tools_by_mtime(tmp_path, log_name):
     log_path = tmp_path / log_name
     cutoff = 2_000_000_000
     old_mtime = cutoff - 100
     new_mtime = cutoff + 100
     old_timestamp = "1999-01-01_00-00-00_000000"
     new_timestamp = "2099-12-31_23-59-59_999999"
+    current_pid = os.getpid()
+    tools_path = Path(TOOLS_LOG_FILENAME)
 
     to_delete = {
+        log_path: "closed active log",
+        tmp_path / f"{log_path.stem}.{current_pid + 1}{log_path.suffix}": "service numeric identifier",
+        tmp_path / f"{log_path.stem}.{current_pid}{log_path.suffix}": "service current pid",
         tmp_path / _service_rotated_name(log_path, old_timestamp): "service without identifier",
         tmp_path / _service_rotated_name(log_path, old_timestamp, identifier=7): "service numeric identifier",
-        tmp_path / _service_rotated_name(log_path, old_timestamp, identifier=os.getpid()): "service current pid",
+        tmp_path / _service_rotated_name(log_path, old_timestamp, identifier=current_pid): "service current pid",
         tmp_path / _service_rotated_name(log_path, old_timestamp, count=2): "service rotation count",
         tmp_path / _service_rotated_name(log_path, new_timestamp, identifier=11): "filename date is new",
-        tmp_path / _tools_rotated_name(old_timestamp): "tools without identifier",
+        tmp_path / tools_path: "tools without identifier",
+        tmp_path / f"{tools_path.stem}.13{tools_path.suffix}": "tools numeric identifier",
         tmp_path / _tools_rotated_name(old_timestamp, identifier=13, count=2): "tools identifier and count",
     }
     for path, content in to_delete.items():
-        _write_file_with_mtime(path, content, old_mtime)
+        modified_at = old_mtime - 100 * 86400 if path == log_path else old_mtime
+        _write_file_with_mtime(path, content, modified_at)
 
+    recent_log_path = tmp_path / f"{log_path.stem}.{current_pid + 2}{log_path.suffix}"
     retained = {
         tmp_path / _service_rotated_name(log_path, old_timestamp, identifier=17): "old filename date but new mtime",
         tmp_path / _service_rotated_name(log_path, old_timestamp, identifier=19, count=2): "mtime cutoff boundary",
-        log_path: "active log content",
+        recent_log_path: "recent unrotated service log",
     }
-    _write_file_with_mtime(log_path, retained[log_path], old_mtime - 100 * 86400)
     _write_file_with_mtime(
         tmp_path / _service_rotated_name(log_path, old_timestamp, identifier=17),
         retained[tmp_path / _service_rotated_name(log_path, old_timestamp, identifier=17)],
@@ -450,6 +457,7 @@ def test_rotated_log_files_match_configured_service_and_tools_by_mtime(tmp_path,
         retained[tmp_path / _service_rotated_name(log_path, old_timestamp, identifier=19, count=2)],
         cutoff,
     )
+    _write_file_with_mtime(recent_log_path, retained[recent_log_path], new_mtime)
 
     excluded = {
         tmp_path / f"{log_path.stem}.{old_timestamp}{log_path.suffix}": "service log still being compressed",
@@ -464,10 +472,10 @@ def test_rotated_log_files_match_configured_service_and_tools_by_mtime(tmp_path,
     nested_path.parent.mkdir()
     _write_file_with_mtime(nested_path, "nested file", old_mtime)
 
-    selected = _list_old_rotated_log_files(log_path, cutoff=cutoff, batch_size=100)
+    selected = _list_old_log_files(log_path, cutoff=cutoff, batch_size=100)
 
     assert set(selected) == set(to_delete)
-    assert _delete_rotated_log_files(selected, cutoff=cutoff) == len(to_delete)
+    assert _delete_log_files(selected, cutoff=cutoff) == len(to_delete)
 
     for path in to_delete:
         assert not path.exists()
@@ -488,23 +496,23 @@ def test_rotated_log_file_cleanup_respects_batch_limit_and_empty_directories(tmp
         path = tmp_path / _service_rotated_name(log_path, f"2000-01-01_00-00-0{index}_000000")
         _write_file_with_mtime(path, f"batch file {index}", cutoff - index - 1)
 
-    first_batch = _list_old_rotated_log_files(log_path, cutoff=cutoff, batch_size=2)
+    first_batch = _list_old_log_files(log_path, cutoff=cutoff, batch_size=2)
     assert len(first_batch) == 2
-    assert _delete_rotated_log_files(first_batch, cutoff=cutoff) == 2
+    assert _delete_log_files(first_batch, cutoff=cutoff) == 2
 
-    second_batch = _list_old_rotated_log_files(log_path, cutoff=cutoff, batch_size=2)
+    second_batch = _list_old_log_files(log_path, cutoff=cutoff, batch_size=2)
     assert len(second_batch) == 2
-    assert _delete_rotated_log_files(second_batch, cutoff=cutoff) == 2
+    assert _delete_log_files(second_batch, cutoff=cutoff) == 2
 
-    assert _list_old_rotated_log_files(log_path, cutoff=cutoff, batch_size=2) == []
-    assert _delete_rotated_log_files([], cutoff=cutoff) == 0
+    assert _list_old_log_files(log_path, cutoff=cutoff, batch_size=2) == []
+    assert _delete_log_files([], cutoff=cutoff) == 0
 
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
-    assert _list_old_rotated_log_files(empty_dir / "monolight.log", cutoff=cutoff, batch_size=2) == []
+    assert _list_old_log_files(empty_dir / "monolight.log", cutoff=cutoff, batch_size=2) == []
 
     missing_dir = tmp_path / "missing"
-    assert _list_old_rotated_log_files(missing_dir / "monolight.log", cutoff=cutoff, batch_size=2) == []
+    assert _list_old_log_files(missing_dir / "monolight.log", cutoff=cutoff, batch_size=2) == []
     assert not missing_dir.exists()
 
 
@@ -517,11 +525,11 @@ def test_rotated_log_file_cleanup_rechecks_candidates_before_deleting(tmp_path):
     for path in (touched, disappeared, remaining):
         _write_file_with_mtime(path, path.name, cutoff - 1)
 
-    candidates = _list_old_rotated_log_files(log_path, cutoff=cutoff, batch_size=3)
+    candidates = _list_old_log_files(log_path, cutoff=cutoff, batch_size=3)
     os.utime(touched, (cutoff + 1, cutoff + 1))
     disappeared.unlink()
 
-    assert _delete_rotated_log_files(candidates, cutoff=cutoff) == 1
+    assert _delete_log_files(candidates, cutoff=cutoff) == 1
     assert touched.is_file()
     assert touched.read_text(encoding="utf-8") == touched.name
     assert not disappeared.exists()
@@ -539,7 +547,7 @@ def test_rotated_log_file_cleanup_skips_symlinks_and_replaced_candidates(tmp_pat
     except (OSError, NotImplementedError) as error:
         pytest.skip(f"symbolic links are unavailable: {error}")
 
-    assert _list_old_rotated_log_files(log_path, cutoff=cutoff, batch_size=2) == []
+    assert _list_old_log_files(log_path, cutoff=cutoff, batch_size=2) == []
     assert symlink_path.is_symlink()
     assert target.read_text(encoding="utf-8") == "symlink target"
 
@@ -547,12 +555,12 @@ def test_rotated_log_file_cleanup_skips_symlinks_and_replaced_candidates(tmp_pat
     replacement_target = tmp_path / "replacement-target.log"
     _write_file_with_mtime(candidate, "candidate content", cutoff - 1)
     _write_file_with_mtime(replacement_target, "replacement target", cutoff - 1)
-    candidates = _list_old_rotated_log_files(log_path, cutoff=cutoff, batch_size=2)
+    candidates = _list_old_log_files(log_path, cutoff=cutoff, batch_size=2)
     candidate.unlink()
     candidate.symlink_to(replacement_target)
 
     assert candidates == [candidate]
-    assert _delete_rotated_log_files(candidates, cutoff=cutoff) == 0
+    assert _delete_log_files(candidates, cutoff=cutoff) == 0
     assert candidate.is_symlink()
     assert replacement_target.read_text(encoding="utf-8") == "replacement target"
 
@@ -574,15 +582,62 @@ def test_rotated_log_file_cleanup_continues_after_one_permission_error(tmp_path,
         return original_unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "unlink", unlink_with_one_permission_error)
-    candidates = _list_old_rotated_log_files(log_path, cutoff=cutoff, batch_size=3)
+    candidates = _list_old_log_files(log_path, cutoff=cutoff, batch_size=3)
 
-    assert _delete_rotated_log_files(candidates, cutoff=cutoff) == 2
+    assert _delete_log_files(candidates, cutoff=cutoff) == 2
     assert blocked.is_file()
     assert blocked.read_text(encoding="utf-8") == blocked.name
     assert not deleted.exists()
     assert not also_deleted.exists()
 
     monkeypatch.undo()
-    remaining_candidates = _list_old_rotated_log_files(log_path, cutoff=cutoff, batch_size=3)
-    assert _delete_rotated_log_files(remaining_candidates, cutoff=cutoff) == 1
+    remaining_candidates = _list_old_log_files(log_path, cutoff=cutoff, batch_size=3)
+    assert _delete_log_files(remaining_candidates, cutoff=cutoff) == 1
     assert not blocked.exists()
+
+
+@pytest.mark.parametrize(
+    ("winerror", "expects_warning"),
+    [(32, False), (33, False), (5, True)],
+)
+def test_delete_log_files_handles_windows_unlink_errors(tmp_path, monkeypatch, winerror, expects_warning):
+    if os.name != "nt":
+        pytest.skip("Windows unlink errors are only applicable on Windows")
+
+    cutoff = 2_000_000_000
+    log_path = tmp_path / "monolight.log"
+    blocked = tmp_path / _service_rotated_name(log_path, "2000-01-01_00-00-00_000000")
+    deletable = tmp_path / _service_rotated_name(log_path, "2000-01-01_00-00-01_000000")
+    _write_file_with_mtime(blocked, "blocked content", cutoff - 1)
+    _write_file_with_mtime(deletable, "deletable content", cutoff - 1)
+
+    original_unlink = Path.unlink
+
+    def unlink_with_windows_error(path, *args, **kwargs):
+        if path == blocked:
+            error = OSError(f"simulated Windows error {winerror}")
+            error.winerror = winerror
+            raise error
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink_with_windows_error)
+    candidates = _list_old_log_files(log_path, cutoff=cutoff, batch_size=2)
+    assert set(candidates) == {blocked, deletable}
+
+    warning_records = []
+    sink_id = loguru_logger.add(
+        lambda message: warning_records.append(message.record),
+        level="WARNING",
+    )
+    try:
+        deleted_count = _delete_log_files(candidates, cutoff=cutoff)
+    finally:
+        loguru_logger.remove(sink_id)
+
+    assert deleted_count == 1
+    assert blocked.is_file()
+    assert blocked.read_text(encoding="utf-8") == "blocked content"
+    assert not deletable.exists()
+    assert len(warning_records) == (1 if expects_warning else 0)
+    if expects_warning:
+        assert warning_records[0]["extra"]["path"] == str(blocked)

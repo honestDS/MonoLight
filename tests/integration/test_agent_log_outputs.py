@@ -6,7 +6,15 @@ import sys
 import textwrap
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
+
+import psutil
+import pytest
+from loguru import logger
+
+from app.tasks import _delete_log_files, _list_old_log_files
 
 
 def test_agent_log_identity_is_consistent_across_outputs(tmp_path: Path) -> None:
@@ -246,3 +254,276 @@ def test_log_rotation_preserves_old_files_and_writes_new_archives(tmp_path: Path
     tool_active = tmp_path / f"tools.{process_id}.log"
     assert b"tail-marker" in service_active.read_bytes()
     assert b"tail-marker" in tool_active.read_bytes()
+
+
+@pytest.mark.parametrize("exit_mode", ("normal", "abrupt"))
+def test_log_cleanup_skips_open_files_then_deletes_after_exit(tmp_path: Path, exit_mode: str) -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    log_path = tmp_path / "restart.log"
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import io
+        import json
+        import os
+        import sys
+        from pathlib import Path
+
+        from loguru import logger
+
+        from app.core.log import LogManager, build_process_log_path
+
+        log_path = Path(os.environ["LOG_FILE_PATH"])
+        service_path = Path(build_process_log_path(str(log_path)))
+        tools_path = Path(build_process_log_path(str(log_path.parent / "tools.log")))
+        console = io.StringIO()
+        stdout = sys.stdout
+        sys.stdout = console
+        try:
+            LogManager.setup(log_path=str(log_path), level="INFO")
+        finally:
+            sys.stdout = stdout
+
+        bound_logger = logger.bind(tool_result=True)
+
+        async def drain_logger():
+            await logger.complete()
+
+        bound_logger.info("before-cleanup-marker")
+        asyncio.run(drain_logger())
+        print(json.dumps({"service_path": str(service_path), "tools_path": str(tools_path)}), file=stdout, flush=True)
+
+        command = sys.stdin.readline().strip()
+        if command == "abrupt":
+            os._exit(0)
+        if command != "normal":
+            raise RuntimeError(command)
+
+        bound_logger.info("after-cleanup-marker")
+        asyncio.run(drain_logger())
+        logger.remove()
+        console.close()
+        """
+    )
+    environment = os.environ.copy()
+    python_path = [str(repository_root)]
+    if environment.get("PYTHONPATH"):
+        python_path.append(environment["PYTHONPATH"])
+    environment["PYTHONPATH"] = os.pathsep.join(python_path)
+    environment["PYTHONIOENCODING"] = "utf-8"
+    environment["LOG_FILE_PATH"] = str(log_path)
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    try:
+        assert process.stdout is not None
+        paths = json.loads(process.stdout.readline())
+        service_path = Path(paths["service_path"])
+        tools_path = Path(paths["tools_path"])
+
+        assert service_path.parent == tmp_path
+        assert tools_path.parent == tmp_path
+        assert service_path.is_file()
+        assert tools_path.is_file()
+
+        old_time = time.time() - 8 * 24 * 60 * 60
+        cutoff = time.time() - 7 * 24 * 60 * 60
+        os.utime(service_path, (old_time, old_time))
+        os.utime(tools_path, (old_time, old_time))
+
+        open_candidates = _list_old_log_files(log_path, cutoff=cutoff, batch_size=10)
+        assert set(open_candidates) == {service_path, tools_path}
+        warning_messages: list[str] = []
+        warning_sink = logger.add(lambda message: warning_messages.append(str(message)), level="WARNING")
+        try:
+            assert _delete_log_files(open_candidates, cutoff=cutoff) == 0
+        finally:
+            logger.remove(warning_sink)
+        assert not warning_messages
+        assert b"before-cleanup-marker" in service_path.read_bytes()
+        assert b"before-cleanup-marker" in tools_path.read_bytes()
+
+        assert process.stdin is not None
+        stdout, stderr = process.communicate(input=f"{exit_mode}\n", timeout=30)
+        assert process.returncode == 0, stderr
+        assert not stdout
+
+        os.utime(service_path, (old_time, old_time))
+        os.utime(tools_path, (old_time, old_time))
+        service_contents = service_path.read_bytes()
+        tools_contents = tools_path.read_bytes()
+        assert b"before-cleanup-marker" in service_contents
+        assert b"before-cleanup-marker" in tools_contents
+        if exit_mode == "normal":
+            assert b"after-cleanup-marker" in service_contents
+            assert b"after-cleanup-marker" in tools_contents
+
+        closed_candidates = _list_old_log_files(log_path, cutoff=cutoff, batch_size=10)
+        assert set(closed_candidates) == {service_path, tools_path}
+        assert _delete_log_files(closed_candidates, cutoff=cutoff) == 2
+        assert not service_path.exists()
+        assert not tools_path.exists()
+        assert not list(tmp_path.glob("*.zip"))
+        assert _list_old_log_files(log_path, cutoff=cutoff, batch_size=10) == []
+        assert _delete_log_files([], cutoff=cutoff) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def _kill_log_rotation_process_tree(process: subprocess.Popen[str]) -> None:
+    # Windows 虚拟环境启动器与实际解释器可能是不同进程，先结束实际子进程。
+    try:
+        child_processes = psutil.Process(process.pid).children(recursive=True)
+    except psutil.NoSuchProcess:
+        child_processes = []
+
+    for child_process in reversed(child_processes):
+        with suppress(psutil.NoSuchProcess):
+            child_process.kill()
+
+    process.kill()
+    process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("log_kind", ("service", "tools"))
+def test_log_rotation_interleaved_with_cleanup_preserves_records(tmp_path: Path, log_kind: str) -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    log_path = tmp_path / "rotation.log"
+    script = textwrap.dedent(
+        """
+        import io
+        import os
+        import sys
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from loguru import logger
+
+        import app.core.log as log_module
+        from app.core.log import LogManager, build_process_log_path
+
+        log_kind = sys.argv[1]
+        log_module.LOG_FILE_ROTATION_SIZE = "1 KB"
+        log_path = Path.cwd() / "rotation.log"
+        selected_log_path = log_path if log_kind == "service" else log_path.with_name("tools.log")
+        selected_path = Path(build_process_log_path(str(selected_log_path)))
+
+        console = io.StringIO()
+        stdout = sys.stdout
+        sys.stdout = console
+        try:
+            LogManager.setup(log_path=str(log_path), level="CRITICAL")
+        finally:
+            sys.stdout = stdout
+
+        if log_kind == "service":
+            write_log = logger.critical
+        else:
+            write_log = logger.bind(tool_result=True).debug
+
+        payload = "x" * 650
+        before_message = f"before-rotation-marker {payload}"
+        trigger_message = f"rotation-trigger-marker {payload}"
+        write_log(before_message)
+        logger.complete()
+
+        original_rename = os.rename
+
+        def _gated_rename(source, destination, *args, **kwargs):
+            if Path(source) == selected_path:
+                print(f"rotation-paused {selected_path.name}", file=stdout, flush=True)
+                if sys.stdin.readline().strip() != "continue":
+                    raise RuntimeError("rotation was not continued")
+            return original_rename(source, destination, *args, **kwargs)
+
+        with patch.object(os, "rename", _gated_rename):
+            write_log(trigger_message)
+            logger.complete()
+
+        write_log("after-rotation-marker")
+        logger.complete()
+        logger.remove()
+        console.close()
+        """
+    )
+    environment = os.environ.copy()
+    python_path = [str(repository_root)]
+    if environment.get("PYTHONPATH"):
+        python_path.append(environment["PYTHONPATH"])
+    environment["PYTHONPATH"] = os.pathsep.join(python_path)
+    environment["PYTHONIOENCODING"] = "utf-8"
+
+    with (
+        subprocess.Popen(
+            [sys.executable, "-c", script, log_kind],
+            cwd=tmp_path,
+            env=environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        ) as process,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        try:
+            assert process.stdout is not None
+            ready_signal = executor.submit(process.stdout.readline).result(timeout=30).strip()
+            signal, separator, basename = ready_signal.partition(" ")
+            assert signal == "rotation-paused"
+            assert separator and basename
+
+            active_path = tmp_path / basename
+            assert active_path.parent == tmp_path
+            assert active_path.is_file()
+
+            now = time.time()
+            old_time = now - 8 * 24 * 60 * 60
+            cutoff = now - 7 * 24 * 60 * 60
+            os.utime(active_path, (old_time, old_time))
+
+            old_candidates = _list_old_log_files(log_path, cutoff=cutoff, batch_size=10)
+            assert old_candidates == [active_path]
+            deletion = executor.submit(_delete_log_files, old_candidates, cutoff=cutoff)
+            assert deletion.result(timeout=10) == 0
+            before_message = b"before-rotation-marker " + b"x" * 650
+            assert before_message in active_path.read_bytes()
+
+            assert process.stdin is not None
+            stdout, stderr = process.communicate(input="continue\n", timeout=30)
+            assert process.returncode == 0, stderr
+            assert not stdout
+            assert not stderr
+
+            if log_kind == "service":
+                archive_paths = list(tmp_path.glob(f"{active_path.stem}.*{active_path.suffix}.zip"))
+            else:
+                archive_paths = list(tmp_path.glob(f"{active_path.stem}.*{active_path.suffix}"))
+            assert len(archive_paths) == 1
+            if log_kind == "service":
+                with zipfile.ZipFile(archive_paths[0]) as archive:
+                    names = archive.namelist()
+                    assert names
+                    archived_contents = archive.read(names[0])
+            else:
+                archived_contents = archive_paths[0].read_bytes()
+            assert before_message in archived_contents
+
+            active_contents = active_path.read_bytes()
+            assert b"rotation-trigger-marker" in active_contents
+            assert b"after-rotation-marker" in active_contents
+        finally:
+            if process.stdin is not None and not process.stdin.closed:
+                process.stdin.close()
+            if process.poll() is None:
+                _kill_log_rotation_process_tree(process)

@@ -513,11 +513,15 @@ async def test_system_log_cleaners_apply_api_policy_to_database_and_rotated_file
     for path in old_rotated_files[3:] + recent_rotated_files[2:]:
         retained_files[path] = _write_rotated_log_file(path, tools_text, old_file_time if path in old_rotated_files else recent_file_time)
 
-    active_service_file = log_path.parent / "custom.[service].123.log"
-    active_tools_file = log_path.parent / "tools.123.log"
+    unrotated_service_file = log_path.parent / "custom.[service].123.log"
+    unrotated_tools_file = log_path.parent / "tools.123.log"
+    recent_unrotated_service_file = log_path.parent / "custom.[service].456.log"
+    recent_unrotated_tools_file = log_path.parent / "tools.456.log"
     unrelated_file = log_path.parent / f"other-service.{old_stamp}.log.zip"
-    retained_files[active_service_file] = _write_rotated_log_file(active_service_file, service_text, old_file_time)
-    retained_files[active_tools_file] = _write_rotated_log_file(active_tools_file, tools_text, old_file_time)
+    retained_files[unrotated_service_file] = _write_rotated_log_file(unrotated_service_file, service_text, old_file_time)
+    retained_files[unrotated_tools_file] = _write_rotated_log_file(unrotated_tools_file, tools_text, old_file_time)
+    retained_files[recent_unrotated_service_file] = _write_rotated_log_file(recent_unrotated_service_file, service_text, recent_file_time)
+    retained_files[recent_unrotated_tools_file] = _write_rotated_log_file(recent_unrotated_tools_file, tools_text, recent_file_time)
     retained_files[unrelated_file] = _write_rotated_log_file(unrelated_file, service_text, old_file_time, archive=True)
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
@@ -541,7 +545,7 @@ async def test_system_log_cleaners_apply_api_policy_to_database_and_rotated_file
         assert old_log.id is not None
         assert recent_log.id is not None
 
-        assert await tasks._cleanup_rotated_log_file_batch() == 0
+        assert await tasks._cleanup_log_file_batch() == 0
         assert all(path.exists() for path in retained_files)
 
         cleaner_tasks: list[asyncio.Task[None]] = []
@@ -553,15 +557,15 @@ async def test_system_log_cleaners_apply_api_policy_to_database_and_rotated_file
             await _set_log_settings(client, headers, retention_days=7, max_entries=1)
             await _wait_for_file_state(
                 {
-                    **{path: False for path in old_rotated_files},
-                    **{path: True for path in recent_rotated_files + [active_service_file, active_tools_file, unrelated_file]},
+                    **{path: False for path in old_rotated_files + [unrotated_service_file, unrotated_tools_file]},
+                    **{path: True for path in recent_rotated_files + [recent_unrotated_service_file, recent_unrotated_tools_file, unrelated_file]},
                 }
             )
             page = await _wait_for_log_page(client, headers, {recent_log.id})
             assert page["total"] == 1
             assert page["items"][0]["message"] == "database log inside retention"
             assert await _read_log_ids(log_session_factory) == [recent_log.id]
-            retained_paths = recent_rotated_files + [active_service_file, active_tools_file, unrelated_file]
+            retained_paths = recent_rotated_files + [recent_unrotated_service_file, recent_unrotated_tools_file, unrelated_file]
             for path in retained_paths:
                 assert path.read_bytes() == retained_files[path]
         finally:
@@ -608,7 +612,7 @@ async def test_rotated_log_cleaner_uses_default_retention_without_stored_setting
         assert before.status_code == 200
         assert before.json()["data"]["log_retention_days"] == 7
         assert before.json()["data"]["log_max_entries"] == 100000
-        assert await tasks._cleanup_rotated_log_file_batch() == 2
+        assert await tasks._cleanup_log_file_batch() == 2
         await _wait_for_file_state(
             {
                 **{path: False for path in old_files},
@@ -647,7 +651,7 @@ async def test_rotated_log_cleaner_skips_deletion_when_retention_changes_during_
         await _set_log_settings(client, headers, retention_days=7, max_entries=2)
         scan_started = threading.Event()
         release_scan = threading.Event()
-        original_list = tasks._list_old_rotated_log_files
+        original_list = tasks._list_old_log_files
 
         def gated_list(log_path: Path, *, cutoff: float, batch_size: int) -> list[Path]:
             candidates = original_list(log_path, cutoff=cutoff, batch_size=batch_size)
@@ -655,8 +659,8 @@ async def test_rotated_log_cleaner_skips_deletion_when_retention_changes_during_
             release_scan.wait(timeout=5)
             return candidates
 
-        monkeypatch.setattr(tasks, "_list_old_rotated_log_files", gated_list)
-        batch_task = asyncio.create_task(tasks._cleanup_rotated_log_file_batch())
+        monkeypatch.setattr(tasks, "_list_old_log_files", gated_list)
+        batch_task = asyncio.create_task(tasks._cleanup_log_file_batch())
         try:
             await asyncio.wait_for(asyncio.to_thread(scan_started.wait, 5), timeout=5)
             await _set_log_settings(client, headers, retention_days=30, max_entries=2)

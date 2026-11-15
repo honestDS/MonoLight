@@ -1,8 +1,10 @@
 import asyncio
+import errno
 import json
 import logging
 import os
 import sys
+import time
 import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -10,8 +12,20 @@ from contextvars import Token
 from pathlib import Path
 
 from loguru import logger
+from loguru._file_sink import FileSink
 
-from app.core.constants import LOG_MAIN_AGENT, LOG_MESSAGE_MAX_LENGTH, LOG_SUBAGENT, MSG_LOG_MESSAGE_TRUNCATED
+from app.core.constants import (
+    LOG_FILE_COMPRESSION,
+    LOG_FILE_CREATE_MODE,
+    LOG_FILE_ENCODING,
+    LOG_FILE_ROTATION_LOCK_FILENAME,
+    LOG_FILE_ROTATION_LOCK_RETRY_SECONDS,
+    LOG_FILE_ROTATION_SIZE,
+    LOG_MAIN_AGENT,
+    LOG_MESSAGE_MAX_LENGTH,
+    LOG_SUBAGENT,
+    MSG_LOG_MESSAGE_TRUNCATED,
+)
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_log_locale, set_current_log_locale
 from app.core.i18n.locale import DEFAULT_LOCALE
@@ -68,10 +82,122 @@ def _add_agent_log_prefix(record: dict) -> None:
         record["message"] = f"[{agent_label}] {record['message']}"
 
 
+def _acquire_windows_log_file_rotation_lock(fd: int, *, blocking: bool) -> bool:
+    import msvcrt
+
+    while True:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as error:
+            if error.errno not in (errno.EACCES, errno.EDEADLK):
+                raise
+            if not blocking:
+                return False
+            time.sleep(LOG_FILE_ROTATION_LOCK_RETRY_SECONDS)
+        else:
+            return True
+
+
+def _acquire_log_file_rotation_lock(fd: int, *, blocking: bool) -> bool:
+    if os.name == "nt":
+        return _acquire_windows_log_file_rotation_lock(fd, blocking=blocking)
+
+    import fcntl
+
+    operation = fcntl.LOCK_EX
+    if not blocking:
+        operation |= fcntl.LOCK_NB
+
+    try:
+        fcntl.flock(fd, operation)
+    except OSError as error:
+        if blocking or error.errno not in (errno.EACCES, errno.EAGAIN):
+            raise
+        return False
+    return True
+
+
+def _release_log_file_rotation_lock(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextmanager
+def log_file_rotation_lock(log_dir: Path, *, blocking: bool) -> Iterator[bool]:
+    """目录级轮转锁；锁文件名不随日志文件轮转，仅用于轮转与删除。"""
+    lock_path = log_dir / LOG_FILE_ROTATION_LOCK_FILENAME
+    with lock_path.open("a+b") as lock_file:
+        lock_file.seek(0)
+        fd = lock_file.fileno()
+        acquired = _acquire_log_file_rotation_lock(fd, blocking=blocking)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                _release_log_file_rotation_lock(fd)
+
+
+def _open_locked_log_file(path: str, flags: int) -> int:
+    if os.name == "nt":
+        # Windows 使用系统文件占用保护，不额外加锁。
+        return os.open(path, flags, mode=LOG_FILE_CREATE_MODE)
+
+    import fcntl
+
+    while True:
+        fd = os.open(path, flags, mode=LOG_FILE_CREATE_MODE)
+        try:
+            # 写入期间持有共享锁，防止清理任务删除仍在使用的日志。
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            # 等待锁期间文件可能已被清理，确认路径仍指向当前文件后再写入。
+            fd_stat = os.fstat(fd)
+            path_stat = os.stat(path)
+        except FileNotFoundError:
+            os.close(fd)
+            continue
+        except BaseException:
+            os.close(fd)
+            raise
+
+        if fd_stat.st_dev == path_stat.st_dev and fd_stat.st_ino == path_stat.st_ino:
+            return fd
+        os.close(fd)
+
+
 def build_process_log_path(log_path: str, process_id: int | None = None) -> str:
     path = Path(log_path)
     pid = process_id if process_id is not None else os.getpid()
     return str(path.with_name(f"{path.stem}.{pid}{path.suffix}"))
+
+
+class _RotationLockedFileSink(FileSink):
+    def __init__(self, path: str, *, compression: str | None = None):
+        self._log_dir = Path(path).parent
+        self.name = path
+        super().__init__(
+            path,
+            rotation=LOG_FILE_ROTATION_SIZE,
+            compression=compression,
+            encoding=LOG_FILE_ENCODING,
+            opener=_open_locked_log_file,
+        )
+
+    def _terminate_file(self, *, is_rotating: bool = False) -> None:
+        if not is_rotating:
+            super()._terminate_file(is_rotating=False)
+            return
+
+        # 本项目固定使用 Loguru 0.7.3，_terminate_file 覆盖旧文件关闭、重命名、压缩及同路径新文件创建；
+        # 因此必须锁住整个轮转边界，防止清理在旧文件关闭到新文件创建完成期间删除日志。
+        with log_file_rotation_lock(self._log_dir, blocking=True):
+            super()._terminate_file(is_rotating=True)
 
 
 class LogManager:
@@ -185,24 +311,21 @@ class LogManager:
 
         # 每个进程写入独立文件，避免 Windows 下多个进程同时轮转同一文件时发生占用冲突。
         logger.add(
-            process_log_path,
+            _RotationLockedFileSink(process_log_path, compression=LOG_FILE_COMPRESSION),
             level=level,
-            rotation="10 MB",
-            compression="zip",
-            encoding="utf-8",
             enqueue=True,
+            colorize=False,
             format="[{time:YYYY-MM-DD HH:mm:ss.SSS}] [{level}] [{file}:{line}]: {message}",
         )
 
         # 添加专用工具日志
         tool_log_path = build_process_log_path(str(Path(abs_log_path).parent / TOOLS_LOG_FILENAME))
         logger.add(
-            tool_log_path,
+            _RotationLockedFileSink(tool_log_path),
             filter=lambda record: "tool_call" in record["extra"] or "tool_result" in record["extra"],
             level="DEBUG",
-            rotation="10 MB",
-            encoding="utf-8",
             enqueue=True,
+            colorize=False,
             format="[{time:YYYY-MM-DD HH:mm:ss.SSS}] [{level}] {message}",
         )
 
