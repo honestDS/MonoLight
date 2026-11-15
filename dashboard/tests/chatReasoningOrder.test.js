@@ -430,3 +430,155 @@ for (const scenario of [
 
   })
 }
+
+test('关闭工具展示时仅应用分类后的普通流快照', async t => {
+  const userMessage = {
+    id: 41,
+    type: 'text',
+    role: 'user',
+    content: '回放工具任务',
+    created_at: 1700000000
+  }
+  const persistedReply = {
+    id: 44,
+    type: 'text',
+    role: 'assistant',
+    content: '正常答复',
+    reasoning_content: '最终思考',
+    created_at: 1700000004
+  }
+  const historyRows = [userMessage]
+  const harness = await createHarness(t, {
+    sessions: [createSession('A', {
+      source: 'ws',
+      show_tool_calls: false,
+      show_reasoning: true,
+      is_loading: true,
+      is_reply_running: true
+    })],
+    initialRoute: { path: '/', query: { session_id: 'A' } },
+    sessionsHistory: ({ sessionId }) => sessionId === 'A' ? historyRows : []
+  })
+  const { chat } = harness
+
+  await harness.flush()
+  const resumeRequest = harness.wsManager.sent.findLast(item => item.type === 'resume')
+  assert.ok(resumeRequest)
+  assert.equal(resumeRequest.history_message_id, userMessage.id)
+
+  let eventSequenceNo = 0
+  const streamEvent = (type, responseId, turn, fields = {}) => ({
+    type,
+    session_id: 'A',
+    work_id: 7,
+    work_sequence_no: 1,
+    request_ids: ['replay-request'],
+    response_id: responseId,
+    turn,
+    event_sequence_no: ++eventSequenceNo,
+    ...fields
+  })
+
+  const assertOnlyUserMessage = () => {
+    const nonThinkingMessages = chat.messages.value.filter(message => message.role !== 'thinking')
+    assert.equal(nonThinkingMessages.length, 1)
+    assert.equal(nonThinkingMessages[0].role, 'user')
+    assert.equal(nonThinkingMessages[0].content, userMessage.content)
+    assert.equal(String(nonThinkingMessages[0].db_id), String(userMessage.id))
+  }
+
+  await receiveWs(harness, streamEvent('agent_loop_start', 'tool-response', 1))
+  await receiveWs(harness, streamEvent('reasoning', 'tool-response', 1, {
+    content: '工具思考'
+  }))
+  assertOnlyUserMessage()
+  await receiveWs(harness, streamEvent('content', 'tool-response', 1, {
+    content: '工具轮流正文'
+  }))
+  assertOnlyUserMessage()
+  const toolTurnEnd = streamEvent('turn_end', 'tool-response', 1, {
+    message_id: 42,
+    message_type: 'tool_call',
+    content: '工具轮快照正文',
+    reasoning_content: '工具思考'
+  })
+  await receiveWs(harness, toolTurnEnd)
+  assertOnlyUserMessage()
+  await receiveWs(harness, streamEvent('tool_start', 'tool-response', 1, {
+    tool_call_id: 'replay-call',
+    name: 'file_tool',
+    arguments: { operation: 'read', path: 'fixture.txt' }
+  }))
+  await receiveWs(harness, streamEvent('tool_end', 'tool-response', 1, {
+    tool_call_id: 'replay-call',
+    name: 'file_tool',
+    result: 'fixture'
+  }))
+  assertOnlyUserMessage()
+  await receiveWs(harness, toolTurnEnd)
+  assertOnlyUserMessage()
+
+  await receiveWs(harness, streamEvent('agent_loop_start', 'answer-response', 2))
+  await receiveWs(harness, streamEvent('reasoning', 'answer-response', 2, {
+    content: '最终思考'
+  }))
+  await receiveWs(harness, streamEvent('content', 'answer-response', 2, {
+    content: '正常答复'
+  }))
+  const replyTurnEnd = streamEvent('turn_end', 'answer-response', 2, {
+    message_id: persistedReply.id,
+    message_type: 'text',
+    content: persistedReply.content,
+    reasoning_content: persistedReply.reasoning_content
+  })
+  await receiveWs(harness, replyTurnEnd)
+
+  const assertPersistedReply = expectedCreatedAt => {
+    const replies = chat.messages.value.filter(message => (
+      message.role === 'assistant' && String(message.db_id) === String(persistedReply.id)
+    ))
+    assert.equal(replies.length, 1)
+    assert.equal(replies[0].content, persistedReply.content)
+    if (expectedCreatedAt === undefined) {
+      assert.equal(Number.isFinite(Number(replies[0].created_at)), true)
+      assert.ok(Number(replies[0].created_at) > 0)
+    } else {
+      assert.equal(replies[0].created_at, expectedCreatedAt)
+    }
+    assert.equal(replies[0].reasoning_content, persistedReply.reasoning_content)
+    assert.equal(chat.messages.value.some(message => message.response_id === 'tool-response'), false)
+    return replies[0]
+  }
+  const turnEndCreatedAt = assertPersistedReply().created_at
+
+  const afterTurnEnd = JSON.stringify(chat.messages.value)
+  await receiveWs(harness, replyTurnEnd)
+  assert.equal(JSON.stringify(chat.messages.value), afterTurnEnd)
+  assert.equal(assertPersistedReply().created_at, turnEndCreatedAt)
+
+  const doneCreatedAt = persistedReply.created_at + 1
+  const doneEvent = streamEvent('done', 'answer-response', 2, {
+    message_id: persistedReply.id,
+    response: {
+      work_id: 7,
+      response_id: 'answer-response',
+      message_id: persistedReply.id,
+      choices: [{
+        message: {
+          role: 'assistant',
+          content: persistedReply.content,
+          reasoning_content: persistedReply.reasoning_content
+        },
+        created_at: doneCreatedAt,
+        finish_reason: 'stop'
+      }],
+      history: [persistedReply]
+    }
+  })
+  await receiveWs(harness, doneEvent)
+  assertPersistedReply(doneCreatedAt)
+  const afterDone = JSON.stringify(chat.messages.value)
+  await receiveWs(harness, doneEvent)
+  assert.equal(JSON.stringify(chat.messages.value), afterDone)
+  assertPersistedReply(doneCreatedAt)
+})

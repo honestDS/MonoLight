@@ -443,6 +443,7 @@ async def test_resume_keeps_unseen_saved_turns_and_terminal(
         "cancelled",
     ]
     assert work_events[0].get("message_id") == 695
+    assert [(event.get("message_id"), event.get("message_type")) for event in events if event.get("type") == "turn_end"] == [(695, "tool_call"), (718, "text")]
     history_after = await _persisted_history(concurrent_session_factory, session_id)
     assert _message_snapshot(history_after) == _message_snapshot(history_before)
 

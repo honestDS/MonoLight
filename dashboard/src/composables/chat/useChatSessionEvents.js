@@ -382,6 +382,11 @@ export function useChatSessionEvents({
       })
     }
 
+    const processStreamTurnEnd = (data, resolvedRequestId) => {
+      if (!currentSessionShowToolCalls.value && data?.message_type !== 'text') return
+      messageProcessor.processStreamTurnEnd(chatState.messages, data, resolvedRequestId)
+    }
+
     const setLoading = (value) => {
       if (!isCurrentSession()) return
       if (!value && chatState.messages.value.some(message => message.role === 'thinking')) return
@@ -420,7 +425,11 @@ export function useChatSessionEvents({
         )
       },
       onReasoning: (text, turn, responseId, requestIdParam, workId, eventId) => {
-        if (!isCurrentSession() || workLifecycleTracker.isWorkTerminal(workId)) return
+        if (
+          !isCurrentSession()
+          || workLifecycleTracker.isWorkTerminal(workId)
+          || !currentSessionShowToolCalls.value
+        ) return
         messageProcessor.processStreamReasoning(
           chatState.messages,
           text,
@@ -432,7 +441,11 @@ export function useChatSessionEvents({
         )
       },
       onContent: (text, turn, _thinkingId, finishReason, responseId, requestIdParam, workId, eventId) => {
-        if (!isCurrentSession() || workLifecycleTracker.isWorkTerminal(workId)) return
+        if (
+          !isCurrentSession()
+          || workLifecycleTracker.isWorkTerminal(workId)
+          || !currentSessionShowToolCalls.value
+        ) return
         messageProcessor.processStreamContent(
           chatState.messages,
           text,
@@ -487,7 +500,7 @@ export function useChatSessionEvents({
 
         if (eventType === 'turn_end') {
           if (!workLifecycleTracker.shouldProcessTurnEnd(data?.work_id)) return
-          messageProcessor.processStreamTurnEnd(chatState.messages, data, resolvedRequestId)
+          processStreamTurnEnd(data, resolvedRequestId)
           if (data?.work_id && data?.response_id) {
             applyLifecycleEvent(workLifecycleTracker.stopAgentLoop, data, isCurrentSession)
           }

@@ -592,6 +592,28 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_session_assistant_message_types(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        message_ids: set[int],
+    ) -> dict[int, MessageType]:
+        if not message_ids:
+            return {}
+
+        result = await db.execute(
+            select(Message.id, Message.type).where(
+                Message.uid == uid,
+                Message.session_id == session_id,
+                Message.role == MessageRole.ASSISTANT,
+                Message.work_id.is_(None),
+                Message.id.in_(message_ids),
+            )
+        )
+        return dict(result.tuples().all())
+
     async def get_user_sessions(self, db: AsyncSession, uid: str = None, is_admin: bool = False) -> list[Any]:
         last_active = func.coalesce(ChatSession.last_message_at, ChatSession.created_at).label("last_active")
         active_reply_work = select(1).where(

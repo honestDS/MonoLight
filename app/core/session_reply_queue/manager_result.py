@@ -14,7 +14,9 @@ from app.core.crud.session.session import session_crud
 from app.core.exceptions import ResourceNotFoundException
 from app.core.i18n import t
 from app.models.message import Message, MessageRole, MessageType
+from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
+    SessionReplyWorkItem,
     SessionReplyWorkStatus,
 )
 
@@ -33,6 +35,24 @@ __all__ = [
 
 
 class SessionReplyResult:
+    async def _get_turn_message_types(
+        self,
+        db: AsyncSession,
+        events: list[SessionReplyStreamEvent],
+        work: SessionReplyWorkItem,
+    ) -> dict[int, MessageType]:
+        message_ids: set[int] = set()
+        for item in events:
+            message_id = item.event.get("message_id")
+            if item.event.get("type") == "turn_end" and type(message_id) is int:
+                message_ids.add(message_id)
+        return await message_crud.get_session_assistant_message_types(
+            db,
+            uid=work.uid,
+            session_id=work.session_id,
+            message_ids=message_ids,
+        )
+
     async def get_work_status(
         self,
         db: AsyncSession,
@@ -177,6 +197,7 @@ class SessionReplyResult:
                 resume_mode=True,
                 history_message_id=history_message_id,
                 through_work_sequence_no=work.sequence_no,
+                include_turn_message_types=True,
             ):
                 response_event = dict(event)
                 event_sequence_no = response_event.get("event_sequence_no")
@@ -223,6 +244,7 @@ class SessionReplyResult:
         resume_mode: bool = False,
         history_message_id: int = 0,
         through_work_sequence_no: int | None = None,
+        include_turn_message_types: bool = False,
     ):
         from app.providers.database import AsyncSessionLocal
 
@@ -261,12 +283,19 @@ class SessionReplyResult:
                         work_id=target_work_id,
                         after_sequence_no=after_sequence_no,
                     )
+                turn_message_types: dict[int, MessageType] = {}
+                if include_turn_message_types and events:
+                    turn_message_types = await self._get_turn_message_types(db, events, work)
                 for item in events:
-                    event_work_sequence_no = item.event.get("work_sequence_no")
+                    event = item.event
+                    event_work_sequence_no = event.get("work_sequence_no")
                     if through_work_sequence_no is not None and type(event_work_sequence_no) is int and event_work_sequence_no > through_work_sequence_no:
                         return
                     after_sequence_no = item.sequence_no
-                    yield item.event
+                    message_id = event.get("message_id")
+                    if event.get("type") == "turn_end" and type(message_id) is int and message_id in turn_message_types:
+                        event = {**event, "message_type": str(turn_message_types[message_id])}
+                    yield event
 
                 if events:
                     continue
