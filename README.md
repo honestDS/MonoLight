@@ -274,4 +274,4 @@ Thanks to the open-source community for exploring and sharing.
 
 ## License
 
-This project is open source under the AGPL-3.0 license.
+MonoLight is licensed under the [MIT License](./LICENSE) starting with the version at commit `5909b97e4b4e0af055116f861f8e7519e17cd43f` (inclusive). Earlier versions retain their original licenses.

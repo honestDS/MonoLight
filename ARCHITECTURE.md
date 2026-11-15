@@ -48,7 +48,7 @@ app/
 ├── workers/                # 独立后台进程
 ├── handler.py              # HTTP 中间件、异常处理与图标路由装配
 ├── https_certificates.py   # 网络通信安全凭证与根证书加载
-├── tasks.py                # 临时文件、用户文件与日志清理任务
+├── tasks.py                # 临时文件、用户文件、数据库历史日志与磁盘日志的清理任务
 └── warning_filters.py      # 运行时告警过滤
 ```
 
@@ -58,7 +58,7 @@ app/
 app/workers/
 ├── __init__.py             # Worker 包标识
 ├── general.py              # 消息平台、通用后台任务和会话回复三个独立租约角色的合并进程入口
-├── background_task.py      # 通用后台任务角色实现与独立调试入口（默认由 general 合并运行）
+├── background_task.py      # 通用后台任务角色（含日志清理，默认由 general 合并运行，保留独立调试入口）
 ├── lease.py                # Worker 协调支持
 ├── memory.py               # 长期记忆与知识作业 Worker
 ├── message_platform.py     # 消息平台与定时任务角色实现与独立调试入口（默认由 general 合并运行）
@@ -102,7 +102,7 @@ app/api/
 app/api/v1/
 ├── auth.py                 # 认证与令牌接口
 ├── channels.py             # 模型渠道与模型条目接口
-├── chat.py                 # 对话、会话、消息与任务接口
+├── chat.py                 # 对话、会话、消息、任务与子代理看板接口
 ├── files.py                # 文件上传、下载与发送文件访问接口
 ├── knowledge_base.py       # 知识库接口
 ├── memories.py             # 长期记忆管理接口
@@ -144,12 +144,12 @@ app/core/
 ├── user/                   # 用户生命周期服务
 ├── utils/                  # 通用辅助组件与内部任务模型请求策略
 ├── constants.py            # 核心常量与工作流工具规则
-├── context.py              # 主会话历史、工具链对齐与模型可见内容处理
+├── context.py              # 主会话历史、工具调用与回执对齐、模型可见内容处理
 ├── crypto.py               # 通用敏感数据处理
 ├── event_loop.py           # 平台事件循环支持
 ├── exceptions.py           # 应用异常类型
 ├── paths.py                # 运行数据、临时文件与发布资源路径
-├── prompts.py              # 对话、审计与任务授权提示内容
+├── prompts.py              # 对话、审计、任务授权与上下文总结提示内容
 ├── provider_usage.py       # 统一用量采集、实际渠道快照与触发清理服务
 ├── security.py             # 认证与安全辅助
 ├── skills.py               # 共享技能发现、目录浏览与管理员删除
@@ -166,7 +166,7 @@ app/core/channel/
 └── model_protection.py     # 模型引用保护、整理配置同步与延迟删除
 
 app/core/log/
-├── __init__.py             # 日志服务主实现
+├── __init__.py             # 日志写入、文件轮转与清理锁协调
 ├── broadcaster.py          # 日志广播
 └── redaction.py            # 日志敏感信息脱敏
 
@@ -181,7 +181,9 @@ app/core/session/
 ├── __init__.py             # 会话领域包标识
 ├── cleanup.py              # 会话清理服务
 ├── notifier.py             # 会话事件通知
-└── source.py               # 会话来源信息
+├── source.py               # 会话来源信息
+├── subagent_board.py       # 会话子代理看板列表与详情查询
+└── tool_cancellation.py    # 停止会话回复、回复失败与启动恢复时补齐工具回执
 
 app/core/setup/
 ├── __init__.py             # 系统初始化包标识
@@ -193,6 +195,7 @@ app/core/user/
 ├── deletion.py             # 用户删除服务
 └── file_cleanup.py         # 用户文件清理
 ```
+
 
 ### 审计：`app/core/audit/`
 
@@ -367,7 +370,7 @@ app/core/memory/
 ```text
 app/core/session_reply_queue/
 ├── __init__.py             # 队列能力导出
-├── consumer.py             # 前台与独立任务分开领取、过期队列与空闲子代理维护
+├── consumer.py             # 前台与独立任务分开领取，维护回复队列与子代理历史记录
 ├── executor.py             # 回复工作执行兼容导出入口
 ├── executor_agent_work.py  # 独立 AgentWork 指令执行与自身上下文恢复
 ├── executor_audit.py       # 审计执行绑定、未知终态与文件快照校验
@@ -378,12 +381,12 @@ app/core/session_reply_queue/
 ├── executor_metadata.py    # 请求用量记录、跨工作汇总与主对话信息隔离
 ├── executor_replies.py     # 前台回复与冻结上下文的后台续接
 ├── executor_resume.py      # 交互工作 checkpoint 工具结果恢复
-├── child_checkpoint.py     # 父工作中断后的子代理工具结果与执行检查点恢复
-├── child_delivery.py       # 子代理阶段通知、结束结果向父工作交付与原回复唤起
+├── child_checkpoint.py     # 父工作中断后的子代理入队回执与执行检查点恢复
+├── child_delivery.py       # 子代理进度与结果通知的标识、交付及父回复唤起
 ├── child_lifecycle.py      # 子代理轮次完成、等待确认、晚到消息协调与阶段结束记录持久化
 ├── child_recovery.py       # 未交付子代理结果的补偿
 ├── child_result.py         # 子代理状态结果投影
-├── child_work.py           # 子代理派发、续接/纠偏、列表/定向查询、取消与看板读写协调
+├── child_work.py           # 子代理派发、入队回执、续接/纠偏、列表/定向查询、取消与看板读写协调
 ├── manager.py              # 回复工作管理组合入口
 ├── manager_common.py       # 请求标识、事件与失败处理辅助
 ├── manager_enqueue.py      # 回复工作入队
@@ -391,6 +394,7 @@ app/core/session_reply_queue/
 ├── manager_result.py       # 工作状态/结果读取、流恢复与队列顺序交付
 └── manager_submission.py   # 用户消息提交、确认判定与工作上下文继承
 ```
+
 
 ### 交互终端：`app/core/terminal/`
 
@@ -484,18 +488,18 @@ app/core/crud/
 │   ├── profile.py              # Profile 数据访问
 │   └── prompt.py               # Prompt 数据访问
 ├── session/
-│   ├── message.py              # 主会话与独立工作消息读写、历史隔离与专属消息清理
+│   ├── message.py              # 主会话与独立工作消息读写、历史隔离与专属消息清理、无引用子代理通知清理
 │   ├── session.py              # 会话设置、上下文状态与累计用量访问
-│   ├── subagent.py             # 子代理身份、轮次、工具关联、看板阶段记录、交付状态与空闲数据清理
+│   ├── subagent.py             # 子代理身份、轮次、工具关联、看板阶段记录与分页查询、历史轮次清理、交付状态与空闲数据清理
 │   ├── event.py                # 会话事件数据访问
 │   ├── external_work.py        # 外部异步操作关联数据访问
 │   ├── todo.py                 # 会话 Todo 计划数据访问
 │   ├── reply_stream_event.py   # 回复流事件数据访问
-│   ├── reply_work_item.py      # 回复工作认领、父子任务分类、队列序号与并发限制、检查点/恢复状态持久化及复核排序
+│   ├── reply_work_item.py      # 回复工作认领、父子任务分类、队列序号与并发限制、检查点/恢复状态持久化及复核排序、依赖记录保留
 │   └── terminal_watch.py       # 终端观察通知数据访问
 ├── system/
-│   ├── log.py                  # 系统日志数据访问
-│   └── setting.py              # 系统设置数据访问
+│   ├── log.py                  # 系统日志查询与保留清理数据访问
+│   └── setting.py              # 系统运行设置与日志保留策略数据访问
 ├── task/
 │   ├── background.py           # 后台任务数据访问
 │   ├── interrupted.py          # 异常中断任务数据访问
@@ -524,7 +528,7 @@ app/core/dispatchers/
 │   ├── __init__.py         # 记忆召回公开导出
 │   ├── persistence.py      # 记忆召回持久化组件
 │   ├── recall.py           # 对话记忆召回集成
-│   ├── request.py          # 前置记忆召回的独立辅助请求与用量
+│   ├── request.py          # 前置记忆召回的结构化辅助请求与独立用量
 │   └── types.py            # 记忆召回数据结构与隔离的辅助运行态
 ├── non_stream.py           # 非流式对话分发
 ├── shared.py               # 分发器共用组件
@@ -600,39 +604,39 @@ app/core/utils/
 │   ├── frozen_context.py    # 工作上下文快照捕获、恢复与共用总结接入
 │   ├── handle_parallel_tool_limit.py # 并行工具调用上限处理
 │   ├── helpers.py          # 分发共用辅助
-│   ├── inject_system_prompt.py # 系统提示构建与注入
+│   ├── inject_system_prompt.py # 结构化系统提示构建与注入
 │   ├── mark_initial_message_processed.py # 初始消息处理状态更新
-│   ├── markdown_instruction.py # 运行时文本与输出指令组装
+│   ├── markdown_instruction.py # 用户原文、工具结果和平台运行信息的模型输入组装
 │   ├── prepare_messages.py # 模型请求消息准备
 │   ├── process_markdown_response.py # Markdown 响应处理
 │   ├── process_single_tool.py # 单工具校验与执行
-│   ├── save_assistant_message.py # 助手消息持久化
+│   ├── save_assistant_message.py # 助手消息持久化与工具调用来源登记
 │   ├── save_initial_message.py # 初始消息持久化
 │   ├── save_message.py     # 通用消息持久化
 │   ├── save_tool_response.py # 工具结果持久化
-│   ├── session_todo_snapshot.py # Todo 快照持久化与模型上下文恢复
-│   ├── terminal_watch_snapshot.py # 终端观察状态快照构建
+│   ├── session_todo_snapshot.py # 结构化待办快照持久化与模型上下文恢复
+│   ├── terminal_watch_snapshot.py # 结构化终端观察快照构建
 │   ├── tool_call_correction.py # 虚拟工具反馈消息构建
 │   ├── truncate_tool_result.py # 工具结果预算截断
 │   ├── user_input_batch.py # 用户输入批次结构
 │   └── validate_profile_and_cfg.py # Profile 配置校验
 ├── context_summary/        # 会话与 AgentWork 共用的上下文总结辅助
 │   ├── __init__.py         # 上下文总结能力导出
-│   ├── boundary.py         # 总结触发边界解析
+│   ├── boundary.py         # 总结范围与补写工具回执归属
 │   ├── cleanup.py          # 总结阶段与过期数据清理
 │   ├── common.py           # 总结共用状态、统计与选择辅助
 │   ├── engine.py           # 共用摘要再次压缩与完整请求容量检查
 │   ├── history.py          # 持久化历史与摘要片段读取统计
 │   ├── merge.py            # 已完成摘要片段分组与合并
 │   ├── model_call.py       # 上下文总结模型调用
-│   ├── pipeline.py         # 有界分片总结管线
+│   ├── pipeline.py         # 按 Profile 限制并发的摘要分片生成与合并管线
 │   ├── reduction.py        # 分层归约与摘要精炼
 │   ├── selection.py        # 上下文总结模型选择
-│   ├── service.py          # 总结生命周期与持久化协调
+│   ├── service.py          # 总结生命周期、上下文版本事件与持久化协调
 │   ├── snapshot.py         # 总结快照构建与历史轮次读取
 │   ├── split.py            # 超长消息与轮次分片
 │   ├── stage.py            # 总结阶段生成与状态管理
-│   └── user_message_block.py # 被总结覆盖的用户消息块处理
+│   └── user_message_block.py # 仅供一次性迁移读取旧版用户原文包装
 ├── assistant_files.py      # 助手文件组装、生成图像落盘与模型正文隔离
 ├── auxiliary_request.py    # 辅助请求输出完整性预算校验与业务异常
 ├── background_task_result.py # 后台任务结果辅助
@@ -644,7 +648,7 @@ app/core/utils/
 ├── file_access.py          # 用户临时文件安全访问辅助
 ├── http_proxy.py           # HTTP 代理辅助
 ├── message_assembler.py    # 消息组装辅助
-├── message_parser.py       # 消息解析辅助
+├── message_parser.py       # 持久化消息解析与补写回执的原调用匹配
 ├── model_request_headers.py # 模型请求头辅助
 ├── llm_request_params.py   # 内部任务模型请求参数策略
 ├── llm_request_policy.py   # 模型请求大小限制与超限拦截策略
@@ -696,12 +700,12 @@ app/models/
 │   ├── embedding.py        # 嵌入选择凭证、版本及迁移增量
 │   ├── record.py           # 记忆主记录与修订历史
 │   └── job.py              # 长期记忆变更作业模型
-├── message.py              # 消息持久化、工作归属与内部消息结构
+├── message.py              # 消息持久化、工作归属及内部消息、摘要和状态快照结构
 ├── message_platform.py     # 消息平台模型
 ├── message_platform_outbox.py # 消息发件箱模型
 ├── agent_work.py           # 独立 AgentWork 执行契约与结果目标
 ├── subagent.py              # Subagent、SubagentWork、SubagentToolCall 与 SubagentBoardPost 持久化模型
-├── profile.py              # Profile 模型及独立的对话、总结与辅助渠道配置
+├── profile.py              # Profile 模型及对话、总结、辅助渠道与上下文压缩并发配置
 ├── prompt.py               # Prompt 模型
 ├── provider_usage.py       # 短期请求明细与长期每日汇总
 ├── scheduled_task.py       # 会话绑定、间隔/Cron 规则与执行状态
@@ -711,8 +715,8 @@ app/models/
 ├── session_reply_provider_usage.py # 仅为保持已发布迁移不动的隔离历史表定义，不参与现行建表
 ├── session_reply_work_item.py # 回复工作、执行快照与队列序号模型
 ├── session_todo.py             # 会话级 Todo 计划持久化模型
-├── system_log.py           # 系统日志模型
-├── system_setting.py       # 系统设置模型
+├── system_log.py           # 系统日志模型与保留查询索引
+├── system_setting.py       # 系统运行设置与日志保留配置
 ├── terminal_session.py     # 终端会话模型
 ├── user.py                 # 用户模型
 └── worker_lease.py         # Worker 协调模型
@@ -736,7 +740,7 @@ app/providers/
 │   └── client.py           # 图像生成客户端
 ├── llm/
 │   ├── __init__.py         # 大模型能力导出
-│   ├── client.py           # 大模型客户端
+│   ├── client.py           # 大模型客户端与流式用量合并
 │   └── token_estimation.py # Provider 请求载荷的本地 Token 估算
 ├── rerank/
 │   ├── __init__.py         # 重排能力导出
@@ -841,6 +845,7 @@ dashboard/src/components/
 ├── ChannelFormDialog.vue        # 渠道新增与编辑弹窗
 ├── ChannelModelEntry.vue        # 模型能力、协议与请求参数编辑
 ├── ChatMessageList.vue          # 消息、工具结果与请求用量展示
+├── ChatRequestMetadata.vue      # 主对话用量与上下文压缩状态展示
 ├── CollapsibleMessageText.vue    # 长消息折叠展示
 ├── ConfirmDialogContent.vue      # 确认弹窗正文
 ├── HelpTooltip.vue               # 帮助提示
@@ -851,9 +856,9 @@ dashboard/src/components/
 ├── MemoryEmbeddingDialog.vue    # 记忆嵌入配置与迁移确认
 ├── MessagePlatformFormDialog.vue # 消息平台配置弹窗
 ├── ModelTestResultDialog.vue    # 模型调用测试结果展示
-├── ProfileFormDialog.vue        # Profile 与记忆参数配置
+├── ProfileFormDialog.vue        # Profile、上下文压缩与记忆参数配置
 ├── SessionTaskCenter.vue        # 全局会话任务通知与跳转
-├── SessionTodoPanel.vue         # 会话 Todo 计划展示
+├── SessionTodoPanel.vue         # 会话任务面板，展示待办计划与子代理进度
 ├── SetupProfileGuide.vue         # 初始化后的 Profile 配置引导
 ├── StatusTag.vue                # 业务状态标签
 ├── ThinkingBlock.vue            # 模型推理内容展示
@@ -883,14 +888,16 @@ dashboard/src/composables/
 │   ├── historyPagination.js      # 历史分页参数换算
 │   ├── httpHistorySync.js        # HTTP 历史同步调度
 │   ├── httpReplyPolling.js       # HTTP 回复工作状态轮询
-│   ├── llmRequestMetadata.js     # 主对话请求状态与累计用量合并
+│   ├── llmRequestMetadata.js     # 主对话请求状态、累计用量与最近确认用量
 │   ├── reasoningTracker.js       # 流式推理文本追加与完成处理
 │   ├── replyControl.js           # 回复停止与在途提交协调
+│   ├── requestUsagePresentation.js # 按上下文版本区分当前用量与可参考的上次用量
 │   ├── sessionActivity.js        # 会话活跃时间与顺序维护
 │   ├── sessionAgentSettings.js   # 目标模式与轮次设置
 │   ├── sessionListLoading.js     # 会话列表工作状态轮询
 │   ├── sessionTasks.js           # 会话任务列表与状态协调
-│   ├── sessionTodoOverlay.js     # Todo 抽屉展开状态与偏好保存
+│   ├── sessionSubagentBoard.js   # 子代理看板列表、轮次、进展分页与轮询刷新
+│   ├── sessionTodoOverlay.js     # 会话任务面板展开状态与偏好保存
 │   ├── sessionTransportMode.js   # 会话传输方式切换与恢复
 │   ├── streamEventIdentity.js    # 流事件身份提取
 │   ├── streamResume.js           # 断线续传与轮次历史恢复
@@ -905,7 +912,7 @@ dashboard/src/composables/
 │   ├── useChatMessageFiles.js    # 消息文件下载与预览
 │   ├── useChatMessagePresentation.js # 消息渲染、工具分组与用量展示
 │   ├── useChatSession.js         # 聊天会话与回复流程装配
-│   ├── useChatSessionEvents.js   # 会话通知、总结与工作事件处理
+│   ├── useChatSessionEvents.js   # 会话通知、总结状态、用量与工作事件处理
 │   ├── useChatState.js           # 聊天响应式状态
 │   ├── useChatStreamResume.js    # 当前会话流恢复
 │   ├── useChatTransport.js       # 聊天传输方式封装
@@ -963,7 +970,7 @@ dashboard/src/utils/
 ├── setupForm.js                  # 初始化表单校验与请求组装
 ├── todoPresentation.js           # Todo 计划状态合并与摘要
 ├── toolOutputVisibility.js       # 工具调用与结果显示过滤
-└── toolResultState.js             # 工具结果状态合并与展示转换
+└── toolResultState.js             # 工具结果状态合并、取消识别与展示转换
 ```
 
 ### 前端页面
@@ -979,7 +986,7 @@ dashboard/src/views/
 ├── LoginView.vue           # 登录页面
 ├── MemoriesView.vue        # 长期记忆条目、作业与运行状态页面
 ├── MessagePlatformsView.vue # 消息平台管理页面
-├── ProfilesView.vue        # Profile、记忆参数与自动整理配置页面
+├── ProfilesView.vue        # Profile、记忆与自动整理配置，以及全局设置
 ├── PromptsView.vue         # Prompt 管理页面
 ├── RealTimeLogs.vue        # 实时日志页面
 ├── ScheduledTasksView.vue  # 间隔、日历规则与 Cron 定时任务管理及预览
@@ -1001,6 +1008,7 @@ scripts/                    # 数据库迁移和运行维护脚本
 
 已有部署的数据库一次性迁移由 `app/providers/database/bootstrap.py` 按 `migration_*.py` 文件名顺序逐个执行并在成功后登记。历史迁移不得依赖未来版本 ORM 的表结构；表重建类迁移应基于执行时数据库自描述结构或版本冻结的迁移 schema 工作，保证用户可以从较老版本直接跨多个版本升级而不被后续模型字段反向阻塞。
 
+
 ## 持久化目录：`data/` 与 `temp/`
 
 ```text
@@ -1008,7 +1016,7 @@ data/                       # SQLite、Chroma、日志与审计等持久化数�
 ├── audit/                  # 审计文件
 ├── chromadb/               # Chroma 向量数据
 ├── file_download_tokens/   # 发送文件下载凭证
-├── logs/                   # 文件日志
+├── logs/                   # 各进程的服务日志、工具日志与轮转文件（默认目录）
 ├── monolight.db            # 默认 SQLite 数据库
 ├── skills/                 # 全局共享技能包
 ├── system_secrets.json     # 系统密钥持久化文件
@@ -1050,3 +1058,4 @@ providers / transformers → external services
 - Web 进程与 Worker 进程通过核心服务及持久化资源共享应用数据，不直接形成前端依赖。
 - 数据库、向量存储、日志、审计文件和临时文件构成运行期资源边界。
 - 非交互 Shell、图像生成和终端观察由后台任务执行，结果通过回复队列交付。
+- `general` 的通用后台任务角色在运行期间执行系统设置中的日志保留策略。数据库历史日志按保留天数和记录数上限分批清理，为实时推送保留近期记录；服务与工具日志文件按保留天数清理，范围包括已关闭的进程日志和轮转文件。文件清理与轮转共享目录锁，仍在使用的文件继续保留。
