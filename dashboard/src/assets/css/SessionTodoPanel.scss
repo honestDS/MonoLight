@@ -609,6 +609,11 @@
     flex: 1 1 180px;
     @include wrap-content;
   }
+
+  :deep(.el-button.is-link) {
+    --el-button-hover-link-text-color: var(--color-primary);
+    padding: 0 8px !important;
+  }
 }
 
 .subagent-post-list {
