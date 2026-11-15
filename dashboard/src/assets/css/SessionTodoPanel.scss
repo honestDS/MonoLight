@@ -589,28 +589,10 @@
   min-width: 0;
 }
 
-.subagent-detail-status {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  margin-bottom: 12px;
-  color: var(--el-text-color-primary);
-  font-size: 13px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-
-  :deep(.el-icon) {
-    flex: 0 0 auto;
-    margin-right: 5px;
-    color: var(--el-text-color-regular);
-    animation: none !important;
-  }
-}
-
 .subagent-detail-error {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   min-width: 0;
   gap: 8px 12px;

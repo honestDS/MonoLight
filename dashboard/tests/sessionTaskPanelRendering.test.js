@@ -66,7 +66,10 @@ const panelCode = compiledPanel.content
   )
   .replace(/export\s+default\s+/, 'const SessionTodoPanel = ')
 
-const createPanelComponent = (createBoard = createSessionSubagentBoard) => vm.runInNewContext(
+const createPanelComponent = (
+  createBoard = createSessionSubagentBoard,
+  documentHidden = true
+) => vm.runInNewContext(
   `${panelCode}\nSessionTodoPanel`,
   {
     Vue,
@@ -77,7 +80,7 @@ const createPanelComponent = (createBoard = createSessionSubagentBoard) => vm.ru
       }
     },
     document: {
-      hidden: true,
+      hidden: documentHidden,
       addEventListener() {},
       removeEventListener() {}
     }
@@ -485,7 +488,7 @@ test('returns to the subagent list when the detail title is clicked', async t =>
   assert.equal(harness.warnings.length, 0, harness.warnings.join('\n'))
 })
 
-test('renders detail and list subagent statuses consistently', async t => {
+test('keeps subagent statuses in the list rather than detail', async t => {
   let board
   const Panel = createPanelComponent((...args) => {
     board = createSessionSubagentBoard(...args)
@@ -494,53 +497,122 @@ test('renders detail and list subagent statuses consistently', async t => {
   const harness = await mountScenario('detail-session', Panel)
   t.after(() => harness.app.unmount())
 
-  board.selectedId.value = 'worker'
-  board.detail.value = {
-    work_id: 1,
-    name: 'Worker',
-    status: 'running',
-    posts: [],
-    result_text: '',
-    reason: '',
-    ended_without_reply: false
+  for (const [status, statusKey] of [
+    ['running', 'chat.subagent_status_running'],
+    ['failed', 'chat.subagent_status_failed'],
+    ['succeeded', 'chat.subagent_status_succeeded']
+  ]) {
+    board.selectedId.value = 'worker'
+    board.detail.value = {
+      work_id: 1,
+      name: 'Worker',
+      status,
+      posts: [],
+      result_text: '',
+      reason: '',
+      ended_without_reply: false
+    }
+    await Vue.nextTick()
+    assert.equal(harness.root.querySelector('.subagent-detail-status'), null)
+    assert.ok(harness.root.querySelector('.subagent-detail-collapse'))
+
+    board.recent.value = [{
+      subagent_id: 'worker',
+      name: 'Worker',
+      status,
+      work_id: 1,
+      completed: true,
+      updated_at: null,
+      stage: '',
+      preview: ''
+    }]
+    board.clearSelection()
+    await Vue.nextTick()
+    assert.equal(
+      harness.root.querySelector('.subagent-status').querySelector('span').textContent,
+      statusKey
+    )
   }
-  await Vue.nextTick()
-  assert.equal(
-    harness.root.querySelector('.subagent-detail-status').querySelector('span').textContent,
-    'chat.subagent_status_running'
-  )
 
-  board.detail.value = { ...board.detail.value, status: 'failed' }
-  await Vue.nextTick()
-  assert.equal(
-    harness.root.querySelector('.subagent-detail-status').querySelector('span').textContent,
-    'chat.subagent_status_failed'
-  )
-
-  board.detail.value = { ...board.detail.value, status: 'succeeded' }
-  await Vue.nextTick()
-  assert.equal(harness.root.querySelector('.subagent-detail-status'), null)
-
-  board.detail.value = { ...board.detail.value, status: 'succeeded' }
-  await Vue.nextTick()
-  assert.equal(harness.root.querySelector('.subagent-detail-status'), null)
-
-  board.recent.value = [{
-    subagent_id: 'worker',
-    name: 'Worker',
-    status: 'succeeded',
-    work_id: 1,
-    completed: true,
-    updated_at: null,
-    stage: '',
-    preview: ''
-  }]
-  board.clearSelection()
-  await Vue.nextTick()
-  assert.equal(
-    harness.root.querySelector('.subagent-status').querySelector('span').textContent,
-    'chat.subagent_status_succeeded'
-  )
   assert.equal(harness.errors.length, 0, JSON.stringify(harness.errors))
   assert.equal(harness.warnings.length, 0, harness.warnings.join('\n'))
+})
+
+test('keeps an empty subagent list visible while polling is pending', async t => {
+  let resolveSessionSubagents
+  let scheduledCallback = null
+
+  const Panel = createPanelComponent(() => createSessionSubagentBoard({
+    api: {
+      sessionSubagents: () => new Promise(resolve => {
+        resolveSessionSubagents = resolve
+      })
+    },
+    schedule: callback => {
+      scheduledCallback = callback
+      return callback
+    },
+    cancel: callback => {
+      if (scheduledCallback === callback) scheduledCallback = null
+    }
+  }), false)
+
+  const respondWith = (active = []) => resolveSessionSubagents({
+    data: {
+      data: {
+        profile_id: 'profile',
+        active_page: 1,
+        active_page_size: 10,
+        active_total: active.length,
+        active,
+        recent: [],
+        has_more_recent: false,
+        selected: null
+      }
+    }
+  })
+
+  const harness = await mountScenario('polling-session', Panel)
+  t.after(() => harness.app.unmount())
+
+  const trigger = taskButtons(harness.root)[0]
+  click(trigger)
+  await Vue.nextTick()
+  assert.equal(typeof resolveSessionSubagents, 'function')
+
+  respondWith()
+  await Promise.resolve()
+  await Vue.nextTick()
+
+  const groups = harness.root.querySelector('.subagent-groups')
+  const empty = harness.root.querySelector('.subagent-empty')
+  assert.ok(groups)
+  assert.equal(empty.textContent, 'chat.subagent_empty_active')
+
+  const poll = scheduledCallback
+  assert.equal(typeof poll, 'function')
+  const pollPromise = poll()
+  await Vue.nextTick()
+  assert.strictEqual(
+    harness.root.querySelector('.subagent-groups'),
+    groups,
+    'subagent list should remain the same node while polling'
+  )
+  assert.equal(harness.root.querySelector('.subagent-empty').textContent, 'chat.subagent_empty_active')
+  assert.equal(harness.root.querySelector('.subagent-loading'), null)
+
+  respondWith([{
+    name: 'Worker',
+    subagent_id: 'worker',
+    status: 'running',
+    work_id: 1,
+    updated_at: null,
+    preview: '',
+    stage: 'Working',
+    completed: false
+  }])
+  await pollPromise
+  await Vue.nextTick()
+  assert.strictEqual(harness.root.querySelector('.subagent-groups'), groups)
+  assert.equal(harness.root.querySelector('.subagent-card-name').textContent, 'Worker')
 })

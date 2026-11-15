@@ -1,8 +1,9 @@
+from dataclasses import dataclass
 from typing import (
     Any,
 )
 
-from sqlalchemy import case, exists, or_, update
+from sqlalchemy import JSON, String, case, cast, exists, literal, or_, type_coerce, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import (
@@ -23,9 +24,22 @@ from app.models.message import (
     MessageType,
 )
 from app.models.session import ChatSession
-from app.models.session_reply_work_item import SESSION_REPLY_ACTIVE_STATUSES, SessionReplyWorkItem, SessionReplyWorkType
+from app.models.session_reply_work_item import (
+    SESSION_REPLY_ACTIVE_STATUSES,
+    SessionReplyWorkCheckpoint,
+    SessionReplyWorkItem,
+    SessionReplyWorkType,
+)
+from app.models.subagent import Subagent, SubagentWork
 from app.models.user import User
 from app.providers.database import ensure_sqlite_outer_transaction
+
+
+@dataclass(frozen=True)
+class SubagentNotificationCleanupResult:
+    deleted: int = 0
+    scanned: int = 0
+    after_id: int = 0
 
 
 class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
@@ -568,28 +582,117 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         result = await db.execute(stmt)
         return result.scalars().first()
 
-    async def remove_by_work_ids(
+    async def cleanup_orphan_subagent_notifications(
         self,
         db: AsyncSession,
         *,
-        work_ids: list[int],
-        uid: str,
-        session_id: str,
-        profile_id: int,
-    ) -> int:
-        if not work_ids:
-            return 0
-        result = await db.execute(
-            delete(Message)
-            .where(
-                Message.work_id.in_(work_ids),
-                Message.uid == uid,
-                Message.session_id == session_id,
-                Message.profile_id == profile_id,
-            )
-            .execution_options(synchronize_session=False)
+        limit: int,
+        after_id: int = 0,
+    ) -> SubagentNotificationCleanupResult:
+        if limit <= 0:
+            return SubagentNotificationCleanupResult()
+
+        max_id_result = await db.execute(select(func.max(Message.id)))
+        max_message_id = max_id_result.scalar_one_or_none()
+        if max_message_id is None:
+            return SubagentNotificationCleanupResult()
+
+        page_result = await db.execute(select(Message.id).where(Message.id > after_id, Message.id < max_message_id).order_by(Message.id.asc()).limit(limit))
+        page_ids = list(page_result.scalars().all())
+        scanned = len(page_ids)
+        if not page_ids:
+            return SubagentNotificationCleanupResult()
+
+        next_after_id = page_ids[-1] if scanned == limit else 0
+
+        payload = type_coerce(
+            case(
+                (func.json_valid(Message.content) == 1, Message.content),
+                else_="{}",
+            ),
+            JSON,
         )
-        return result.rowcount or 0
+        notification_type = payload["type"].as_string()
+        notification_subagent_id = case(
+            (notification_type == "external_work_resume", payload["results"][0]["subagent_id"].as_string()),
+            else_=payload["subagent_id"].as_string(),
+        )
+        notification_work_id = case(
+            (notification_type == "external_work_resume", payload["results"][0]["work_id"].as_integer()),
+            else_=payload["work_id"].as_integer(),
+        )
+
+        linked_subagent_work = (
+            select(1)
+            .select_from(SubagentWork)
+            .join(Subagent, Subagent.id == SubagentWork.subagent_id)
+            .where(
+                SubagentWork.child_work_id == notification_work_id,
+                SubagentWork.subagent_id == notification_subagent_id,
+                Subagent.uid == Message.uid,
+                Subagent.session_id == Message.session_id,
+                Subagent.profile_id == Message.profile_id,
+            )
+            .correlate(Message)
+        )
+
+        dialect_name = db.get_bind().dialect.name
+        if dialect_name == "sqlite":
+            pending_resume_message_ids = (
+                func.json_each(
+                    SessionReplyWorkCheckpoint.checkpoint,
+                    literal("$.pending_resume_message_ids"),
+                )
+                .table_valued("value")
+                .alias("pending_resume_message_id")
+            )
+            pending_id_matches = exists(select(1).select_from(pending_resume_message_ids).where(pending_resume_message_ids.c.value == Message.id).correlate(Message, SessionReplyWorkCheckpoint))
+        else:
+            pending_id_matches = (
+                func.json_contains(
+                    SessionReplyWorkCheckpoint.checkpoint,
+                    cast(Message.id, String),
+                    literal("$.pending_resume_message_ids"),
+                )
+                == 1
+            )
+        pending_reference = (
+            select(1)
+            .select_from(SessionReplyWorkCheckpoint)
+            .join(SessionReplyWorkItem, SessionReplyWorkItem.id == SessionReplyWorkCheckpoint.work_id)
+            .where(
+                SessionReplyWorkItem.uid == Message.uid,
+                SessionReplyWorkItem.session_id == Message.session_id,
+                SessionReplyWorkItem.profile_id == Message.profile_id,
+                pending_id_matches,
+            )
+            .correlate(Message)
+        )
+
+        candidate_conditions = [
+            Message.is_processed.is_(True),
+            Message.role == MessageRole.USER,
+            Message.type == MessageType.SUBAGENT_RESULT,
+            payload["source"].as_string() == "subagent",
+            notification_type.in_(
+                (
+                    "subagent_board_update",
+                    "subagent_result_ready",
+                    "external_work_resume",
+                )
+            ),
+            notification_subagent_id.is_not(None),
+            func.trim(notification_subagent_id) != "",
+            notification_work_id.is_not(None),
+            notification_work_id > 0,
+            # 保留全库最大 ID，避免 SQLite 删除尾部行后复用行号。
+            Message.id < max_message_id,
+            ~exists(linked_subagent_work),
+            ~exists(pending_reference),
+        ]
+
+        result = await db.execute(delete(Message).where(Message.id.in_(page_ids), *candidate_conditions).execution_options(synchronize_session=False))
+        return SubagentNotificationCleanupResult(deleted=result.rowcount or 0, scanned=scanned, after_id=next_after_id)
 
     async def remove_session(
         self,

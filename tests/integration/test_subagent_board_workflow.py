@@ -21,13 +21,15 @@ from app.core.constants import (
     ERR_SUBAGENT_RESULT_NOT_READY,
     SEND_FILE_TO_USER_TOOL_NAME,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
+    SUBAGENT_BOARD_READY_EVENT_KIND,
+    SUBAGENT_WORK_READY_EVENT_KIND,
 )
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.todo import session_todo_crud
 from app.core.i18n import t
 from app.core.paths import get_user_temp_dir
 from app.core.prompts import SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT
-from app.core.session_reply_queue.child_delivery import deliver_child_work_results, resume_child_work_for_parent
+from app.core.session_reply_queue.child_delivery import build_subagent_notification_key, deliver_child_work_results, resume_child_work_for_parent
 from app.core.session_reply_queue.child_recovery import reconcile_child_work
 from app.core.session_reply_queue.consumer import SessionReplyConsumer
 from app.core.session_reply_queue.manager import session_reply_queue_manager
@@ -1571,10 +1573,16 @@ async def test_send_message_board_review_query_result_does_not_rewake_parent(
                 stage_marker_payload = json.loads(stage_markers[0][2] or "{}")
                 assert stage_marker_payload["type"] == "subagent_board_update"
                 assert stage_marker_payload["work_id"] == child["work_id"]
+                stage_ready_key = build_subagent_notification_key(
+                    parent,
+                    SUBAGENT_BOARD_READY_EVENT_KIND,
+                    f"{child['subagent_id']}:{stage_board[0][0]}",
+                )
+                result_ready_key = build_subagent_notification_key(parent, SUBAGENT_WORK_READY_EVENT_KIND, child["work_id"])
                 stage_ready_events = [event for event in stage_events if event[2].get("type") == "work_ready" and event[2].get("work_id") == new_work_id]
                 assert len(stage_ready_events) == 1
-                assert stage_ready_events[0][1].startswith(f"subagent-board-ready:{new_work_id}:")
-                assert not any(event[1].startswith(f"subagent-work-ready:{new_work_id}:{child['work_id']}") for event in stage_events)
+                assert stage_ready_events[0][1] == stage_ready_key
+                assert not any(event[1] == result_ready_key for event in stage_events)
 
                 todo_write = await session_todo_crud.write(
                     db,
@@ -1734,8 +1742,8 @@ async def test_send_message_board_review_query_result_does_not_rewake_parent(
                 assert markers == stage_markers
                 parent_ready_events = [event for event in events if event[2].get("type") == "work_ready" and event[2].get("work_id") == new_work_id]
                 assert len(parent_ready_events) == 1
-                assert parent_ready_events[0][1].startswith(f"subagent-board-ready:{new_work_id}:")
-                assert not any(event[1].startswith(f"subagent-work-ready:{new_work_id}:{child['work_id']}") for event in events)
+                assert parent_ready_events[0][1] == stage_ready_key
+                assert not any(event[1] == result_ready_key for event in events)
                 old_done_events = [event[2] for event in events if event[2].get("type") == "done" and event[2].get("work_id") == case.origin_work_id]
                 assert len(old_done_events) == 1
                 assert old_done_events[0]["skip_reply"] is True

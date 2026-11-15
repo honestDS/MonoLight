@@ -401,7 +401,7 @@ async def test_checkpoint_lifecycle_respects_terminal_retention_and_cleanup(chec
             assert await session_reply_work_item_crud.get_checkpoint(db, work_id) == expected_checkpoint
 
     async with checkpoint_database() as db:
-        cleanup_result = await session_reply_work_item_crud.cleanup_terminal_items(db)
+        cleanup_result = await session_reply_work_item_crud.cleanup_terminal_items(db, retention_limit=1)
         assert cleanup_result.work_items == len(terminal_ids)
         assert cleanup_result.stream_events == 0
         assert cleanup_result.sequences == 0
@@ -1065,7 +1065,7 @@ async def test_cleanup_keeps_shared_checkpoint_messages_until_all_work_reference
 
     first_batch_size = 2
     async with checkpoint_database() as db:
-        first_result = await session_reply_work_item_crud.cleanup_terminal_items(db, batch_size=first_batch_size)
+        first_result = await session_reply_work_item_crud.cleanup_terminal_items(db, retention_limit=0, batch_size=first_batch_size)
         assert first_result.total <= first_batch_size
         assert first_result.work_items == 1
         assert first_result.checkpoint_messages == 1
@@ -1094,7 +1094,7 @@ async def test_cleanup_keeps_shared_checkpoint_messages_until_all_work_reference
         work_b = await session_reply_work_item_crud.get(db, work_b_id)
         assert work_b is not None
         assert await session_reply_work_item_crud.get_frozen_context(db, work_b) == frozen_context_b
-        second_result = await session_reply_work_item_crud.cleanup_terminal_items(db, batch_size=second_batch_size)
+        second_result = await session_reply_work_item_crud.cleanup_terminal_items(db, retention_limit=0, batch_size=second_batch_size)
         assert second_result.total <= second_batch_size
         assert second_result.checkpoint_messages == 0
         body_result = await db.execute(select(SessionReplyCheckpointMessage).where(SessionReplyCheckpointMessage.session_id == SESSION_ID).order_by(SessionReplyCheckpointMessage.id))
@@ -1116,7 +1116,7 @@ async def test_cleanup_keeps_shared_checkpoint_messages_until_all_work_reference
 
     final_batch_size = 3
     async with checkpoint_database() as db:
-        final_result = await session_reply_work_item_crud.cleanup_terminal_items(db, batch_size=final_batch_size)
+        final_result = await session_reply_work_item_crud.cleanup_terminal_items(db, retention_limit=0, batch_size=final_batch_size)
         assert final_result.total <= final_batch_size
         assert final_result.work_items == 1
         assert final_result.checkpoint_messages == 2

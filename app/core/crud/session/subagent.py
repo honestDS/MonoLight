@@ -1,16 +1,22 @@
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import and_, case, delete, exists, func, or_, update
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
 from sqlmodel import select
 
-from app.core.constants import SESSION_REPLY_CLEANUP_BATCH_SIZE, SUBAGENT_BOARD_POST_DISPLAY_CHARS, SUBAGENT_BOARD_PREVIEW_CHARS, SUBAGENT_IDLE_RETENTION_HOURS
-from app.core.crud.session.message import message_crud
-from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.constants import (
+    SUBAGENT_BOARD_POST_DISPLAY_CHARS,
+    SUBAGENT_BOARD_PREVIEW_CHARS,
+    SUBAGENT_CLEANUP_BATCH_SIZE,
+    SUBAGENT_RETENTION_LIMIT,
+    SUBAGENT_ROUND_RETENTION_LIMIT,
+)
+from app.core.crud.session.reply_work_item import reply_work_is_protected, session_reply_work_item_crud
 from app.core.utils.time import get_local_time
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session_reply_work_item import (
@@ -34,24 +40,97 @@ def _board_round_completed():
     )
 
 
+def _protected_subagent_calls(*, dialect_name: str, child_work_id: Any | None = None) -> Select:
+    parent_work = aliased(SessionReplyWorkItem)
+    statement = (
+        select(1)
+        .select_from(SubagentToolCall)
+        .join(parent_work, parent_work.id == SubagentToolCall.parent_work_id)
+        .where(
+            SubagentToolCall.subagent_id == Subagent.id,
+            parent_work.uid == Subagent.uid,
+            parent_work.session_id == Subagent.session_id,
+            parent_work.profile_id == Subagent.profile_id,
+            or_(
+                SubagentToolCall.delivered.is_(False),
+                reply_work_is_protected(parent_work, dialect_name=dialect_name),
+            ),
+        )
+    )
+    if child_work_id is not None:
+        statement = statement.where(SubagentToolCall.child_work_id == child_work_id)
+    return statement.correlate(Subagent, SubagentWork)
+
+
+def _subagent_round_work_condition(work: Any, child_work_id: Any) -> Any:
+    return or_(
+        work.id == child_work_id,
+        work.execution_state["child_work_id"].as_integer() == child_work_id,
+    )
+
+
 class CRUDSubagent:
+    async def _remove_work_data(
+        self,
+        db: AsyncSession,
+        *,
+        work_conditions: list[Any],
+        uid: str,
+        session_id: str,
+        profile_id: int,
+    ) -> None:
+        work_ids = select(SessionReplyWorkItem.id).where(*work_conditions)
+        await db.execute(
+            delete(Message)
+            .where(
+                Message.work_id.in_(work_ids),
+                Message.uid == uid,
+                Message.session_id == session_id,
+                Message.profile_id == profile_id,
+            )
+            .execution_options(synchronize_session=False)
+        )
+
+        checkpoint_message_ids = select(SessionReplyCheckpointMessageReference.message_id).where(SessionReplyCheckpointMessageReference.work_id.in_(work_ids)).distinct()
+        other_work_reference = (
+            select(1)
+            .select_from(SessionReplyCheckpointMessageReference)
+            .where(
+                SessionReplyCheckpointMessageReference.message_id == SessionReplyCheckpointMessage.id,
+                SessionReplyCheckpointMessageReference.work_id.not_in(work_ids),
+            )
+            .correlate(SessionReplyCheckpointMessage)
+        )
+        await db.execute(
+            delete(SessionReplyCheckpointMessage)
+            .where(
+                SessionReplyCheckpointMessage.id.in_(checkpoint_message_ids),
+                ~exists(other_work_reference),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await db.execute(delete(SessionReplyWorkItem).where(*work_conditions).execution_options(synchronize_session=False))
+
     async def cleanup_idle(
         self,
         db: AsyncSession,
         *,
-        retention_hours: int = SUBAGENT_IDLE_RETENTION_HOURS,
-        batch_size: int = SESSION_REPLY_CLEANUP_BATCH_SIZE,
+        retention_limit: int = SUBAGENT_RETENTION_LIMIT,
+        batch_size: int = SUBAGENT_CLEANUP_BATCH_SIZE,
     ) -> int:
         if batch_size <= 0:
             return 0
 
-        cutoff = get_local_time() - timedelta(hours=retention_hours)
-        active_work = (
+        dialect_name = db.get_bind().dialect.name
+        protected_work = (
             select(1)
             .select_from(SessionReplyWorkItem)
             .where(
                 SessionReplyWorkItem.subagent_id == Subagent.id,
-                SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
+                SessionReplyWorkItem.uid == Subagent.uid,
+                SessionReplyWorkItem.session_id == Subagent.session_id,
+                SessionReplyWorkItem.profile_id == Subagent.profile_id,
+                reply_work_is_protected(SessionReplyWorkItem, dialect_name=dialect_name),
             )
             .correlate(Subagent)
         )
@@ -64,86 +143,244 @@ class CRUDSubagent:
             )
             .correlate(Subagent)
         )
-        undelivered_call = (
-            select(1)
-            .select_from(SubagentToolCall)
-            .where(
-                SubagentToolCall.subagent_id == Subagent.id,
-                SubagentToolCall.delivered.is_(False),
-            )
-            .correlate(Subagent)
-        )
+        protected_subagent_calls = _protected_subagent_calls(dialect_name=dialect_name)
         eligible_conditions = (
-            Subagent.last_called_at < cutoff,
             Subagent.active_child_work_id.is_(None),
-            ~exists(active_work),
+            ~exists(protected_work),
             ~exists(unfinished_round),
-            ~exists(undelivered_call),
+            ~exists(protected_subagent_calls),
         )
 
         deleted_count = 0
         try:
-            result = await db.execute(select(Subagent.id).where(*eligible_conditions).order_by(Subagent.last_called_at.asc(), Subagent.id.asc()).limit(batch_size))
-            candidate_ids = [subagent_id for subagent_id in result.scalars().all() if subagent_id is not None]
+            count_result = await db.execute(select(func.count(Subagent.id)).select_from(Subagent).where(*eligible_conditions))
+            eligible_count = int(count_result.scalar_one())
+            excess_count = max(0, eligible_count - max(retention_limit, 0))
+            candidate_limit = min(batch_size, excess_count)
+            if candidate_limit <= 0:
+                await db.commit()
+                return 0
 
-            for candidate_id in candidate_ids:
-                update_result = await db.execute(update(Subagent).where(Subagent.id == candidate_id, *eligible_conditions).values(last_called_at=Subagent.last_called_at).execution_options(synchronize_session=False))
+            candidate_result = await db.execute(
+                select(
+                    Subagent.id,
+                    Subagent.uid,
+                    Subagent.session_id,
+                    Subagent.profile_id,
+                    Subagent.last_called_at,
+                )
+                .where(*eligible_conditions)
+                .order_by(Subagent.last_called_at.asc(), Subagent.id.asc())
+                .limit(candidate_limit)
+            )
+            candidate_rows = candidate_result.all()
+
+            for candidate_id, uid, session_id, profile_id, last_called_at in candidate_rows:
+                update_result = await db.execute(
+                    update(Subagent)
+                    .where(
+                        Subagent.id == candidate_id,
+                        Subagent.uid == uid,
+                        Subagent.session_id == session_id,
+                        Subagent.profile_id == profile_id,
+                        Subagent.last_called_at == last_called_at,
+                        *eligible_conditions,
+                    )
+                    .values(last_called_at=Subagent.last_called_at)
+                    .execution_options(synchronize_session=False)
+                )
                 if update_result.rowcount != 1:
                     continue
 
-                subagent_result = await db.execute(select(Subagent.uid, Subagent.session_id, Subagent.profile_id, Subagent.id).where(Subagent.id == candidate_id))
-                subagent = subagent_result.one_or_none()
-                if subagent is None:
-                    continue
-
-                work_result = await db.execute(
-                    select(SessionReplyWorkItem.id).where(
-                        SessionReplyWorkItem.subagent_id == subagent.id,
-                        SessionReplyWorkItem.uid == subagent.uid,
-                        SessionReplyWorkItem.session_id == subagent.session_id,
-                        SessionReplyWorkItem.profile_id == subagent.profile_id,
-                    )
+                work_conditions = [
+                    SessionReplyWorkItem.subagent_id == candidate_id,
+                    SessionReplyWorkItem.uid == uid,
+                    SessionReplyWorkItem.session_id == session_id,
+                    SessionReplyWorkItem.profile_id == profile_id,
+                ]
+                await self._remove_work_data(
+                    db,
+                    work_conditions=work_conditions,
+                    uid=uid,
+                    session_id=session_id,
+                    profile_id=profile_id,
                 )
-                work_ids = [work_id for work_id in work_result.scalars().all() if work_id is not None]
-
-                checkpoint_message_ids: list[int] = []
-                if work_ids:
-                    reference_result = await db.execute(select(SessionReplyCheckpointMessageReference.message_id).where(SessionReplyCheckpointMessageReference.work_id.in_(work_ids)).distinct().order_by(SessionReplyCheckpointMessageReference.message_id.asc()))
-                    checkpoint_message_ids = list(reference_result.scalars().all())
-
-                    await message_crud.remove_by_work_ids(
-                        db,
-                        work_ids=work_ids,
-                        uid=subagent.uid,
-                        session_id=subagent.session_id,
-                        profile_id=subagent.profile_id,
+                delete_result = await db.execute(
+                    delete(Subagent)
+                    .where(
+                        Subagent.id == candidate_id,
+                        Subagent.uid == uid,
+                        Subagent.session_id == session_id,
+                        Subagent.profile_id == profile_id,
                     )
-                    await db.execute(
-                        delete(SessionReplyWorkItem)
-                        .where(
-                            SessionReplyWorkItem.id.in_(work_ids),
-                            SessionReplyWorkItem.subagent_id == subagent.id,
-                            SessionReplyWorkItem.uid == subagent.uid,
-                            SessionReplyWorkItem.session_id == subagent.session_id,
-                            SessionReplyWorkItem.profile_id == subagent.profile_id,
-                        )
-                        .execution_options(synchronize_session=False)
-                    )
-
-                delete_result = await db.execute(delete(Subagent).where(Subagent.id == subagent.id).execution_options(synchronize_session=False))
-
-                if checkpoint_message_ids:
-                    await db.execute(
-                        delete(SessionReplyCheckpointMessage)
-                        .where(
-                            SessionReplyCheckpointMessage.id.in_(checkpoint_message_ids),
-                            ~exists(select(1).select_from(SessionReplyCheckpointMessageReference).where(SessionReplyCheckpointMessageReference.message_id == SessionReplyCheckpointMessage.id).correlate(SessionReplyCheckpointMessage)),
-                        )
-                        .execution_options(synchronize_session=False)
-                    )
+                    .execution_options(synchronize_session=False)
+                )
 
                 if delete_result.rowcount == 1:
                     deleted_count += 1
+
+            await db.commit()
+            return deleted_count
+        except BaseException:
+            await db.rollback()
+            raise
+
+    async def cleanup_old_rounds(
+        self,
+        db: AsyncSession,
+        *,
+        retention_limit: int = SUBAGENT_ROUND_RETENTION_LIMIT,
+        batch_size: int = SUBAGENT_CLEANUP_BATCH_SIZE,
+    ) -> int:
+        if batch_size <= 0:
+            return 0
+
+        dialect_name = db.get_bind().dialect.name
+        round_work = aliased(SessionReplyWorkItem)
+        round_work_scope = (
+            round_work.subagent_id == SubagentWork.subagent_id,
+            round_work.uid == Subagent.uid,
+            round_work.session_id == Subagent.session_id,
+            round_work.profile_id == Subagent.profile_id,
+        )
+        round_work_ids = (
+            select(round_work.id)
+            .where(
+                *round_work_scope,
+                _subagent_round_work_condition(round_work, SubagentWork.child_work_id),
+            )
+            .correlate(Subagent, SubagentWork)
+        )
+        protected_round_work = (
+            select(1)
+            .select_from(round_work)
+            .where(
+                *round_work_scope,
+                _subagent_round_work_condition(round_work, SubagentWork.child_work_id),
+                reply_work_is_protected(round_work, dialect_name=dialect_name),
+            )
+            .correlate(Subagent, SubagentWork)
+        )
+        other_round_work = aliased(SessionReplyWorkItem)
+        protected_source_message = (
+            select(1)
+            .select_from(Message)
+            .join(
+                SessionReplyCheckpointMessage,
+                and_(
+                    SessionReplyCheckpointMessage.payload["id"].as_integer() == Message.id,
+                    SessionReplyCheckpointMessage.uid == Subagent.uid,
+                    SessionReplyCheckpointMessage.session_id == Subagent.session_id,
+                ),
+            )
+            .join(
+                SessionReplyCheckpointMessageReference,
+                SessionReplyCheckpointMessageReference.message_id == SessionReplyCheckpointMessage.id,
+            )
+            .join(other_round_work, other_round_work.id == SessionReplyCheckpointMessageReference.work_id)
+            .where(
+                Message.work_id.in_(round_work_ids),
+                Message.uid == Subagent.uid,
+                Message.session_id == Subagent.session_id,
+                Message.profile_id == Subagent.profile_id,
+                Message.role == MessageRole.ASSISTANT,
+                # 旧 TOOL_CALL 源行在后续轮次恢复工具结果时仍可能被要求。
+                Message.type == MessageType.TOOL_CALL,
+                other_round_work.subagent_id == SubagentWork.subagent_id,
+                other_round_work.uid == Subagent.uid,
+                other_round_work.session_id == Subagent.session_id,
+                other_round_work.profile_id == Subagent.profile_id,
+                SessionReplyCheckpointMessageReference.work_id.not_in(round_work_ids),
+            )
+            .correlate(Subagent, SubagentWork)
+        )
+        protected_subagent_calls = _protected_subagent_calls(
+            dialect_name=dialect_name,
+            child_work_id=SubagentWork.child_work_id,
+        )
+        eligible_rounds = (
+            select(
+                SubagentWork.child_work_id,
+                SubagentWork.subagent_id,
+                Subagent.uid,
+                Subagent.session_id,
+                Subagent.profile_id,
+                Subagent.last_called_at,
+            )
+            .select_from(SubagentWork)
+            .join(Subagent, Subagent.id == SubagentWork.subagent_id)
+            .where(
+                or_(
+                    Subagent.latest_child_work_id.is_(None),
+                    Subagent.latest_child_work_id != SubagentWork.child_work_id,
+                ),
+                or_(
+                    Subagent.active_child_work_id.is_(None),
+                    Subagent.active_child_work_id != SubagentWork.child_work_id,
+                ),
+                SubagentWork.result.is_not(None),
+                SubagentWork.waiting_confirmation.is_(False),
+                ~exists(protected_subagent_calls),
+                ~exists(protected_round_work),
+                ~exists(protected_source_message),
+            )
+        )
+
+        deleted_count = 0
+        try:
+            count_result = await db.execute(select(func.count()).select_from(eligible_rounds.subquery()))
+            eligible_count = int(count_result.scalar_one())
+            excess_count = max(0, eligible_count - max(retention_limit, 0))
+            candidate_limit = min(batch_size, excess_count)
+            if candidate_limit <= 0:
+                await db.commit()
+                return 0
+
+            candidate_result = await db.execute(eligible_rounds.order_by(SubagentWork.created_at.asc(), SubagentWork.child_work_id.asc()).limit(candidate_limit))
+            candidate_rows = candidate_result.all()
+            for child_work_id, subagent_id, uid, session_id, profile_id, last_called_at in candidate_rows:
+                update_result = await db.execute(
+                    update(Subagent)
+                    .where(
+                        Subagent.id == subagent_id,
+                        Subagent.uid == uid,
+                        Subagent.session_id == session_id,
+                        Subagent.profile_id == profile_id,
+                        Subagent.last_called_at == last_called_at,
+                    )
+                    .values(last_called_at=Subagent.last_called_at)
+                    .execution_options(synchronize_session=False)
+                )
+                if update_result.rowcount != 1:
+                    continue
+
+                recheck_result = await db.execute(
+                    eligible_rounds.where(
+                        Subagent.id == subagent_id,
+                        Subagent.uid == uid,
+                        Subagent.session_id == session_id,
+                        Subagent.profile_id == profile_id,
+                        SubagentWork.child_work_id == child_work_id,
+                    ).limit(1)
+                )
+                if recheck_result.scalar_one_or_none() is None:
+                    continue
+
+                work_conditions = [
+                    SessionReplyWorkItem.subagent_id == subagent_id,
+                    SessionReplyWorkItem.uid == uid,
+                    SessionReplyWorkItem.session_id == session_id,
+                    SessionReplyWorkItem.profile_id == profile_id,
+                    _subagent_round_work_condition(SessionReplyWorkItem, child_work_id),
+                ]
+                await self._remove_work_data(
+                    db,
+                    work_conditions=work_conditions,
+                    uid=uid,
+                    session_id=session_id,
+                    profile_id=profile_id,
+                )
+                deleted_count += 1
 
             await db.commit()
             return deleted_count
@@ -433,10 +670,7 @@ class CRUDSubagent:
                 SessionReplyWorkItem.uid == uid,
                 SessionReplyWorkItem.session_id == session_id,
                 SessionReplyWorkItem.profile_id == profile_id,
-                or_(
-                    SessionReplyWorkItem.id == child_work_id,
-                    SessionReplyWorkItem.execution_state["child_work_id"].as_integer() == child_work_id,
-                ),
+                _subagent_round_work_condition(SessionReplyWorkItem, child_work_id),
             )
             .order_by(SessionReplyWorkItem.id.asc())
             .execution_options(populate_existing=True)

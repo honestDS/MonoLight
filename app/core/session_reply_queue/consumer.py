@@ -14,8 +14,13 @@ from app.core.constants import (
     SESSION_REPLY_LEASE_SECONDS,
     SESSION_REPLY_POLL_INTERVAL_SECONDS,
     SESSION_REPLY_RECOVERY_INTERVAL_SECONDS,
+    SUBAGENT_CLEANUP_BATCH_SIZE,
+    SUBAGENT_CLEANUP_MAX_ITEMS_PER_RUN,
+    SUBAGENT_NOTIFICATION_CLEANUP_BATCH_SIZE,
+    SUBAGENT_NOTIFICATION_CLEANUP_MAX_SCAN_PER_RUN,
 )
 from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.subagent import subagent_crud
@@ -48,12 +53,14 @@ class SessionReplyConsumer:
         self._last_recovery_at = 0.0
         self._last_lease_renewal_at = 0.0
         self._next_cleanup_at = 0.0
+        self._notification_cleanup_after_id = 0
 
     def start(self) -> asyncio.Task:
         if self._task and not self._task.done():
             return self._task
         self._stop_event.clear()
         self._next_cleanup_at = 0.0
+        self._notification_cleanup_after_id = 0
         self._task = asyncio.create_task(self._run())
         return self._task
 
@@ -264,31 +271,41 @@ class SessionReplyConsumer:
     async def _cleanup_terminal_items_if_due(self, now: float) -> None:
         if now < self._next_cleanup_at:
             return
-        await self._cleanup_idle_subagents()
-        await self._cleanup_terminal_items()
         self._next_cleanup_at = now + SESSION_REPLY_CLEANUP_INTERVAL_SECONDS
+        await self._cleanup_subagent_data()
+        await self._cleanup_terminal_items()
+        await self._cleanup_subagent_notifications()
 
-    async def _cleanup_idle_subagents(self) -> None:
-        subagent_count = 0
-        remaining = SESSION_REPLY_CLEANUP_MAX_ITEMS_PER_RUN
+    async def _cleanup_subagent_data(self) -> None:
+        cleanup_counts = {
+            "subagent_count": 0,
+            "subagent_round_count": 0,
+        }
+        remaining = SUBAGENT_CLEANUP_MAX_ITEMS_PER_RUN
 
-        while remaining > 0:
-            batch_size = min(SESSION_REPLY_CLEANUP_BATCH_SIZE, remaining)
-            async with AsyncSessionLocal() as db:
-                cleanup_count = await subagent_crud.cleanup_idle(db, batch_size=batch_size)
-            subagent_count += cleanup_count
-            remaining -= cleanup_count
-            if cleanup_count < batch_size or remaining <= 0:
-                break
-            await asyncio.sleep(0)
+        for metric, cleanup in (
+            ("subagent_count", subagent_crud.cleanup_idle),
+            ("subagent_round_count", subagent_crud.cleanup_old_rounds),
+        ):
+            while remaining > 0:
+                batch_size = min(SUBAGENT_CLEANUP_BATCH_SIZE, remaining)
+                async with AsyncSessionLocal() as db:
+                    cleanup_count = await cleanup(db, batch_size=batch_size)
+                cleanup_counts[metric] += cleanup_count
+                remaining -= cleanup_count
+                if cleanup_count < batch_size or remaining <= 0:
+                    break
+                await asyncio.sleep(0)
 
-        if subagent_count > 0:
-            logger.bind(subagent_count=subagent_count).info("Expired idle subagents cleaned")
+        if sum(cleanup_counts.values()) > 0:
+            logger.bind(**cleanup_counts).info("Subagent data cleaned")
 
     async def _cleanup_terminal_items(self) -> None:
         work_item_count = 0
         stream_event_count = 0
         sequence_count = 0
+        checkpoint_message_count = 0
+        private_message_count = 0
         remaining = SESSION_REPLY_CLEANUP_MAX_ITEMS_PER_RUN
 
         while remaining > 0:
@@ -300,18 +317,47 @@ class SessionReplyConsumer:
                 )
             work_item_count += cleanup_result.work_items
             stream_event_count += cleanup_result.stream_events
+            private_message_count += cleanup_result.private_messages
             sequence_count += cleanup_result.sequences
+            checkpoint_message_count += cleanup_result.checkpoint_messages
             remaining -= cleanup_result.total
             if cleanup_result.total < batch_size or remaining <= 0:
                 break
             await asyncio.sleep(0)
 
-        if work_item_count + stream_event_count + sequence_count > 0:
+        if work_item_count + stream_event_count + private_message_count + sequence_count + checkpoint_message_count > 0:
             logger.bind(
                 work_item_count=work_item_count,
                 stream_event_count=stream_event_count,
+                private_message_count=private_message_count,
                 sequence_count=sequence_count,
-            ).info("Expired session reply data cleaned")
+                checkpoint_message_count=checkpoint_message_count,
+            ).info("Session reply data cleaned")
+
+    async def _cleanup_subagent_notifications(self) -> None:
+        deleted_count = 0
+        scanned_count = 0
+        remaining = SUBAGENT_NOTIFICATION_CLEANUP_MAX_SCAN_PER_RUN
+
+        while remaining > 0:
+            batch_size = min(SUBAGENT_NOTIFICATION_CLEANUP_BATCH_SIZE, remaining)
+            async with AsyncSessionLocal() as db:
+                cleanup_result = await message_crud.cleanup_orphan_subagent_notifications(
+                    db,
+                    limit=batch_size,
+                    after_id=self._notification_cleanup_after_id,
+                )
+                await db.commit()
+            self._notification_cleanup_after_id = cleanup_result.after_id
+            deleted_count += cleanup_result.deleted
+            scanned_count += cleanup_result.scanned
+            remaining = SUBAGENT_NOTIFICATION_CLEANUP_MAX_SCAN_PER_RUN - scanned_count
+            if cleanup_result.scanned < batch_size or cleanup_result.after_id == 0 or remaining <= 0:
+                break
+            await asyncio.sleep(0)
+
+        if deleted_count > 0:
+            logger.bind(subagent_notification_count=deleted_count).info("Subagent notifications cleaned")
 
 
 session_reply_consumer = SessionReplyConsumer()

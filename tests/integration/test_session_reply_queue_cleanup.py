@@ -1,7 +1,9 @@
 import asyncio
+import json
 import time
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta
+from functools import partial
 
 import pytest
 import pytest_asyncio
@@ -13,12 +15,14 @@ import app.core.crud.session.subagent as subagent_module
 import app.core.session_reply_queue.child_work as child_work
 import app.models  # noqa: F401
 from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY
+from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem, SessionReplyCleanupResult
 from app.core.crud.session.subagent import subagent_crud
 from app.core.session_reply_queue import consumer as consumer_module
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditRecord, AuditRecordStatus, AuditToolConclusion, AuditToolDetail
-from app.models.message import Message, MessageRole, MessageType
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
+from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
@@ -33,14 +37,26 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
-from app.models.subagent import Subagent, SubagentToolCall, SubagentWork
+from app.models.subagent import Subagent, SubagentBoardPost, SubagentToolCall, SubagentWork
 from app.models.user import User
-from tests.integration.session_reply_queue_fixture import concurrent_session_factory as _concurrent_session_factory
-from tests.integration.session_reply_queue_fixture import db_session as _db_session
 from tests.integration.session_reply_queue_test_support import enqueue
 
-db_session = _db_session
-concurrent_session_factory = _concurrent_session_factory
+
+@pytest_asyncio.fixture
+async def db_session(database_factory) -> AsyncGenerator[AsyncSession]:
+    async with database_factory(
+        foreign_keys=False,
+        name="session-reply-queue-cleanup.sqlite3",
+    ) as session_factory:
+        async with session_factory() as session:
+            session.add_all(
+                [
+                    Profile(id=1, uid="user-1", name="queue-cleanup", configs={}),
+                    ChatSession(session_id="session-1", uid="user-1", profile_id=1),
+                ]
+            )
+            await session.commit()
+            yield session
 
 
 @pytest_asyncio.fixture
@@ -140,11 +156,11 @@ async def _add_finished_subagent(
 
 
 @pytest.mark.asyncio
-async def test_cleanup_terminal_items_removes_only_expired_terminal_work_and_stream_events(db_session: AsyncSession):
+async def test_cleanup_terminal_items_respects_retention_capacity_and_cleans_orphans(db_session: AsyncSession):
     crud = CRUDSessionReplyWorkItem()
     old_time = get_local_time() - timedelta(hours=25)
 
-    expired_terminal = []
+    old_terminal = []
     for index, status in enumerate(
         [
             SessionReplyWorkStatus.MERGED,
@@ -163,7 +179,7 @@ async def test_cleanup_terminal_items_removes_only_expired_terminal_work_and_str
         )
         work.status = status
         work.updated_at = old_time
-        expired_terminal.append(work)
+        old_terminal.append(work)
 
     recent_terminal = await enqueue(
         crud,
@@ -193,7 +209,8 @@ async def test_cleanup_terminal_items_removes_only_expired_terminal_work_and_str
     old_running.status = SessionReplyWorkStatus.RUNNING
     old_running.updated_at = old_time
 
-    for work in [*expired_terminal, recent_terminal, old_ready, old_running]:
+    valid_work = [*old_terminal, recent_terminal, old_ready, old_running]
+    for work in valid_work:
         db_session.add(
             SessionReplyStreamEvent(
                 work_id=work.id,
@@ -228,19 +245,37 @@ async def test_cleanup_terminal_items_removes_only_expired_terminal_work_and_str
     )
     await db_session.commit()
 
-    cleanup_result = await crud.cleanup_terminal_items(db_session)
+    first_result = await crud.cleanup_terminal_items(db_session, retention_limit=5)
 
     remaining_work = list((await db_session.execute(select(SessionReplyWorkItem))).scalars().all())
     remaining_events = list((await db_session.execute(select(SessionReplyStreamEvent))).scalars().all())
     remaining_sequences = list((await db_session.execute(select(SessionReplySequence))).scalars().all())
-    expired_ids = {work.id for work in expired_terminal}
 
-    assert cleanup_result == SessionReplyCleanupResult(
-        work_items=4,
-        stream_events=5,
+    assert first_result == SessionReplyCleanupResult(
+        work_items=0,
+        stream_events=1,
         sequences=1,
     )
-    assert cleanup_result.total == 10
+    assert first_result.total == 2
+    assert {work.id for work in remaining_work} == {work.id for work in valid_work}
+    assert {event.work_id for event in remaining_events} == {work.id for work in valid_work}
+    assert {sequence.session_id for sequence in remaining_sequences} == {
+        "session-1",
+        "active-empty-session",
+    }
+
+    second_result = await crud.cleanup_terminal_items(db_session, retention_limit=1)
+
+    remaining_work = list((await db_session.execute(select(SessionReplyWorkItem))).scalars().all())
+    remaining_events = list((await db_session.execute(select(SessionReplyStreamEvent))).scalars().all())
+    remaining_sequences = list((await db_session.execute(select(SessionReplySequence))).scalars().all())
+
+    assert second_result == SessionReplyCleanupResult(
+        work_items=4,
+        stream_events=4,
+        sequences=0,
+    )
+    assert second_result.total == 8
     assert {work.id for work in remaining_work} == {
         recent_terminal.id,
         old_ready.id,
@@ -251,18 +286,511 @@ async def test_cleanup_terminal_items_removes_only_expired_terminal_work_and_str
         old_ready.id,
         old_running.id,
     }
-    assert not expired_ids.intersection(event.work_id for event in remaining_events)
     assert {sequence.session_id for sequence in remaining_sequences} == {
         "session-1",
         "active-empty-session",
     }
 
 
+@pytest.mark.parametrize(
+    ("scenario", "retain_candidate"),
+    [
+        pytest.param("audit_pending", True, id="audit-pending"),
+        pytest.param("audit_executing", True, id="audit-executing"),
+        pytest.param("audit_passed", True, id="audit-passed"),
+        pytest.param("audit_finished", False, id="audit-finished"),
+        pytest.param("background_running", True, id="background-running"),
+        pytest.param("background_result", True, id="background-result"),
+        pytest.param("terminal_shared_pending", True, id="terminal-shared-pending"),
+        pytest.param("terminal_consumed", False, id="terminal-consumed"),
+        pytest.param("foreign_task", False, id="foreign-task"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_cleanup_terminal_items_limits_each_delete_batch(db_session: AsyncSession):
+async def test_cleanup_terminal_items_preserves_recoverable_completed_replies(
+    subagent_database,
+    scenario,
+    retain_candidate,
+):
     crud = CRUDSessionReplyWorkItem()
-    old_time = get_local_time() - timedelta(hours=25)
-    expired_work = []
+    audit_record_id = None
+    source_message_id = None
+    background_task_id = None
+
+    async with subagent_database() as db:
+        candidate, candidate_created = await crud.enqueue(
+            db,
+            uid="user-1",
+            session_id="session-1",
+            profile_id=1,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id=f"cleanup-protected-candidate:{scenario}",
+            dedupe_key=f"cleanup-protected-candidate:{scenario}",
+            work_category=SessionReplyWorkCategory.FOREGROUND,
+            commit=False,
+        )
+        assert candidate_created is True and candidate.id is not None
+        candidate_id = candidate.id
+        candidate.status = SessionReplyWorkStatus.SUCCEEDED
+        candidate.locked_by = None
+        candidate.lock_until = None
+
+        control = None
+        if scenario != "terminal_consumed":
+            control, control_created = await crud.enqueue(
+                db,
+                uid="user-1",
+                session_id="session-1",
+                profile_id=1,
+                work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+                source_type=SessionReplySourceType.USER_MESSAGE,
+                source_id=f"cleanup-unreferenced-control:{scenario}",
+                dedupe_key=f"cleanup-unreferenced-control:{scenario}",
+                work_category=SessionReplyWorkCategory.FOREGROUND,
+                commit=False,
+            )
+            assert control_created is True and control.id is not None
+            control.status = SessionReplyWorkStatus.FAILED if scenario == "terminal_shared_pending" else SessionReplyWorkStatus.SUCCEEDED
+            control.locked_by = None
+            control.lock_until = None
+
+        checkpoint_payloads = {
+            candidate_id: {"messages": [{"role": "user", "content": f"candidate checkpoint {scenario}"}]},
+        }
+        if control is not None:
+            assert control.id is not None
+            checkpoint_payloads[control.id] = {"messages": [{"role": "user", "content": f"control checkpoint {scenario}"}]}
+        for work_id, checkpoint in checkpoint_payloads.items():
+            await crud.save_checkpoint(db, work_id, checkpoint)
+            db.add(
+                SessionReplyStreamEvent(
+                    work_id=work_id,
+                    sequence_no=1,
+                    event={"type": "content", "content": str(work_id)},
+                )
+            )
+        await db.flush()
+        checkpoint_message_ids = {
+            work_id: (
+                await db.execute(
+                    select(SessionReplyCheckpointMessageReference.message_id).where(
+                        SessionReplyCheckpointMessageReference.work_id == work_id,
+                        SessionReplyCheckpointMessageReference.kind == "checkpoint",
+                    )
+                )
+            ).scalar_one()
+            for work_id in checkpoint_payloads
+        }
+
+        if scenario.startswith("audit_"):
+            tool_call_id = f"cleanup-audit-call:{scenario}"
+            source_message = Message(
+                uid="user-1",
+                session_id="session-1",
+                profile_id=1,
+                work_id=candidate_id,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TOOL_CALL,
+                content=InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[
+                        InternalToolCall(
+                            id=tool_call_id,
+                            name="execute_shell",
+                            arguments={"command": "echo cleanup"},
+                        )
+                    ],
+                ).model_dump_json(exclude_none=True),
+                is_processed=True,
+            )
+            db.add(source_message)
+            await db.flush()
+            assert source_message.id is not None
+            source_message_id = source_message.id
+            now = get_local_time()
+            audit_status = {
+                "audit_pending": AuditRecordStatus.PENDING,
+                "audit_executing": AuditRecordStatus.EXECUTING,
+                "audit_passed": AuditRecordStatus.PASSED,
+                "audit_finished": AuditRecordStatus.SUCCEEDED,
+            }[scenario]
+            audit_record = AuditRecord(
+                uid="user-1",
+                operator_username="cleanup-user",
+                session_id="session-1",
+                source="http",
+                language="zh",
+                execution_scope="task",
+                source_work_id=candidate_id,
+                status=audit_status,
+                source_assistant_message_id=source_message.id,
+                working_directory=".",
+                round_arguments_hash="a" * 64,
+                tool_count=1,
+                pending_at=now if scenario in {"audit_pending", "audit_executing"} else None,
+                execution_started_at=now if scenario == "audit_executing" else None,
+                audited_at=now if scenario == "audit_passed" else None,
+                completed_at=now if scenario == "audit_finished" else None,
+            )
+            db.add(audit_record)
+            await db.flush()
+            assert audit_record.id is not None
+            audit_record_id = audit_record.id
+        else:
+            task_kwargs = {
+                "uid": "user-1",
+                "session_id": "session-1",
+                "profile_id": 1,
+                "tool_call_id": f"cleanup-background-call:{scenario}",
+                "tool_name": "terminal_watch" if scenario.startswith("terminal_") else "external_tool",
+                "status": BackgroundTaskStatus.RUNNING,
+                "arguments": {},
+                "auto_reply": False,
+                "reply_status": BackgroundTaskReplyStatus.NONE,
+                "extra": {"origin_work_id": candidate_id, "origin_work_identity": candidate.dedupe_key},
+            }
+            if scenario == "background_result":
+                task_kwargs.update(
+                    status=BackgroundTaskStatus.SUCCEEDED,
+                    result={"status": "succeeded", "content": "completed"},
+                )
+            elif scenario == "terminal_shared_pending":
+                assert control is not None and control.id is not None
+                task_kwargs.update(
+                    status=BackgroundTaskStatus.FAILED,
+                    result={"status": "failed", "content": "terminal failed"},
+                    error="terminal failed",
+                    auto_reply=True,
+                    reply_status=BackgroundTaskReplyStatus.PENDING,
+                    extra={
+                        "auto_terminal_watch": True,
+                        "origin_work_id": control.id,
+                        "origin_work_identity": control.dedupe_key,
+                        "terminal_watch_deliveries": {
+                            str(candidate_id): {
+                                "identity": candidate.dedupe_key,
+                                "consumed": False,
+                            }
+                        },
+                    },
+                )
+            elif scenario == "terminal_consumed":
+                task_kwargs.update(
+                    status=BackgroundTaskStatus.SUCCEEDED,
+                    result={"status": "succeeded", "content": "terminal completed"},
+                    auto_reply=True,
+                    reply_status=BackgroundTaskReplyStatus.SUCCEEDED,
+                    extra={
+                        "auto_terminal_watch": True,
+                        "origin_work_id": candidate_id,
+                        "origin_work_identity": candidate.dedupe_key,
+                        "terminal_watch_deliveries": {
+                            str(candidate_id): {
+                                "identity": candidate.dedupe_key,
+                                "consumed": True,
+                            }
+                        },
+                    },
+                )
+            elif scenario == "foreign_task":
+                task_kwargs.update(
+                    uid="foreign-user",
+                    extra={"origin_work_id": candidate_id, "origin_work_identity": candidate.dedupe_key},
+                )
+
+            task = BackgroundTask(**task_kwargs)
+            db.add(task)
+            await db.flush()
+            assert task.id is not None
+            background_task_id = task.id
+            if scenario == "background_result":
+                candidate.execution_state = {
+                    **candidate.execution_state,
+                    "pending_tools": [
+                        {
+                            "task_id": task.id,
+                            "tool_call_id": task.tool_call_id,
+                            "tool_name": task.tool_name,
+                        }
+                    ],
+                }
+                db.add(candidate)
+
+        await db.commit()
+
+        result = await crud.cleanup_terminal_items(db, retention_limit=0)
+        expected_work_ids = {candidate_id} if retain_candidate else set()
+        if control is not None:
+            assert control.id is not None
+        deleted_count = len(checkpoint_payloads) - len(expected_work_ids)
+        assert result == SessionReplyCleanupResult(
+            work_items=deleted_count,
+            stream_events=deleted_count,
+            private_messages=1 if scenario == "audit_finished" else 0,
+            checkpoint_messages=deleted_count,
+        )
+
+        remaining_work_ids = set((await db.execute(select(SessionReplyWorkItem.id))).scalars().all())
+        assert remaining_work_ids == expected_work_ids
+        assert {event.work_id for event in (await db.execute(select(SessionReplyStreamEvent))).scalars().all()} == expected_work_ids
+        assert {checkpoint.work_id for checkpoint in (await db.execute(select(SessionReplyWorkCheckpoint))).scalars().all()} == expected_work_ids
+        assert {reference.work_id for reference in (await db.execute(select(SessionReplyCheckpointMessageReference))).scalars().all()} == expected_work_ids
+        assert {row.id for row in (await db.execute(select(SessionReplyCheckpointMessage).where(SessionReplyCheckpointMessage.id.in_(list(checkpoint_message_ids.values()))))).scalars().all()} == {checkpoint_message_ids[work_id] for work_id in expected_work_ids}
+        for work_id, checkpoint in checkpoint_payloads.items():
+            assert await crud.get_checkpoint(db, work_id) == (checkpoint if work_id in expected_work_ids else None)
+
+        if audit_record_id is not None:
+            audit_row = (await db.execute(select(AuditRecord).where(AuditRecord.id == audit_record_id))).scalars().one()
+            assert (audit_row.source_work_id, audit_row.source_assistant_message_id, audit_row.status) == (
+                candidate_id,
+                source_message_id,
+                {
+                    "audit_pending": AuditRecordStatus.PENDING,
+                    "audit_executing": AuditRecordStatus.EXECUTING,
+                    "audit_passed": AuditRecordStatus.PASSED,
+                    "audit_finished": AuditRecordStatus.SUCCEEDED,
+                }[scenario],
+            )
+            source_message_rows = (await db.execute(select(Message).where(Message.id == source_message_id))).scalars().all()
+            if retain_candidate:
+                source_message_row = source_message_rows[0]
+                assert (source_message_row.uid, source_message_row.session_id, source_message_row.profile_id, source_message_row.type) == (
+                    "user-1",
+                    "session-1",
+                    1,
+                    MessageType.TOOL_CALL,
+                )
+            else:
+                assert source_message_rows == []
+        if background_task_id is not None:
+            task_row = (await db.execute(select(BackgroundTask).where(BackgroundTask.id == background_task_id))).scalars().one()
+            assert task_row.id == background_task_id
+
+
+@pytest.mark.asyncio
+async def test_cleanup_scheduled_private_messages_is_bounded_and_waits_for_confirmed_reply(subagent_database):
+    crud = CRUDSessionReplyWorkItem()
+    worker_id = "scheduled-confirmation-worker"
+    now = get_local_time()
+    root_time = now - timedelta(hours=2)
+    followup_time = now - timedelta(hours=1)
+    checkpoint = {"messages": [{"role": "user", "content": "scheduled checkpoint"}]}
+    tool_call_id = "scheduled-cleanup-tool-call"
+
+    async with subagent_database() as db:
+        trigger = Message(
+            uid="user-1",
+            session_id="session-1",
+            profile_id=1,
+            role=MessageRole.USER,
+            type=MessageType.SCHEDULED_TASK_TRIGGER,
+            content=InternalMessage(
+                role=MessageRole.USER,
+                type=MessageType.SCHEDULED_TASK_TRIGGER,
+                content="scheduled cleanup",
+            ).model_dump_json(exclude_none=True),
+            is_processed=True,
+            created_at=root_time,
+        )
+        db.add(trigger)
+        await db.flush()
+        assert trigger.id is not None
+
+        root, root_created = await crud.enqueue(
+            db,
+            uid="user-1",
+            session_id="session-1",
+            profile_id=1,
+            work_type=SessionReplyWorkType.AGENT_WORK,
+            source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+            source_id=trigger.id,
+            dedupe_key="scheduled-cleanup-root",
+            work_category=SessionReplyWorkCategory.SCHEDULED_TASK,
+            commit=False,
+        )
+        assert root_created is True and root.id is not None
+        trigger.work_id = root.id
+        root.status = SessionReplyWorkStatus.SUCCEEDED
+        root.created_at = root_time
+        root.updated_at = root_time
+
+        private_message_base = {
+            "uid": "user-1",
+            "session_id": "session-1",
+            "profile_id": 1,
+            "work_id": root.id,
+            "is_processed": True,
+        }
+        tool_call = Message(
+            **private_message_base,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TOOL_CALL,
+            content=InternalMessage(
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TOOL_CALL,
+                tool_calls=[
+                    InternalToolCall(
+                        id=tool_call_id,
+                        name="execute_shell",
+                        arguments={"command": "echo cleanup"},
+                    )
+                ],
+            ).model_dump_json(exclude_none=True),
+            created_at=root_time + timedelta(seconds=1),
+        )
+        tool_result = Message(
+            **private_message_base,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content=InternalMessage(
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_RESULT,
+                content="cleanup complete",
+                tool_call_id=tool_call_id,
+                tool_execution_status="succeeded",
+            ).model_dump_json(exclude_none=True),
+            created_at=root_time + timedelta(seconds=2),
+        )
+        public_result = Message(
+            uid="user-1",
+            session_id="session-1",
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="public scheduled result",
+            is_processed=True,
+            created_at=followup_time,
+        )
+        db.add_all(
+            [
+                tool_call,
+                tool_result,
+                public_result,
+                SessionReplyStreamEvent(
+                    work_id=root.id,
+                    sequence_no=1,
+                    event={"type": "content", "content": "scheduled event 1"},
+                ),
+                SessionReplyStreamEvent(
+                    work_id=root.id,
+                    sequence_no=2,
+                    event={"type": "content", "content": "scheduled event 2"},
+                ),
+            ]
+        )
+        await db.flush()
+        assert tool_call.id is not None and tool_result.id is not None and public_result.id is not None
+
+        audit_record = AuditRecord(
+            uid="user-1",
+            operator_username="cleanup-user",
+            session_id="session-1",
+            source="http",
+            language="zh",
+            execution_scope="task",
+            source_work_id=root.id,
+            status=AuditRecordStatus.SUCCEEDED,
+            source_assistant_message_id=tool_call.id,
+            working_directory=".",
+            round_arguments_hash="c" * 64,
+            tool_count=1,
+            created_at=root_time,
+            updated_at=root_time,
+            completed_at=root_time,
+        )
+        db.add(audit_record)
+        await db.flush()
+        assert audit_record.id is not None
+
+        confirmed, confirmed_created = await crud.enqueue(
+            db,
+            uid="user-1",
+            session_id="session-1",
+            profile_id=1,
+            work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+            source_type=SessionReplySourceType.AUDIT_RECORD,
+            source_id=audit_record.id,
+            dedupe_key="scheduled-cleanup-confirmed",
+            work_category=SessionReplyWorkCategory.SCHEDULED_TASK,
+            commit=False,
+        )
+        assert confirmed_created is True and confirmed.id is not None
+        confirmed.status = SessionReplyWorkStatus.RUNNING
+        confirmed.locked_by = worker_id
+        confirmed.lock_until = int(time.time()) + 300
+        confirmed.created_at = followup_time
+        confirmed.updated_at = followup_time
+
+        await crud.save_checkpoint(db, root.id, checkpoint)
+        checkpoint_message_id = (
+            await db.execute(
+                select(SessionReplyCheckpointMessageReference.message_id).where(
+                    SessionReplyCheckpointMessageReference.work_id == root.id,
+                    SessionReplyCheckpointMessageReference.kind == "checkpoint",
+                )
+            )
+        ).scalar_one()
+        await db.commit()
+
+        private_messages = [trigger, tool_call, tool_result]
+        private_message_ids = [message.id for message in private_messages]
+        root_id = root.id
+        confirmed_id = confirmed.id
+        audit_record_id = audit_record.id
+        public_result_id = public_result.id
+        assert all(value is not None for value in [*private_message_ids, root_id, confirmed_id, audit_record_id, public_result_id])
+
+        first_result = await crud.cleanup_terminal_items(db, retention_limit=1, batch_size=2)
+        assert first_result == SessionReplyCleanupResult()
+        assert first_result.total <= 2
+        assert await crud.get_message_work_id(db, confirmed) == confirmed.id
+        assert (await db.execute(select(SessionReplyWorkItem.id).where(SessionReplyWorkItem.id == root_id))).scalar_one() == root_id
+        assert set((await db.execute(select(Message.id).where(Message.work_id == root_id))).scalars().all()) == set(private_message_ids)
+        assert {event.sequence_no for event in (await db.execute(select(SessionReplyStreamEvent).where(SessionReplyStreamEvent.work_id == root_id))).scalars().all()} == {1, 2}
+        assert await crud.get_checkpoint(db, root_id) == checkpoint
+
+        assert await crud.mark_terminal(
+            db,
+            work_id=confirmed_id,
+            worker_id=worker_id,
+            status=SessionReplyWorkStatus.SUCCEEDED,
+        )
+
+        expected_results = [
+            SessionReplyCleanupResult(stream_events=2),
+            SessionReplyCleanupResult(private_messages=2),
+            SessionReplyCleanupResult(work_items=1, private_messages=1),
+            SessionReplyCleanupResult(checkpoint_messages=1),
+        ]
+        for expected_result in expected_results:
+            result = await crud.cleanup_terminal_items(db, retention_limit=1, batch_size=2)
+            assert result == expected_result
+            assert result.total <= 2
+
+        assert (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == root_id))).scalars().one_or_none() is None
+        assert not (await db.execute(select(Message).where(Message.id.in_(private_message_ids)))).scalars().all()
+        assert (await db.execute(select(Message).where(Message.id == public_result_id))).scalars().one().work_id is None
+        audit_row = (await db.execute(select(AuditRecord).where(AuditRecord.id == audit_record_id))).scalars().one()
+        assert (audit_row.source_work_id, audit_row.source_assistant_message_id, audit_row.status) == (
+            root_id,
+            tool_call.id,
+            AuditRecordStatus.SUCCEEDED,
+        )
+        confirmed_row = (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == confirmed_id))).scalars().one()
+        assert (confirmed_row.status, confirmed_row.source_id, confirmed_row.locked_by) == (
+            SessionReplyWorkStatus.SUCCEEDED,
+            str(audit_record_id),
+            None,
+        )
+        assert (await db.execute(select(SessionReplyCheckpointMessage).where(SessionReplyCheckpointMessage.id == checkpoint_message_id))).scalars().one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_cleanup_terminal_items_deletes_stream_events_before_work_in_batches(db_session: AsyncSession):
+    crud = CRUDSessionReplyWorkItem()
+    same_updated_at = get_local_time() - timedelta(hours=25)
+    works = []
     for index in range(3):
         work = await enqueue(
             crud,
@@ -272,8 +800,8 @@ async def test_cleanup_terminal_items_limits_each_delete_batch(db_session: Async
             dedupe_key=f"foreground-message:{index + 1}",
         )
         work.status = SessionReplyWorkStatus.SUCCEEDED
-        work.updated_at = old_time
-        expired_work.append(work)
+        work.updated_at = same_updated_at
+        works.append(work)
         for sequence_no in range(2):
             db_session.add(
                 SessionReplyStreamEvent(
@@ -284,31 +812,246 @@ async def test_cleanup_terminal_items_limits_each_delete_batch(db_session: Async
             )
     await db_session.commit()
 
-    first_result = await crud.cleanup_terminal_items(db_session, batch_size=2)
+    oldest, middle, newest = works
 
-    remaining_work_count = len((await db_session.execute(select(SessionReplyWorkItem))).scalars().all())
-    remaining_event_count = len((await db_session.execute(select(SessionReplyStreamEvent))).scalars().all())
+    first_result = await crud.cleanup_terminal_items(
+        db_session,
+        retention_limit=1,
+        batch_size=2,
+    )
+
+    remaining_work = list((await db_session.execute(select(SessionReplyWorkItem))).scalars().all())
+    remaining_events = list((await db_session.execute(select(SessionReplyStreamEvent))).scalars().all())
     assert first_result == SessionReplyCleanupResult(
         work_items=0,
         stream_events=2,
         sequences=0,
     )
     assert first_result.total == 2
-    assert remaining_work_count == 3
-    assert remaining_event_count == 4
+    assert {work.id for work in remaining_work} == {oldest.id, middle.id, newest.id}
+    assert {(event.work_id, event.sequence_no) for event in remaining_events} == {
+        (middle.id, 1),
+        (middle.id, 2),
+        (newest.id, 1),
+        (newest.id, 2),
+    }
 
-    second_result = await crud.cleanup_terminal_items(db_session, batch_size=2)
+    second_result = await crud.cleanup_terminal_items(
+        db_session,
+        retention_limit=1,
+        batch_size=2,
+    )
 
-    remaining_work_count = len((await db_session.execute(select(SessionReplyWorkItem))).scalars().all())
-    remaining_event_count = len((await db_session.execute(select(SessionReplyStreamEvent))).scalars().all())
+    remaining_work = list((await db_session.execute(select(SessionReplyWorkItem))).scalars().all())
+    remaining_events = list((await db_session.execute(select(SessionReplyStreamEvent))).scalars().all())
     assert second_result == SessionReplyCleanupResult(
         work_items=0,
         stream_events=2,
         sequences=0,
     )
     assert second_result.total == 2
-    assert remaining_work_count == 3
-    assert remaining_event_count == 2
+    assert {work.id for work in remaining_work} == {oldest.id, middle.id, newest.id}
+    assert {(event.work_id, event.sequence_no) for event in remaining_events} == {
+        (newest.id, 1),
+        (newest.id, 2),
+    }
+
+    third_result = await crud.cleanup_terminal_items(
+        db_session,
+        retention_limit=1,
+        batch_size=2,
+    )
+
+    remaining_work = list((await db_session.execute(select(SessionReplyWorkItem))).scalars().all())
+    remaining_events = list((await db_session.execute(select(SessionReplyStreamEvent))).scalars().all())
+    assert third_result == SessionReplyCleanupResult(
+        work_items=2,
+        stream_events=0,
+        sequences=0,
+    )
+    assert third_result.total == 2
+    assert {work.id for work in remaining_work} == {newest.id}
+    assert {(event.work_id, event.sequence_no) for event in remaining_events} == {
+        (newest.id, 1),
+        (newest.id, 2),
+    }
+
+
+@pytest.mark.asyncio
+async def test_consumer_cleanup_subagent_notifications_uses_bounded_scan_cursor(
+    subagent_database,
+    monkeypatch,
+):
+    monkeypatch.setattr(consumer_module, "AsyncSessionLocal", subagent_database)
+    monkeypatch.setattr(consumer_module, "SUBAGENT_NOTIFICATION_CLEANUP_BATCH_SIZE", 2)
+    monkeypatch.setattr(consumer_module, "SUBAGENT_NOTIFICATION_CLEANUP_MAX_SCAN_PER_RUN", 2)
+    consumer = consumer_module.SessionReplyConsumer()
+    crud = CRUDSessionReplyWorkItem()
+
+    async with subagent_database() as db:
+        subagent, parent, child, _round, _tool_call = await _add_finished_subagent(
+            db,
+            key="notification-cleanup",
+            last_called_at=get_local_time(),
+        )
+        pending_work, pending_created = await crud.enqueue(
+            db,
+            uid="user-1",
+            session_id="session-1",
+            profile_id=1,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id="notification-pending-work",
+            dedupe_key="cleanup-notification-pending-work",
+            work_category=SessionReplyWorkCategory.FOREGROUND,
+            commit=False,
+        )
+        assert pending_created is True and pending_work.id is not None
+        pending_work.status = SessionReplyWorkStatus.RUNNING
+        db.add(pending_work)
+        await db.flush()
+
+        message_base = {
+            "uid": "user-1",
+            "session_id": "session-1",
+            "profile_id": 1,
+            "role": MessageRole.USER,
+            "work_id": None,
+            "is_processed": True,
+        }
+        normal_messages = [
+            Message(
+                **message_base,
+                type=MessageType.TEXT,
+                content="plain",
+            )
+            for _ in range(3)
+        ]
+        db.add_all(normal_messages)
+        await db.flush()
+
+        orphan_payloads = [
+            {
+                "type": "subagent_board_update",
+                "source": "subagent",
+                "subagent_id": "missing-board-subagent",
+                "work_id": 10001,
+                "post_id": 1,
+                "stage": "update",
+            },
+            {
+                "type": "subagent_result_ready",
+                "source": "subagent",
+                "subagent_id": "missing-result-subagent",
+                "work_id": 10002,
+            },
+            {
+                "type": "external_work_resume",
+                "source": "subagent",
+                "results": [{"subagent_id": "missing-resume-subagent", "work_id": 10003}],
+            },
+        ]
+        message_specs = [(json.dumps(payload), MessageType.SUBAGENT_RESULT) for payload in orphan_payloads]
+        message_specs.extend(
+            [
+                (
+                    json.dumps(
+                        {
+                            "type": "subagent_result_ready",
+                            "source": "subagent",
+                            "subagent_id": subagent.id,
+                            "work_id": child.id,
+                        }
+                    ),
+                    MessageType.SUBAGENT_RESULT,
+                ),
+                (
+                    json.dumps(
+                        {
+                            "type": "subagent_result_ready",
+                            "source": "subagent",
+                            "subagent_id": "pending-subagent",
+                            "work_id": 10004,
+                        }
+                    ),
+                    MessageType.SUBAGENT_RESULT,
+                ),
+                ("plain text", MessageType.SUBAGENT_RESULT),
+                ("approve", MessageType.AUDIT_DECISION),
+            ]
+        )
+        messages = []
+        for content, message_type in message_specs:
+            messages.append(
+                await message_crud.create(
+                    db,
+                    obj_in={**message_base, "type": message_type, "content": content},
+                    commit=False,
+                )
+            )
+        max_message = await message_crud.create(
+            db,
+            obj_in={
+                **message_base,
+                "type": MessageType.SUBAGENT_RESULT,
+                "content": json.dumps(
+                    {
+                        "type": "subagent_result_ready",
+                        "source": "subagent",
+                        "subagent_id": "max-subagent",
+                        "work_id": 10005,
+                    }
+                ),
+            },
+            commit=False,
+        )
+        await db.flush()
+
+        orphan_messages = messages[:3]
+        linked_message, pending_message, invalid_json_message, audit_message = messages[3:]
+        assert pending_message.id is not None and max_message.id is not None
+        checkpoint_messages = [{"role": "user", "content": "shared checkpoint"}]
+        await crud.save_checkpoint(db, parent.id, {"messages": checkpoint_messages})
+        await crud.save_checkpoint(
+            db,
+            pending_work.id,
+            {"pending_resume_message_ids": [pending_message.id], "messages": checkpoint_messages},
+        )
+        await db.commit()
+
+        await consumer._cleanup_subagent_notifications()
+
+        remaining_message_ids = set((await db.execute(select(Message.id))).scalars().all())
+        assert consumer._notification_cleanup_after_id == normal_messages[1].id
+        assert remaining_message_ids == {message.id for message in [*normal_messages, *messages, max_message]}
+        await db.commit()
+
+        scan_batch_size = 2
+        scan_calls = (len(normal_messages) + len(messages) + scan_batch_size - 1) // scan_batch_size
+        for _ in range(scan_calls):
+            await consumer._cleanup_subagent_notifications()
+
+        retained_message_ids = {message.id for message in [*normal_messages, *messages[3:], max_message]}
+        assert consumer._notification_cleanup_after_id == 0
+        remaining_message_ids = set((await db.execute(select(Message.id))).scalars().all())
+        assert not {message.id for message in orphan_messages}.intersection(remaining_message_ids)
+        assert remaining_message_ids == retained_message_ids
+        assert {linked_message.id, pending_message.id, invalid_json_message.id, audit_message.id, max_message.id} <= remaining_message_ids
+        assert {work.id for work in (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id.in_([parent.id, child.id])))).scalars().all()} == {parent.id, child.id}
+        assert (await db.get(Subagent, subagent.id)) is not None
+        assert (await db.get(SubagentWork, child.id)) is not None
+        await db.commit()
+
+        await crud.delete_checkpoint(db, pending_work.id)
+        await db.commit()
+        scan_calls = (len(retained_message_ids) + scan_batch_size - 1) // scan_batch_size
+        for _ in range(scan_calls):
+            await consumer._cleanup_subagent_notifications()
+
+        remaining_message_ids = set((await db.execute(select(Message.id))).scalars().all())
+        assert consumer._notification_cleanup_after_id == 0
+        assert remaining_message_ids == retained_message_ids - {pending_message.id}
+        assert max_message.id in remaining_message_ids
 
 
 @pytest.mark.asyncio
@@ -395,6 +1138,7 @@ async def test_consumer_cleanup_stops_at_per_run_limit(monkeypatch):
 @pytest.mark.asyncio
 async def test_consumer_cleanup_removes_idle_subagent_data_and_respects_hourly_schedule(subagent_database, monkeypatch):
     monkeypatch.setattr(consumer_module, "AsyncSessionLocal", subagent_database)
+    monkeypatch.setattr(subagent_crud, "cleanup_idle", partial(subagent_crud.cleanup_idle, retention_limit=1))
     consumer = consumer_module.SessionReplyConsumer()
     now = get_local_time()
     expired_at = now - timedelta(hours=25)
@@ -572,18 +1316,29 @@ async def test_consumer_cleanup_removes_idle_subagent_data_and_respects_hourly_s
         assert (await db.execute(select(Subagent).where(Subagent.id == recent_subagent.id))).scalars().one().id == recent_subagent.id
         assert (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == recent_child.id))).scalars().one().id == recent_child.id
 
+    async with subagent_database() as db:
+        new_subagent, new_parent, new_child, _new_round, _new_call = await _add_finished_subagent(
+            db,
+            key="new",
+            last_called_at=get_local_time(),
+        )
+        await db.commit()
+
     await consumer._cleanup_terminal_items_if_due(3605.0)
     async with subagent_database() as db:
         assert not (await db.execute(select(Subagent).where(Subagent.id == recent_subagent.id))).scalars().all()
         assert not (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == recent_child.id))).scalars().all()
+        assert (await db.execute(select(Subagent).where(Subagent.id == new_subagent.id))).scalars().one().id == new_subagent.id
+        assert (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == new_child.id))).scalars().one().id == new_child.id
 
         parent_row = (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == expired_parent.id))).scalars().one()
         parent_row.updated_at = get_local_time() - timedelta(hours=25)
         await db.commit()
-        await crud.cleanup_terminal_items(db)
+        await crud.cleanup_terminal_items(db, retention_limit=2)
 
     async with subagent_database() as db:
         assert not (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == expired_parent.id))).scalars().all()
+        assert {work.id for work in (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id.in_([recent_parent.id, new_parent.id])))).scalars().all()} == {recent_parent.id, new_parent.id}
         assert (await db.execute(select(AuditRecord).where(AuditRecord.id == audit_record_id))).scalars().one().id == audit_record_id
         assert (await db.execute(select(AuditToolDetail).where(AuditToolDetail.id == audit_detail_id))).scalars().one().id == audit_detail_id
         assert (await db.execute(select(Message.content).where(Message.id == public_message.id))).scalar_one() == "public message"
@@ -743,7 +1498,7 @@ async def test_idle_cleanup_removes_all_expired_subagent_round_and_derived_work(
         await db.commit()
 
     async with subagent_database() as db:
-        assert await subagent_crud.cleanup_idle(db) == 1
+        assert await subagent_crud.cleanup_idle(db, retention_limit=1) == 1
 
     async with subagent_database() as db:
         assert (await db.execute(select(Subagent).where(Subagent.id == expired_subagent.id))).scalars().one_or_none() is None
@@ -862,7 +1617,7 @@ async def test_idle_cleanup_rolls_back_all_data_on_interruption(subagent_databas
             expected_exception = RuntimeError if interruption == "error" else asyncio.CancelledError
             expected_match = "cleanup interruption" if interruption == "error" else None
             with pytest.raises(expected_exception, match=expected_match):
-                await subagent_crud.cleanup_idle(cleanup_db)
+                await subagent_crud.cleanup_idle(cleanup_db, retention_limit=0)
 
     async with subagent_database() as db:
         subagent_row = (await db.execute(select(Subagent).where(Subagent.id == subagent_id))).scalars().one()
@@ -909,7 +1664,7 @@ async def test_idle_cleanup_rolls_back_all_data_on_interruption(subagent_databas
         assert await crud.get_checkpoint(db, child_id) == saved_checkpoint
 
     async with subagent_database() as db:
-        assert await subagent_crud.cleanup_idle(db) == 1
+        assert await subagent_crud.cleanup_idle(db, retention_limit=0) == 1
 
     async with subagent_database() as db:
         assert (await db.execute(select(Subagent).where(Subagent.id == subagent_id))).scalars().one_or_none() is None
@@ -919,7 +1674,7 @@ async def test_idle_cleanup_rolls_back_all_data_on_interruption(subagent_databas
 
 @pytest.mark.parametrize("specify_work_id", [False, True])
 @pytest.mark.asyncio
-async def test_query_subagent_refreshes_retention_until_strictly_after_24_hours(
+async def test_query_subagent_refreshes_retention_and_cleanup_respects_capacity(
     subagent_database,
     monkeypatch,
     specify_work_id,
@@ -931,18 +1686,37 @@ async def test_query_subagent_refreshes_retention_until_strictly_after_24_hours(
     async with subagent_database() as db:
         subagent, parent, child, round_row, tool_call = await _add_finished_subagent(
             db,
-            key="query-retention",
-            last_called_at=fixed_now - timedelta(hours=25),
+            key="query-retention-old",
+            last_called_at=fixed_now - timedelta(hours=48),
+        )
+        control_subagent, control_parent, control_child, _control_round, control_call = await _add_finished_subagent(
+            db,
+            key="query-retention-control",
+            last_called_at=fixed_now - timedelta(hours=36),
         )
         child_updated_at = child.updated_at
         saved_round_result = round_row.result
-        parent.status = SessionReplyWorkStatus.RUNNING
-        parent.locked_by = "cleanup-query-worker"
-        parent.lock_until = int(time.time()) + 300
+        crud = CRUDSessionReplyWorkItem()
+        query_parent, query_parent_created = await crud.enqueue(
+            db,
+            uid="user-1",
+            session_id="session-1",
+            profile_id=1,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id="query-retention-operator",
+            dedupe_key="cleanup-parent:query-retention-operator",
+            work_category=SessionReplyWorkCategory.FOREGROUND,
+            commit=False,
+        )
+        assert query_parent_created is True and query_parent.id is not None
+        query_parent.status = SessionReplyWorkStatus.RUNNING
+        query_parent.locked_by = "cleanup-query-worker"
+        query_parent.lock_until = int(time.time()) + 300
         await db.commit()
 
     async with subagent_database() as db:
-        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (parent.id, "cleanup-query-worker")
+        db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (query_parent.id, "cleanup-query-worker")
         response = await child_work.query_subagent_result(
             db,
             uid="user-1",
@@ -964,25 +1738,26 @@ async def test_query_subagent_refreshes_retention_until_strictly_after_24_hours(
         call_row = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.id == tool_call.id))).scalars().one()
         assert call_row.id == tool_call.id
 
-    clock = fixed_now + timedelta(hours=24)
     async with subagent_database() as db:
-        assert await subagent_crud.cleanup_idle(db) == 0
+        assert await subagent_crud.cleanup_idle(db, retention_limit=1) == 1
 
     async with subagent_database() as db:
-        assert (await db.execute(select(Subagent).where(Subagent.id == subagent.id))).scalars().one().id == subagent.id
-        assert (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == child.id))).scalars().one().id == child.id
-        assert (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id == child.id))).scalars().one().result == saved_round_result
+        queried_subagent = (await db.execute(select(Subagent).where(Subagent.id == subagent.id))).scalars().one()
+        assert queried_subagent.id == subagent.id
+        queried_child = (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == child.id))).scalars().one()
+        assert queried_child.id == child.id
+        queried_round = (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id == child.id))).scalars().one()
+        assert queried_round.result == saved_round_result
+        queried_call = (await db.execute(select(SubagentToolCall).where(SubagentToolCall.id == tool_call.id))).scalars().one()
+        assert queried_call.id == tool_call.id
 
-    clock += timedelta(microseconds=1)
-    async with subagent_database() as db:
-        assert await subagent_crud.cleanup_idle(db) == 1
-
-    async with subagent_database() as db:
-        assert (await db.execute(select(Subagent).where(Subagent.id == subagent.id))).scalars().one_or_none() is None
-        assert (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == child.id))).scalars().one_or_none() is None
-        assert (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id == child.id))).scalars().one_or_none() is None
-        assert (await db.execute(select(SubagentToolCall).where(SubagentToolCall.id == tool_call.id))).scalars().one_or_none() is None
+        assert (await db.execute(select(Subagent).where(Subagent.id == control_subagent.id))).scalars().one_or_none() is None
+        assert (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == control_child.id))).scalars().one_or_none() is None
+        assert (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id == control_child.id))).scalars().one_or_none() is None
+        assert (await db.execute(select(SubagentToolCall).where(SubagentToolCall.id == control_call.id))).scalars().one_or_none() is None
         assert (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == parent.id))).scalars().one().id == parent.id
+        assert (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == control_parent.id))).scalars().one().id == control_parent.id
+        assert (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == query_parent.id))).scalars().one().id == query_parent.id
 
 
 @pytest.mark.parametrize("operation", ["query_result", "send_message"])
@@ -996,9 +1771,23 @@ async def test_idle_cleanup_rechecks_activity_after_candidate_scan(subagent_data
             last_called_at=idle_at,
         )
         saved_round_result = round_row.result
-        parent.status = SessionReplyWorkStatus.RUNNING
-        parent.locked_by = "cleanup-race-worker"
-        parent.lock_until = int(time.time()) + 300
+        crud = CRUDSessionReplyWorkItem()
+        operator_parent, operator_parent_created = await crud.enqueue(
+            db,
+            uid="user-1",
+            session_id="session-1",
+            profile_id=1,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id=f"cleanup-race-operator-{operation}",
+            dedupe_key=f"cleanup-parent:cleanup-race-operator-{operation}",
+            work_category=SessionReplyWorkCategory.FOREGROUND,
+            commit=False,
+        )
+        assert operator_parent_created is True and operator_parent.id is not None
+        operator_parent.status = SessionReplyWorkStatus.RUNNING
+        operator_parent.locked_by = "cleanup-race-worker"
+        operator_parent.lock_until = int(time.time()) + 300
         await db.commit()
 
     scanned = asyncio.Event()
@@ -1021,10 +1810,10 @@ async def test_idle_cleanup_rechecks_activity_after_candidate_scan(subagent_data
             monkeypatch.setattr(cleanup_db, "execute", execute)
 
             try:
-                cleanup_task = asyncio.create_task(subagent_crud.cleanup_idle(cleanup_db))
+                cleanup_task = asyncio.create_task(subagent_crud.cleanup_idle(cleanup_db, retention_limit=0))
                 await asyncio.wait_for(scanned.wait(), timeout=5)
 
-                tool_db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (parent.id, "cleanup-race-worker")
+                tool_db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (operator_parent.id, "cleanup-race-worker")
                 if operation == "query_result":
                     response = await child_work.query_subagent_result(
                         tool_db,
@@ -1172,8 +1961,8 @@ async def test_idle_cleanup_preserves_unfinished_or_undelivered_subagents(subage
 
         await db.commit()
 
-        assert await subagent_crud.cleanup_idle(db) == 1
-        await CRUDSessionReplyWorkItem().cleanup_terminal_items(db)
+        assert await subagent_crud.cleanup_idle(db, retention_limit=0) == 1
+        await CRUDSessionReplyWorkItem().cleanup_terminal_items(db, retention_limit=0)
 
     async with subagent_database() as db:
         protected_subagent_row = (await db.execute(select(Subagent).where(Subagent.id == protected_subagent.id))).scalars().one()
@@ -1216,8 +2005,9 @@ async def test_idle_cleanup_preserves_unfinished_or_undelivered_subagents(subage
 @pytest.mark.asyncio
 async def test_consumer_idle_cleanup_obeys_batch_and_per_run_limits(subagent_database, monkeypatch):
     monkeypatch.setattr(consumer_module, "AsyncSessionLocal", subagent_database)
-    monkeypatch.setattr(consumer_module, "SESSION_REPLY_CLEANUP_BATCH_SIZE", 1)
-    monkeypatch.setattr(consumer_module, "SESSION_REPLY_CLEANUP_MAX_ITEMS_PER_RUN", 2)
+    monkeypatch.setattr(consumer_module, "SUBAGENT_CLEANUP_BATCH_SIZE", 1)
+    monkeypatch.setattr(consumer_module, "SUBAGENT_CLEANUP_MAX_ITEMS_PER_RUN", 2)
+    monkeypatch.setattr(subagent_crud, "cleanup_idle", partial(subagent_crud.cleanup_idle, retention_limit=0))
     consumer = consumer_module.SessionReplyConsumer()
     now = get_local_time()
 
@@ -1240,7 +2030,7 @@ async def test_consumer_idle_cleanup_obeys_batch_and_per_run_limits(subagent_dat
     parent_ids = [record[1].id for record in seeded]
     retained_round_result = newest[3].result
 
-    await consumer._cleanup_idle_subagents()
+    await consumer._cleanup_subagent_data()
 
     async with subagent_database() as db:
         assert {row.id for row in (await db.execute(select(Subagent))).scalars().all()} == {newest[0].id}
@@ -1253,7 +2043,7 @@ async def test_consumer_idle_cleanup_obeys_batch_and_per_run_limits(subagent_dat
         retained_round = (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id == newest[2].id))).scalars().one()
         assert retained_round.result == retained_round_result
 
-    await consumer._cleanup_idle_subagents()
+    await consumer._cleanup_subagent_data()
 
     async with subagent_database() as db:
         assert not (await db.execute(select(Subagent))).scalars().all()
@@ -1264,7 +2054,7 @@ async def test_consumer_idle_cleanup_obeys_batch_and_per_run_limits(subagent_dat
         assert [row.id for row in parent_rows] == sorted(parent_ids)
         parent_snapshot = [(row.id, row.status, row.updated_at, row.execution_state) for row in parent_rows]
 
-    await consumer._cleanup_idle_subagents()
+    await consumer._cleanup_subagent_data()
 
     async with subagent_database() as db:
         assert not (await db.execute(select(Subagent))).scalars().all()
@@ -1273,3 +2063,187 @@ async def test_consumer_idle_cleanup_obeys_batch_and_per_run_limits(subagent_dat
         assert not (await db.execute(select(SubagentToolCall))).scalars().all()
         parent_rows = (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id.in_(parent_ids)).order_by(SessionReplyWorkItem.id))).scalars().all()
         assert [(row.id, row.status, row.updated_at, row.execution_state) for row in parent_rows] == parent_snapshot
+
+
+@pytest.mark.asyncio
+async def test_cleanup_old_rounds_respects_capacity_and_preserves_tool_call_source(subagent_database):
+    crud = CRUDSessionReplyWorkItem()
+    now = get_local_time()
+    round_times = [now - timedelta(hours=4), now - timedelta(hours=3), now - timedelta(hours=2), now - timedelta(hours=1)]
+
+    async with subagent_database() as db:
+        subagent, parent, first_child, first_round, _source_call = await _add_finished_subagent(
+            db,
+            key="history-capacity-source",
+            last_called_at=round_times[3],
+        )
+        first_child.created_at = round_times[0]
+        first_child.updated_at = round_times[0]
+        first_round.created_at = round_times[0]
+
+        source_message = Message(
+            uid="user-1",
+            session_id="session-1",
+            profile_id=1,
+            work_id=first_child.id,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TOOL_CALL,
+            content='{"role":"assistant","tool_calls":[{"id":"history-source-call","name":"file_tool","arguments":{"operation":"read","path":"source.txt"}}]}',
+            is_processed=True,
+            created_at=round_times[0],
+        )
+        db.add(source_message)
+        await db.flush()
+        assert source_message.id is not None
+
+        source_tool_snapshot = {
+            "id": source_message.id,
+            "role": "assistant",
+            "type": "tool_call",
+            "tool_calls": [
+                {
+                    "id": "history-source-call",
+                    "name": "file_tool",
+                    "arguments": {"operation": "read", "path": "source.txt"},
+                }
+            ],
+        }
+
+        round_rows = [first_child]
+        for index, round_time in enumerate(round_times[1:], start=2):
+            child, child_created = await crud.enqueue(
+                db,
+                uid="user-1",
+                session_id="session-1",
+                profile_id=1,
+                work_type=SessionReplyWorkType.AGENT_WORK,
+                source_type=SessionReplySourceType.PARENT_WORK,
+                source_id=parent.id,
+                dedupe_key=f"history-capacity-round-{index}",
+                work_category=SessionReplyWorkCategory.SUBAGENT,
+                commit=False,
+            )
+            assert child_created is True and child.id is not None
+            child.subagent_id = subagent.id
+            child.status = SessionReplyWorkStatus.SUCCEEDED
+            child.created_at = round_time
+            child.updated_at = round_time
+            round_row = SubagentWork(
+                subagent_id=subagent.id,
+                child_work_id=child.id,
+                current_work_id=child.id,
+                result={
+                    "work_id": child.id,
+                    "current_work_id": child.id,
+                    "completed": True,
+                    "status": "succeeded",
+                    "result": {"content": f"history round {index}"},
+                    "error": None,
+                },
+                created_at=round_time,
+            )
+            db.add(round_row)
+            await db.flush()
+            round_rows.append(child)
+
+        second_child = round_rows[1]
+        third_child = round_rows[2]
+        fourth_child = round_rows[3]
+
+        board_post = SubagentBoardPost(
+            uid="user-1",
+            session_id="session-1",
+            profile_id=1,
+            subagent_id=subagent.id,
+            child_work_id=second_child.id,
+            stage="progress",
+            content="history round 2 progress",
+            created_at=round_times[1],
+        )
+        private_message = Message(
+            uid="user-1",
+            session_id="session-1",
+            profile_id=1,
+            work_id=second_child.id,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="history round 2 private message",
+            is_processed=False,
+            created_at=round_times[1],
+        )
+        db.add_all([board_post, private_message])
+        await db.flush()
+        assert board_post.id is not None and private_message.id is not None
+
+        await crud.save_checkpoint(
+            db,
+            second_child.id,
+            {"messages": [{"role": "user", "content": "history round 2 checkpoint"}]},
+        )
+        await crud.save_checkpoint(db, fourth_child.id, {"messages": [source_tool_snapshot]})
+        second_checkpoint_message_id = (
+            await db.execute(
+                select(SessionReplyCheckpointMessageReference.message_id).where(
+                    SessionReplyCheckpointMessageReference.work_id == second_child.id,
+                    SessionReplyCheckpointMessageReference.kind == "checkpoint",
+                )
+            )
+        ).scalar_one()
+        subagent.latest_child_work_id = fourth_child.id
+        subagent.active_child_work_id = None
+        await db.flush()
+        await db.commit()
+
+        first_child_id = first_child.id
+        second_child_id = second_child.id
+        third_child_id = third_child.id
+        fourth_child_id = fourth_child.id
+        source_message_id = source_message.id
+        board_post_id = board_post.id
+        private_message_id = private_message.id
+        subagent_id = subagent.id
+        assert first_child_id is not None and second_child_id is not None and third_child_id is not None and fourth_child_id is not None and source_message_id is not None and board_post_id is not None and private_message_id is not None
+
+    async with subagent_database() as db:
+        assert await subagent_crud.cleanup_old_rounds(db, retention_limit=2, batch_size=1) == 0
+
+    async with subagent_database() as db:
+        assert {row.child_work_id for row in (await db.execute(select(SubagentWork))).scalars().all()} == {first_child_id, second_child_id, third_child_id, fourth_child_id}
+
+    async with subagent_database() as db:
+        assert await subagent_crud.cleanup_old_rounds(db, retention_limit=1, batch_size=1) == 1
+
+    async with subagent_database() as db:
+        assert (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == second_child_id))).scalars().one_or_none() is None
+        assert (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id == second_child_id))).scalars().one_or_none() is None
+        assert (await db.execute(select(SubagentBoardPost).where(SubagentBoardPost.id == board_post_id))).scalars().one_or_none() is None
+        assert (await db.execute(select(Message).where(Message.id == private_message_id))).scalars().one_or_none() is None
+        assert (await db.execute(select(SessionReplyWorkCheckpoint).where(SessionReplyWorkCheckpoint.work_id == second_child_id))).scalars().one_or_none() is None
+        assert (
+            await db.execute(
+                select(SessionReplyCheckpointMessageReference).where(
+                    SessionReplyCheckpointMessageReference.work_id == second_child_id,
+                )
+            )
+        ).scalars().all() == []
+        assert (await db.execute(select(SessionReplyCheckpointMessage).where(SessionReplyCheckpointMessage.id == second_checkpoint_message_id))).scalars().one_or_none() is None
+
+        source_message_row = (await db.execute(select(Message).where(Message.id == source_message_id))).scalars().one()
+        assert (source_message_row.work_id, source_message_row.role, source_message_row.type) == (
+            first_child_id,
+            MessageRole.ASSISTANT,
+            MessageType.TOOL_CALL,
+        )
+        first_round_row = (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id == first_child_id))).scalars().one()
+        assert first_round_row.current_work_id == first_child_id
+
+        third_work_row = (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == third_child_id))).scalars().one()
+        third_round_row = (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id == third_child_id))).scalars().one()
+        assert (third_work_row.status, third_round_row.current_work_id) == (SessionReplyWorkStatus.SUCCEEDED, third_child_id)
+
+        latest_subagent = (await db.execute(select(Subagent).where(Subagent.id == subagent_id))).scalars().one()
+        assert (latest_subagent.latest_child_work_id, latest_subagent.active_child_work_id) == (fourth_child_id, None)
+        latest_work_row = (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == fourth_child_id))).scalars().one()
+        latest_round_row = (await db.execute(select(SubagentWork).where(SubagentWork.child_work_id == fourth_child_id))).scalars().one()
+        assert (latest_work_row.status, latest_round_row.current_work_id) == (SessionReplyWorkStatus.SUCCEEDED, fourth_child_id)
+        assert await crud.get_checkpoint(db, fourth_child_id) == {"messages": [source_tool_snapshot]}

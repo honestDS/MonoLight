@@ -5,9 +5,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, delete, exists, func, or_, update
+from sqlalchemy import JSON, String, and_, case, cast, delete, exists, func, literal, or_, type_coerce, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from sqlmodel import select
 
 from app.core.constants import (
@@ -18,12 +19,13 @@ from app.core.constants import (
     SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
     SESSION_REPLY_CLEANUP_BATCH_SIZE,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
-    SESSION_REPLY_WORK_RETENTION_HOURS,
+    SESSION_REPLY_WORK_RETENTION_LIMIT,
 )
 from app.core.crud.session.reply_checkpoint_message import session_reply_checkpoint_message_crud
 from app.core.i18n import t
 from app.core.utils.time import get_local_time
-from app.models.audit import AuditRecord
+from app.models.audit import AUDIT_TERMINAL_STATUSES, AuditRecord
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
@@ -38,9 +40,155 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
-from app.models.subagent import SubagentToolCall
+from app.models.subagent import SubagentToolCall, SubagentWork
 
 _TERMINAL_STATUS_VALUES = [status.value for status in SESSION_REPLY_TERMINAL_STATUSES]
+
+
+def reply_work_is_protected(work: Any, *, dialect_name: str) -> Any:
+    audit_record = (
+        select(1)
+        .select_from(AuditRecord)
+        .where(
+            AuditRecord.uid == work.uid,
+            AuditRecord.session_id == work.session_id,
+            AuditRecord.source_work_id == work.id,
+            AuditRecord.status.not_in(AUDIT_TERMINAL_STATUSES),
+        )
+        .correlate(work)
+    )
+    active_audit_execution_work = aliased(SessionReplyWorkItem, name="active_audit_execution_work")
+    audit_execution_work = (
+        select(1)
+        .select_from(active_audit_execution_work)
+        .join(
+            AuditRecord,
+            and_(
+                AuditRecord.source_work_id == work.id,
+                AuditRecord.uid == work.uid,
+                AuditRecord.session_id == work.session_id,
+                active_audit_execution_work.source_id == cast(AuditRecord.id, String),
+            ),
+        )
+        .where(
+            active_audit_execution_work.uid == work.uid,
+            active_audit_execution_work.session_id == work.session_id,
+            active_audit_execution_work.profile_id == work.profile_id,
+            active_audit_execution_work.status.in_([status.value for status in SESSION_REPLY_ACTIVE_STATUSES]),
+            active_audit_execution_work.source_type == SessionReplySourceType.AUDIT_RECORD,
+            active_audit_execution_work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+        )
+        .correlate(work)
+    )
+    subagent_work = (
+        select(1)
+        .select_from(SubagentToolCall)
+        .join(
+            SubagentWork,
+            and_(
+                SubagentWork.child_work_id == SubagentToolCall.child_work_id,
+                SubagentWork.subagent_id == SubagentToolCall.subagent_id,
+            ),
+        )
+        .where(
+            SubagentToolCall.parent_work_id == work.id,
+            or_(
+                SubagentToolCall.delivered.is_(False),
+                SubagentWork.waiting_confirmation.is_(True),
+                SubagentWork.result.is_(None),
+            ),
+        )
+        .correlate(work)
+    )
+
+    terminal_delivery_ledger = BackgroundTask.extra["terminal_watch_deliveries"]
+    terminal_delivery_path = literal('$.terminal_watch_deliveries."') + cast(work.id, String) + literal('"')
+    terminal_delivery = type_coerce(
+        func.json_extract(
+            BackgroundTask.extra,
+            terminal_delivery_path,
+        ),
+        JSON,
+    )
+    terminal_delivery_identity = terminal_delivery["identity"].as_string()
+    terminal_delivery_consumed = terminal_delivery["consumed"].as_boolean()
+    origin_match = and_(
+        BackgroundTask.extra["origin_work_id"].as_integer() == work.id,
+        BackgroundTask.extra["origin_work_identity"].as_string() == work.dedupe_key,
+    )
+    pending_terminal_delivery = or_(
+        and_(
+            terminal_delivery_identity == work.dedupe_key,
+            terminal_delivery_consumed.is_(False),
+        ),
+        and_(terminal_delivery_ledger.as_string().is_(None), origin_match),
+    )
+    task_scope = (
+        BackgroundTask.uid == work.uid,
+        BackgroundTask.session_id == work.session_id,
+        BackgroundTask.profile_id == work.profile_id,
+    )
+
+    def _waiting_slot_contains_task_id(field: str) -> Any:
+        path = f"$.{field}"
+        if dialect_name == "sqlite":
+            slot = func.json_each(work.execution_state, literal(path)).table_valued("value").alias(f"reply_work_{field}_slot")
+            return exists(select(1).select_from(slot).where(func.json_extract(slot.c.value, literal("$.task_id")) == BackgroundTask.id).correlate(work, BackgroundTask))
+        return func.json_contains(work.execution_state, func.json_object("task_id", BackgroundTask.id), literal(path)) == 1
+
+    waiting_slot = or_(*(_waiting_slot_contains_task_id(field) for field in ("pending_tools", "terminal_watch_waits")))
+    active_origin_task = and_(
+        BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]),
+        BackgroundTask.extra["auto_terminal_watch"].as_boolean().is_not(True),
+        origin_match,
+    )
+    replyable_external_task = and_(
+        BackgroundTask.status.in_(
+            [
+                BackgroundTaskStatus.PENDING,
+                BackgroundTaskStatus.RUNNING,
+                BackgroundTaskStatus.SUCCEEDED,
+                BackgroundTaskStatus.FAILED,
+            ]
+        ),
+        BackgroundTask.auto_reply.is_(True),
+        BackgroundTask.reply_status.in_([BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.RUNNING]),
+        pending_terminal_delivery,
+    )
+    resumable_origin_task = and_(
+        BackgroundTask.status.in_([BackgroundTaskStatus.SUCCEEDED, BackgroundTaskStatus.FAILED, BackgroundTaskStatus.CANCELLED]),
+        BackgroundTask.extra["auto_terminal_watch"].as_boolean().is_not(True),
+        origin_match,
+        waiting_slot,
+        or_(
+            BackgroundTask.extra["reply_owner"]["status"].as_string().is_(None),
+            BackgroundTask.extra["reply_owner"]["status"].as_string() != "handled",
+        ),
+        or_(
+            BackgroundTask.extra["terminal_watch_subscription"].as_boolean().is_not(True),
+            BackgroundTask.status != BackgroundTaskStatus.CANCELLED,
+        ),
+    )
+    external_task = (
+        select(1)
+        .select_from(BackgroundTask)
+        .where(
+            *task_scope,
+            work.status.in_([SessionReplyWorkStatus.SUCCEEDED, SessionReplyWorkStatus.MERGED]),
+            or_(active_origin_task, replyable_external_task, resumable_origin_task),
+        )
+        .correlate(work)
+    )
+
+    return or_(
+        work.status.not_in(_TERMINAL_STATUS_VALUES),
+        work.locked_by.is_not(None),
+        work.lock_until.is_not(None),
+        exists(audit_record),
+        exists(audit_execution_work),
+        exists(subagent_work),
+        exists(external_task),
+    )
 
 
 def _work_category_expression(table: Any) -> Any:
@@ -70,12 +218,13 @@ def _is_subagent_board_review() -> Any:
 class SessionReplyCleanupResult:
     work_items: int = 0
     stream_events: int = 0
+    private_messages: int = 0
     sequences: int = 0
     checkpoint_messages: int = 0
 
     @property
     def total(self) -> int:
-        return self.work_items + self.stream_events + self.sequences + self.checkpoint_messages
+        return self.work_items + self.stream_events + self.private_messages + self.sequences + self.checkpoint_messages
 
 
 class CRUDSessionReplyWorkItem:
@@ -872,112 +1021,232 @@ class CRUDSessionReplyWorkItem:
             await db.commit()
         return result.rowcount or 0
 
+    async def _cleanup_excess_work(
+        self,
+        db: AsyncSession,
+        *,
+        retention_limit: int,
+        batch_size: int,
+    ) -> tuple[int, int, int]:
+        if batch_size <= 0:
+            return 0, 0, 0
+
+        dialect_name = db.get_bind().dialect.name
+        target_work = SessionReplyWorkItem.__table__.alias("cleanup_target_work")
+        merged_into_active = (
+            select(1)
+            .select_from(target_work)
+            .where(
+                target_work.c.id == SessionReplyWorkItem.merged_into_id,
+                SessionReplyWorkItem.status == SessionReplyWorkStatus.MERGED.value,
+                target_work.c.uid == SessionReplyWorkItem.uid,
+                target_work.c.session_id == SessionReplyWorkItem.session_id,
+                target_work.c.status.in_([status.value for status in SESSION_REPLY_ACTIVE_STATUSES]),
+            )
+            .correlate(SessionReplyWorkItem)
+        )
+        protected = reply_work_is_protected(SessionReplyWorkItem, dialect_name=dialect_name)
+        base_conditions = [
+            SessionReplyWorkItem.status.in_(_TERMINAL_STATUS_VALUES),
+            SessionReplyWorkItem.subagent_id.is_(None),
+            ~protected,
+        ]
+        candidate_conditions = [*base_conditions, ~exists(merged_into_active)]
+        boundary_condition: Any | None = None
+
+        if retention_limit > 0:
+            boundary_result = await db.execute(select(SessionReplyWorkItem.updated_at, SessionReplyWorkItem.id).where(*candidate_conditions).order_by(SessionReplyWorkItem.updated_at.desc(), SessionReplyWorkItem.id.desc()).offset(retention_limit - 1).limit(1))
+            boundary = boundary_result.first()
+            if boundary is None:
+                return 0, 0, 0
+            boundary_updated_at, boundary_id = boundary
+            boundary_condition = or_(
+                SessionReplyWorkItem.updated_at < boundary_updated_at,
+                and_(
+                    SessionReplyWorkItem.updated_at == boundary_updated_at,
+                    SessionReplyWorkItem.id < boundary_id,
+                ),
+            )
+            candidate_conditions.append(boundary_condition)
+
+        candidate_result = await db.execute(select(SessionReplyWorkItem.id).where(*candidate_conditions).order_by(SessionReplyWorkItem.updated_at.asc(), SessionReplyWorkItem.id.asc()).limit(batch_size).with_for_update())
+        candidate_ids = [work_id for work_id in candidate_result.scalars().all() if work_id is not None]
+        if not candidate_ids:
+            return 0, 0, 0
+
+        if dialect_name == "sqlite":
+            locked_result = await db.execute(update(SessionReplyWorkItem).where(SessionReplyWorkItem.id.in_(candidate_ids), *candidate_conditions).values(updated_at=SessionReplyWorkItem.updated_at).returning(SessionReplyWorkItem.id).execution_options(synchronize_session=False))
+            locked_id_set = {work_id for work_id in locked_result.scalars().all() if work_id is not None}
+            locked_ids = [work_id for work_id in candidate_ids if work_id in locked_id_set]
+        else:
+            locked_ids = candidate_ids
+        if not locked_ids:
+            return 0, 0, 0
+
+        event_result = await db.execute(
+            select(SessionReplyStreamEvent.id)
+            .join(SessionReplyWorkItem, SessionReplyWorkItem.id == SessionReplyStreamEvent.work_id)
+            .where(SessionReplyStreamEvent.work_id.in_(locked_ids))
+            .order_by(
+                SessionReplyWorkItem.updated_at.asc(),
+                SessionReplyWorkItem.id.asc(),
+                SessionReplyStreamEvent.id.asc(),
+            )
+            .limit(batch_size)
+            .with_for_update()
+        )
+        event_ids = [event_id for event_id in event_result.scalars().all() if event_id is not None]
+        stream_event_count = 0
+        if event_ids:
+            deleted_event_result = await db.execute(delete(SessionReplyStreamEvent).where(SessionReplyStreamEvent.id.in_(event_ids)).execution_options(synchronize_session=False))
+            stream_event_count = deleted_event_result.rowcount or 0
+
+        remaining = batch_size - stream_event_count
+        if remaining <= 0:
+            return 0, stream_event_count, 0
+
+        private_message_result = await db.execute(
+            select(Message.id)
+            .join(
+                SessionReplyWorkItem,
+                and_(
+                    SessionReplyWorkItem.id == Message.work_id,
+                    SessionReplyWorkItem.uid == Message.uid,
+                    SessionReplyWorkItem.session_id == Message.session_id,
+                    SessionReplyWorkItem.profile_id == Message.profile_id,
+                ),
+            )
+            .where(
+                SessionReplyWorkItem.id.in_(locked_ids),
+                Message.work_id.is_not(None),
+            )
+            .order_by(
+                SessionReplyWorkItem.updated_at.asc(),
+                SessionReplyWorkItem.id.asc(),
+                Message.id.asc(),
+            )
+            .limit(remaining)
+            .with_for_update()
+        )
+        private_message_ids = [message_id for message_id in private_message_result.scalars().all() if message_id is not None]
+        private_message_count = 0
+        if private_message_ids:
+            deleted_message_result = await db.execute(
+                delete(Message)
+                .where(
+                    Message.id.in_(private_message_ids),
+                    Message.work_id.is_not(None),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            private_message_count = deleted_message_result.rowcount or 0
+
+        remaining -= private_message_count
+        if remaining <= 0:
+            return 0, stream_event_count, private_message_count
+
+        work_result = await db.execute(
+            select(SessionReplyWorkItem.id)
+            .where(
+                SessionReplyWorkItem.id.in_(locked_ids),
+                ~exists(select(1).select_from(SessionReplyStreamEvent).where(SessionReplyStreamEvent.work_id == SessionReplyWorkItem.id)),
+                ~exists(
+                    select(1)
+                    .select_from(Message)
+                    .where(
+                        Message.work_id == SessionReplyWorkItem.id,
+                        Message.uid == SessionReplyWorkItem.uid,
+                        Message.session_id == SessionReplyWorkItem.session_id,
+                        Message.profile_id == SessionReplyWorkItem.profile_id,
+                    )
+                ),
+            )
+            .order_by(SessionReplyWorkItem.updated_at.asc(), SessionReplyWorkItem.id.asc())
+            .limit(remaining)
+            .with_for_update()
+        )
+        work_ids = [work_id for work_id in work_result.scalars().all() if work_id is not None]
+        if not work_ids:
+            return 0, stream_event_count, private_message_count
+
+        deleted_work_result = await db.execute(delete(SessionReplyWorkItem).where(SessionReplyWorkItem.id.in_(work_ids)).execution_options(synchronize_session=False))
+        return deleted_work_result.rowcount or 0, stream_event_count, private_message_count
+
+    async def _cleanup_orphan_rows(
+        self,
+        db: AsyncSession,
+        *,
+        model: Any,
+        primary_key: Any,
+        conditions: list[Any],
+        limit: int,
+    ) -> int:
+        orphan_result = await db.execute(select(primary_key).where(*conditions).order_by(primary_key).limit(limit).with_for_update())
+        orphan_ids = [value for value in orphan_result.scalars().all() if value is not None]
+        if not orphan_ids:
+            return 0
+
+        deleted_result = await db.execute(delete(model).where(primary_key.in_(orphan_ids), *conditions).execution_options(synchronize_session=False))
+        return deleted_result.rowcount or 0
+
     async def cleanup_terminal_items(
         self,
         db: AsyncSession,
         *,
-        retention_hours: int = SESSION_REPLY_WORK_RETENTION_HOURS,
+        retention_limit: int = SESSION_REPLY_WORK_RETENTION_LIMIT,
         batch_size: int = SESSION_REPLY_CLEANUP_BATCH_SIZE,
     ) -> SessionReplyCleanupResult:
-        cutoff = get_local_time() - timedelta(hours=retention_hours)
-        remaining = max(1, batch_size)
-        work_item_count = 0
-        stream_event_count = 0
-        sequence_count = 0
-        checkpoint_message_count = 0
-        expired_work_conditions = [
-            SessionReplyWorkItem.status.in_(_TERMINAL_STATUS_VALUES),
-            SessionReplyWorkItem.updated_at < cutoff,
-            SessionReplyWorkItem.subagent_id.is_(None),
-            ~exists(select(1).select_from(SubagentToolCall).where(SubagentToolCall.parent_work_id == SessionReplyWorkItem.id)),
-        ]
+        if batch_size <= 0:
+            return SessionReplyCleanupResult()
 
-        expired_event_ids = (
-            select(SessionReplyStreamEvent.id)
-            .where(
-                SessionReplyStreamEvent.work_id.in_(
-                    select(SessionReplyWorkItem.id).where(*expired_work_conditions),
-                )
+        try:
+            work_item_count, stream_event_count, private_message_count = await self._cleanup_excess_work(
+                db,
+                retention_limit=retention_limit,
+                batch_size=batch_size,
             )
-            .order_by(SessionReplyStreamEvent.id)
-            .limit(remaining)
-        )
-        event_result = await db.execute(delete(SessionReplyStreamEvent).where(SessionReplyStreamEvent.id.in_(expired_event_ids)).execution_options(synchronize_session=False))
-        await db.commit()
-        deleted = event_result.rowcount or 0
-        stream_event_count += deleted
-        remaining -= deleted
+            remaining = max(0, batch_size - work_item_count - stream_event_count - private_message_count)
+            sequence_count = 0
+            checkpoint_message_count = 0
 
-        if remaining > 0:
-            expired_work_ids = (
-                select(SessionReplyWorkItem.id)
-                .where(
-                    *expired_work_conditions,
-                    ~exists(
-                        select(1).where(
-                            SessionReplyStreamEvent.work_id == SessionReplyWorkItem.id,
-                        )
-                    ),
+            if remaining > 0:
+                deleted = await self._cleanup_orphan_rows(
+                    db,
+                    model=SessionReplyStreamEvent,
+                    primary_key=SessionReplyStreamEvent.id,
+                    conditions=[~exists(select(1).select_from(SessionReplyWorkItem).where(SessionReplyWorkItem.id == SessionReplyStreamEvent.work_id))],
+                    limit=remaining,
                 )
-                .order_by(SessionReplyWorkItem.id)
-                .limit(remaining)
-            )
-            work_result = await db.execute(delete(SessionReplyWorkItem).where(SessionReplyWorkItem.id.in_(expired_work_ids)).execution_options(synchronize_session=False))
-            await db.commit()
-            deleted = work_result.rowcount or 0
-            work_item_count += deleted
-            remaining -= deleted
+                stream_event_count += deleted
+                remaining -= deleted
 
-        if remaining > 0:
-            orphan_event_ids = (
-                select(SessionReplyStreamEvent.id)
-                .where(
-                    ~exists(
-                        select(1).where(
-                            SessionReplyWorkItem.id == SessionReplyStreamEvent.work_id,
-                        )
-                    )
+            if remaining > 0:
+                deleted = await self._cleanup_orphan_rows(
+                    db,
+                    model=SessionReplySequence,
+                    primary_key=SessionReplySequence.session_id,
+                    conditions=[
+                        ~exists(select(1).select_from(ChatSession).where(ChatSession.session_id == SessionReplySequence.session_id)),
+                        ~exists(select(1).select_from(SessionReplyWorkItem).where(SessionReplyWorkItem.session_id == SessionReplySequence.session_id)),
+                    ],
+                    limit=remaining,
                 )
-                .order_by(SessionReplyStreamEvent.id)
-                .limit(remaining)
-            )
-            orphan_event_result = await db.execute(delete(SessionReplyStreamEvent).where(SessionReplyStreamEvent.id.in_(orphan_event_ids)).execution_options(synchronize_session=False))
-            await db.commit()
-            deleted = orphan_event_result.rowcount or 0
-            stream_event_count += deleted
-            remaining -= deleted
+                sequence_count += deleted
+                remaining -= deleted
 
-        if remaining > 0:
-            orphan_sequence_ids = (
-                select(SessionReplySequence.session_id)
-                .where(
-                    ~exists(
-                        select(1).where(
-                            ChatSession.session_id == SessionReplySequence.session_id,
-                        )
-                    ),
-                    ~exists(
-                        select(1).where(
-                            SessionReplyWorkItem.session_id == SessionReplySequence.session_id,
-                        )
-                    ),
-                )
-                .order_by(SessionReplySequence.session_id)
-                .limit(remaining)
-            )
-            orphan_sequence_result = await db.execute(delete(SessionReplySequence).where(SessionReplySequence.session_id.in_(orphan_sequence_ids)).execution_options(synchronize_session=False))
-            await db.commit()
-            deleted = orphan_sequence_result.rowcount or 0
-            sequence_count += deleted
-            remaining -= deleted
+            if remaining > 0:
+                checkpoint_message_count = await session_reply_checkpoint_message_crud.cleanup_unreferenced(db, limit=remaining)
+                remaining -= checkpoint_message_count
 
-        if remaining > 0:
-            checkpoint_message_count = await session_reply_checkpoint_message_crud.cleanup_unreferenced(db, limit=remaining)
             await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
 
         return SessionReplyCleanupResult(
             work_items=work_item_count,
             stream_events=stream_event_count,
+            private_messages=private_message_count,
             sequences=sequence_count,
             checkpoint_messages=checkpoint_message_count,
         )

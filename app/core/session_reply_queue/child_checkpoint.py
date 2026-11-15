@@ -4,12 +4,13 @@ from copy import deepcopy
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit.confirmation_results import replace_pending_tool_result
-from app.core.constants import AGENT_WORK_TOOL_NAME, ERR_SUBAGENT_CONTEXT_INVALID
+from app.core.constants import AGENT_WORK_TOOL_NAME, ERR_SUBAGENT_CONTEXT_INVALID, SUBAGENT_QUEUED_RECOVERY_MESSAGE_KIND
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
 from app.core.crud.session.subagent import subagent_crud
 from app.core.exceptions import ParameterException
+from app.core.session_reply_queue.child_delivery import build_subagent_notification_key
 from app.core.session_reply_queue.child_work import build_subagent_queued_result
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
@@ -133,7 +134,20 @@ async def _recover_result(db: AsyncSession, work: SessionReplyWorkItem, call: Su
     queued_content = json.dumps(queued, ensure_ascii=False)
     if row is None:
         result = InternalMessage(role=MessageRole.TOOL, tool_call_id=call.tool_call_id, content=queued_content)
-        saved = await save_message(db, work.session_id, work.uid, MessageRole.TOOL, MessageType.TOOL_RESULT, result, work.profile_id, is_processed=True, dedupe_key=f"subagent-queued:{call.id}", commit=False, work_id=message_work_id)
+        dedupe_key = build_subagent_notification_key(work, SUBAGENT_QUEUED_RECOVERY_MESSAGE_KIND, f"{call.subagent_id}:{call.tool_call_id}")
+        saved = await save_message(
+            db,
+            work.session_id,
+            work.uid,
+            MessageRole.TOOL,
+            MessageType.TOOL_RESULT,
+            result,
+            work.profile_id,
+            is_processed=True,
+            dedupe_key=dedupe_key,
+            commit=False,
+            work_id=message_work_id,
+        )
         if not _valid_id(saved.id):
             _bad()
         result.id = saved.id

@@ -557,7 +557,8 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
             stage_payload = json.loads(stage_marker.content or "{}")
             completion_payload = json.loads(completion_marker.content or "{}")
             assert stage_marker.role == MessageRole.USER
-            assert stage_marker.dedupe_key == f"subagent-board:{parent_work_id}:{board_post.id}"
+            assert len(stage_marker.dedupe_key) == 64
+            assert stage_marker.dedupe_key != f"subagent-board:{parent_work_id}:{board_post.id}"
             assert stage_payload["type"] == "subagent_board_update"
             assert stage_payload["source"] == "subagent"
             assert stage_payload["subagent_id"] == child.subagent_id
@@ -567,7 +568,8 @@ async def test_agent_work_create_executes_private_child_and_resumes_parent(
             assert "content" not in stage_payload
             assert board_marker not in (stage_marker.content or "")
             assert completion_marker.role == MessageRole.USER
-            assert completion_marker.dedupe_key == f"subagent-result:{call.id}"
+            assert len(completion_marker.dedupe_key) == 64
+            assert completion_marker.dedupe_key != f"subagent-result:{call.id}"
             assert completion_payload["type"] == "external_work_resume"
             assert completion_payload["source"] == "subagent"
             assert completion_payload["tool_call"] == {

@@ -14,6 +14,7 @@ from app.core.utils.llm_request_params import build_session_cache_key
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
+from app.models.session import ChatSession
 from app.models.session_event import SessionEvent
 from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.models.subagent import SubagentBoardPost, SubagentToolCall, SubagentWork
@@ -1116,6 +1117,46 @@ async def test_interrupted_parent_create_preserves_registered_child_delivery_wit
         async with runtime.factory() as db:
             parent = await db.get(SessionReplyWorkItem, parent_work_id)
             assert parent is not None
+            assert c_call.id is not None
+            historical_session_id = f"multi-child-recovery-history-{c_call.id}"
+            historical_dedupe_key = f"subagent-queued:{c_call.id}"
+            historical_result = InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id="historical-multi-child-recovery-call",
+                content=json.dumps(
+                    {
+                        "status": "queued",
+                        "subagent_id": "historical-multi-child-recovery-subagent",
+                        "work_id": 987654321,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            historical_result_content = historical_result.model_dump_json(exclude_none=True)
+            historical_result_row = Message(
+                session_id=historical_session_id,
+                uid=parent.uid,
+                profile_id=parent.profile_id,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_RESULT,
+                content=historical_result_content,
+                is_processed=True,
+                dedupe_key=historical_dedupe_key,
+            )
+            db.add(
+                ChatSession(
+                    session_id=historical_session_id,
+                    uid=parent.uid,
+                    profile_id=parent.profile_id,
+                )
+            )
+            await db.flush()
+            db.add(historical_result_row)
+            await db.flush()
+            assert historical_result_row.id is not None
+            historical_result_message_id = historical_result_row.id
             parent.lock_until = 0
             await db.commit()
 
@@ -1155,6 +1196,25 @@ async def test_interrupted_parent_create_preserves_registered_child_delivery_wit
             assert b_wait["tool_result_message_id"] == b_result_message_id
             c_wait = next(slot for slot in waits if isinstance(slot, dict) and slot.get("child_work_id") == child_c_work_id)
             assert c_wait["tool_result_message_id"] is not None
+            assert c_wait["tool_result_message_id"] != historical_result_message_id
+            c_result_row = await db.get(Message, c_wait["tool_result_message_id"])
+            assert c_result_row is not None
+            assert c_result_row.session_id == parent.session_id
+            assert c_result_row.uid == parent.uid
+            assert c_result_row.profile_id == parent.profile_id
+            assert c_result_row.dedupe_key != historical_dedupe_key
+            c_result_message, c_result_payload = _result_payload(c_result_row)
+            assert c_result_message.tool_call_id == c_call.tool_call_id
+            assert c_result_payload == {
+                "subagent_id": c_call.subagent_id,
+                "work_id": child_c_work_id,
+                "status": "queued",
+            }
+            historical_result_row = await db.get(Message, historical_result_message_id)
+            assert historical_result_row is not None
+            assert historical_result_row.session_id == historical_session_id
+            assert historical_result_row.dedupe_key == historical_dedupe_key
+            assert historical_result_row.content == historical_result_content
             if interruption_point == "after-result-save":
                 assert saved_c_result_id is not None
                 assert c_wait["tool_result_message_id"] == saved_c_result_id

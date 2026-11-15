@@ -1,6 +1,5 @@
 import asyncio
 from collections.abc import AsyncGenerator
-from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,8 +23,8 @@ from app.core.utils.request_token_baseline import (
     extract_confirmed_provider_input_tokens,
     extract_provider_token_metrics,
 )
-from app.core.utils.time import get_local_time
 from app.models.audit import AuditDecision, AuditRecord, AuditRecordStatus
+from app.models.background_task import BackgroundTask
 from app.models.message import InternalMessage, Message, MessageRole
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
@@ -91,6 +90,7 @@ async def session_factory(tmp_path) -> AsyncGenerator[async_sessionmaker[AsyncSe
             ChatSession.__table__,
             Message.__table__,
             AuditRecord.__table__,
+            BackgroundTask.__table__,
             SessionReplyWorkItem.__table__,
             SessionReplySequence.__table__,
             ProviderUsageDetail.__table__,
@@ -785,14 +785,17 @@ async def test_scheduled_interactive_usage_stays_outside_session_totals_and_surv
         ) == (ProviderUsageType.SCHEDULED_TASK.value, 120, 20, 7, 1)
         assert session.llm_request_metadata == main_metadata
 
-        scheduled_work = await db.get(SessionReplyWorkItem, 7)
-        assert scheduled_work is not None
-        scheduled_work.status = SessionReplyWorkStatus.SUCCEEDED
-        scheduled_work.updated_at = get_local_time() - timedelta(hours=25)
+        assert await session_reply_work_item_crud.mark_terminal(
+            db,
+            work_id=7,
+            worker_id="worker-1",
+            status=SessionReplyWorkStatus.SUCCEEDED,
+            commit=False,
+        )
         db.add(SessionReplySequence(session_id=SESSION_ID, next_sequence_no=scheduled_sequence_no + 1))
         await db.commit()
 
-        cleanup_result = await session_reply_work_item_crud.cleanup_terminal_items(db)
+        cleanup_result = await session_reply_work_item_crud.cleanup_terminal_items(db, retention_limit=0)
         assert cleanup_result.work_items == 1
         assert (await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == 7))).scalar_one_or_none() is None
         assert (await db.execute(select(SessionReplySequence).where(SessionReplySequence.session_id == SESSION_ID))).scalar_one_or_none() is not None

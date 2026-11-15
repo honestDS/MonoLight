@@ -193,7 +193,8 @@ async def test_subagent_result_delivery_is_hidden_from_user_history_but_kept_for
             assert marker.id is not None
             marker_id = marker.id
             assert marker.role == MessageRole.USER
-            assert marker.dedupe_key == f"subagent-result:{call.id}"
+            assert len(marker.dedupe_key) == 64
+            assert marker.dedupe_key != f"subagent-result:{call.id}"
             marker_payload = json.loads(marker.content or "{}")
             assert marker_payload["results"] == [expected_child_result]
 

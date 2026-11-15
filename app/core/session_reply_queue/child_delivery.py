@@ -1,3 +1,4 @@
+import hashlib
 import json
 from copy import deepcopy
 from typing import Any
@@ -9,6 +10,11 @@ from app.core.constants import (
     AGENT_WORK_TOOL_NAME,
     ERR_SUBAGENT_CONTEXT_INVALID,
     GOAL_EXECUTION_PHASE_RUNNING,
+    SUBAGENT_BOARD_NOTIFICATION_KIND,
+    SUBAGENT_BOARD_READY_EVENT_KIND,
+    SUBAGENT_RESULT_NOTIFICATION_KIND,
+    SUBAGENT_TRANSFER_FILE_READY_EVENT_KIND,
+    SUBAGENT_WORK_READY_EVENT_KIND,
 )
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.session.event import session_event_crud
@@ -35,11 +41,21 @@ __all__ = [
     "supersede_child_reports",
     "resume_child_work_for_parent",
     "deliver_child_work_results",
+    "build_subagent_notification_key",
 ]
 
 
 def _is_positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def build_subagent_notification_key(work: SessionReplyWorkItem, kind: str, source: str | int) -> str:
+    payload = json.dumps(
+        [kind, work.uid, work.session_id, work.profile_id, work.dedupe_key, work.created_at.replace(tzinfo=None).isoformat(timespec="microseconds"), source],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _invalid_context() -> None:
@@ -644,7 +660,7 @@ async def supersede_child_reports(
                         work=work,
                         state=state,
                         checkpoint=checkpoint,
-                        event_dedupe_key=f"subagent-transfer-file-ready:{work.id}:{child_work_id}",
+                        event_dedupe_key=build_subagent_notification_key(work, SUBAGENT_TRANSFER_FILE_READY_EVENT_KIND, child_work_id),
                     ):
                         _invalid_context()
                     continue
@@ -889,7 +905,7 @@ async def resume_child_work_for_parent(
                 pending_notifications.append(
                     (
                         notification,
-                        f"subagent-result:{call.id}",
+                        build_subagent_notification_key(work, SUBAGENT_RESULT_NOTIFICATION_KIND, f"{call.subagent_id}:{call.tool_call_id}"),
                         include_in_turn,
                     )
                 )
@@ -915,7 +931,7 @@ async def resume_child_work_for_parent(
             pending_notifications.append(
                 (
                     board_message,
-                    f"subagent-board:{parent_work_id}:{post.id}",
+                    build_subagent_notification_key(work, SUBAGENT_BOARD_NOTIFICATION_KIND, f"{post.subagent_id}:{post.id}"),
                     False,
                 )
             )
@@ -1001,9 +1017,10 @@ async def resume_child_work_for_parent(
             return False
 
         if new_board_posts:
-            event_dedupe_key = f"subagent-board-ready:{parent_work_id}:{max(post.id for post in new_board_posts)}"
+            latest_post = max(new_board_posts, key=lambda post: post.id)
+            event_dedupe_key = build_subagent_notification_key(work, SUBAGENT_BOARD_READY_EVENT_KIND, f"{latest_post.subagent_id}:{latest_post.id}")
         else:
-            event_dedupe_key = f"subagent-work-ready:{parent_work_id}:{max(delivered_child_work_ids)}"
+            event_dedupe_key = build_subagent_notification_key(work, SUBAGENT_WORK_READY_EVENT_KIND, max(delivered_child_work_ids))
         if not await _wake_waiting_parent(
             db,
             work=work,

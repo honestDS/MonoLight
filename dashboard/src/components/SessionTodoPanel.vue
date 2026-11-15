@@ -92,10 +92,7 @@
 
           <div ref="subagentListRef" class="session-subagent-tab-content">
             <template v-if="selectedId === null">
-              <div v-if="loading && !hasBoardData" class="subagent-loading">
-                {{ t('chat.subagent_loading') }}
-              </div>
-              <el-collapse v-else v-model="openGroups" class="subagent-groups">
+              <el-collapse v-model="openGroups" class="subagent-groups">
                 <el-collapse-item v-for="group in groups" :key="group.key" :name="group.key">
                   <template #title>
                     <span class="subagent-group-title">{{ group.label }}</span>
@@ -187,7 +184,7 @@
               <div class="subagent-detail-content">
                 <div v-if="detailFailed" class="subagent-detail-error">
                   <span>{{ t('chat.subagent_detail_failed') }}</span>
-                  <el-button text size="small" :loading="detailLoading" @click="board.refreshDetail">
+                  <el-button link size="small" :loading="detailLoading" @click="board.refreshDetail">
                     {{ t('chat.subagent_retry') }}
                   </el-button>
                 </div>
@@ -196,12 +193,7 @@
                   {{ t('chat.subagent_loading') }}
                 </div>
                 <template v-else-if="detail">
-                  <div v-if="showStatus(detail.status) && detail.status !== 'succeeded'" class="subagent-detail-status">
-                    <el-icon aria-hidden="true"><component :is="statusIcon(detail.status)" /></el-icon>
-                    <span>{{ statusLabel(detail.status) }}</span>
-                  </div>
-
-                  <el-collapse :key="detail.work_id" v-model="openDetailSections" class="subagent-groups subagent-detail-collapse">
+                  <el-collapse :key="`subagent-detail:${detail.work_id}`" v-model="openDetailSections" class="subagent-groups subagent-detail-collapse">
                     <el-collapse-item v-if="hasResultText" name="result">
                       <template #title>
                         <span class="subagent-group-title">{{ t('chat.subagent_result') }}</span>
@@ -365,7 +357,6 @@ const stageLabel = entry => {
   return t('chat.subagent_no_progress')
 }
 
-const hasBoardData = computed(() => active.value.length > 0 || recent.value.length > 0)
 const groups = computed(() => [
   {
     key: 'active',
