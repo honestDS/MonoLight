@@ -4,17 +4,17 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/honestDS/MonoLight)
 
-**A self-hosted AI assistant platform that gets real work done while keeping you in control.**
+**A self-hosted AI assistant for running commands, editing files, and automating tasks.**
 
 <p align="center">
   <img src="./docs/banner.webp" alt="MonoLight Banner" width="100%" />
 </p>
 
-Most AI assistants stop at chat. Once you let one run commands or edit files, a simple mistake can delete something you need.
+When an assistant can run commands or edit files, a mistake or a misleading instruction can change real data.
 
-MonoLight separates **the AI that does the work from the AI that checks the risks**. An independent audit model reviews commands and file changes before they happen. The system blocks high-risk actions or pauses to show you an approval card. If it asks for approval, it only proceeds when you approve. The entire process is logged for later review.
+MonoLight separates **the AI that proposes actions from the AI that reviews their risks**. When you configure an audit model, it reviews designated tool calls before execution. If a file deletion needs confirmation, MonoLight waits for your decision. Choosing **Reject** closes the request without running the deletion.
 
-Use MonoLight in the web dashboard, or scan a QR code to connect it to WeChat and assign tasks from anywhere. Model API settings, prompts, conversations, and files are managed on your own machine.
+Use MonoLight in the web dashboard, or scan a QR code to connect it to WeChat and assign tasks from anywhere. The self-hosted service manages model settings, prompts, conversations, and files, and sends model requests to the providers you configure.
 
 > [!IMPORTANT]
 > **Pull requests and feedback**: The project is still in early development and its architecture changes frequently. **We're not accepting pull requests yet.** Please open an issue to report a problem or suggest an improvement. Every piece of feedback matters.
@@ -23,10 +23,12 @@ Use MonoLight in the web dashboard, or scan a QR code to connect it to WeChat an
 
 ## What MonoLight Can Do for You
 
-### 1. Safe and under your control
-- **Separate models for execution and safety review (dual-model auditing)**: The primary model handles reasoning and tool calls. A separately configured audit model assesses risks before execution.
-- **Approval for high-risk actions**: MonoLight can block sensitive actions such as deleting files or changing system settings, or ask for approval. If approval is required, the action only runs after you approve it in the web dashboard or WeChat.
-- **Multi-user access and data isolation**: Role-based permissions keep users' platform-managed sessions, memories, and files separate. You control the deployment and data with SQLite or MySQL.
+### 1. Tool review and user approval
+- **Pre-execution checks**: A separately configured audit model scores shell commands, file operations, and other designated calls. The server applies its own checks and blocks calls denied by the write policy.
+- **Human approval**: Calls flagged for confirmation wait for your decision in the web dashboard or WeChat. If the configured audit model is unavailable or times out during scoring, the affected tool round does not run.
+- **Deployment boundary**: Tools run with the service account's permissions, without a built-in sandbox. Roles govern access to platform-managed sessions, memories, and files.
+
+End-to-end audit trails are planned. See [Safety mechanisms and verification](./docs/security.md#english) for the threat model, prompt injection, approval and rejection rules, and integration tests.
 
 ### 2. More than chat: get work done
 - **File editing and delivery**: It can read, edit, and search local files, generate images, and send the resulting files or images directly to you.
@@ -224,7 +226,7 @@ Comprehensive backend management and configuration pages (model channels, knowle
   <img src="./docs/screenshot6.png" alt="MonoLight Configuration 5" width="100%" />
 </p>
 
-Real-time logs for step-by-step troubleshooting:
+Real-time logs for monitoring and troubleshooting:
 
 <p align="center">
   <img src="./docs/screenshot7.png" alt="MonoLight Live Logs" width="100%" />
