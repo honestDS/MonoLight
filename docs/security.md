@@ -44,11 +44,11 @@ For a simple demo, configure the audit model and create a disposable file in an 
 
 The integration tests simulate model responses and check the server's behavior:
 
-- [Directory-policy denials and invalid audit responses](../tests/integration/test_audit_directory_policy.py)
-- [Scoring failure stops execution; summary failure still waits for approval](../tests/integration/test_audit_llm_request_rejection.py)
-- [Web and WeChat decision handling, including rejection and repeat approval](../tests/integration/test_confirmation_entry_flows.py)
-- [Approval expiry and checks on the original call arguments](../tests/integration/test_audit_records.py)
-- [HTTP retries, authenticated decision identity, and re-audit after a file changes](../tests/integration/test_confirmation_audit_reply_workflow.py)
+- [Directory-policy denials and invalid audit responses](/tests/integration/test_audit_directory_policy.py)
+- [Scoring failure stops execution; summary failure still waits for approval](/tests/integration/test_audit_llm_request_rejection.py)
+- [Web and WeChat decision handling, including rejection and repeat approval](/tests/integration/test_confirmation_entry_flows.py)
+- [Approval expiry and checks on the original call arguments](/tests/integration/test_audit_records.py)
+- [HTTP retries, authenticated decision identity, and re-audit after a file changes](/tests/integration/test_confirmation_audit_reply_workflow.py)
 
 #### Web approval screenshots
 
@@ -102,11 +102,11 @@ MonoLight 从项目初期就选择不使用内置沙箱，以保持部署轻量�
 
 以下集成测试通过模拟模型响应来验证服务端行为：
 
-- [违规写入拦截与审计输出校验](../tests/integration/test_audit_directory_policy.py)
-- [评分失败停止执行，摘要失败仍等待确认](../tests/integration/test_audit_llm_request_rejection.py)
-- [网页和微信的拒绝与重复确认](../tests/integration/test_confirmation_entry_flows.py)
-- [确认过期和原调用参数校验](../tests/integration/test_audit_records.py)
-- [网页请求重试、确认人身份和文件变化后的复查](../tests/integration/test_confirmation_audit_reply_workflow.py)
+- [违规写入拦截与审计输出校验](/tests/integration/test_audit_directory_policy.py)
+- [评分失败停止执行，摘要失败仍等待确认](/tests/integration/test_audit_llm_request_rejection.py)
+- [网页和微信的拒绝与重复确认](/tests/integration/test_confirmation_entry_flows.py)
+- [确认过期和原调用参数校验](/tests/integration/test_audit_records.py)
+- [网页请求重试、确认人身份和文件变化后的复查](/tests/integration/test_confirmation_audit_reply_workflow.py)
 
 #### 网页确认截图
 
