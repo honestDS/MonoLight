@@ -713,11 +713,9 @@ async def test_weixin_openclaw_collected_messages_survive_poll_error_without_cro
             platform.config = {
                 **(platform.config or {}),
                 "poll_interval_ms": 0,
+                "message_merge_wait_ms": 10,
             }
             await db.commit()
-
-        monkeypatch.setattr(weixin_openclaw_platform_module, "INBOUND_COLLECTION_QUIET_PERIOD_SECONDS", 0.01)
-        monkeypatch.setattr(weixin_openclaw_platform_module, "INBOUND_COLLECTION_MAX_WAIT_SECONDS", 0.02)
 
         async def no_op_title(**_: Any) -> None:
             return None

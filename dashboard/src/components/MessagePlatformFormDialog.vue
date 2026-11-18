@@ -114,6 +114,22 @@
           <el-form-item :label="$t('messagePlatforms.merge_single_poll_messages')">
             <el-switch v-model="localForm.config.merge_single_poll_messages" :aria-label="$t('messagePlatforms.merge_single_poll_messages')" />
           </el-form-item>
+          <el-form-item>
+            <template #label>
+              <span>{{ $t('messagePlatforms.message_merge_wait_ms') }}</span>
+              <HelpTooltip :content="$t('messagePlatforms.message_merge_wait_hint', { maxSeconds: MESSAGE_PLATFORM_MERGE_MAX_WAIT_MS / 1000 })" />
+            </template>
+            <el-input-number
+              v-model="localForm.config.message_merge_wait_ms"
+              :min="1"
+              :max="MESSAGE_PLATFORM_MERGE_MAX_WAIT_MS"
+              :precision="0"
+              :value-on-clear="DEFAULT_MESSAGE_PLATFORM_MERGE_WAIT_MS"
+              controls-position="right"
+              :aria-label="$t('messagePlatforms.message_merge_wait_ms')"
+              :disabled="!localForm.config.merge_single_poll_messages"
+            />
+          </el-form-item>
         </el-collapse-item>
       </el-collapse>
     </el-form>
@@ -130,6 +146,7 @@ import { filterProfilesByUid, formatProfileOptionLabel } from '../utils/profileO
 import { useUserPermissionsStore } from '../composables/useUserPermissions'
 import HelpTooltip from './HelpTooltip.vue'
 import { SESSION_MAX_TURNS_UPPER_BOUND } from '../constants/index.js'
+import { DEFAULT_MESSAGE_PLATFORM_MERGE_WAIT_MS, MESSAGE_PLATFORM_MERGE_MAX_WAIT_MS } from '../utils/messagePlatformForm.js'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },

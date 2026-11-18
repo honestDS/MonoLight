@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import { SESSION_MAX_TURNS_UPPER_BOUND } from '../src/constants/index.js'
 import {
+  MESSAGE_PLATFORM_MERGE_MAX_WAIT_MS,
   buildMessagePlatformPayload,
   createMessagePlatformForm,
   isValidMessagePlatformMaxTurns,
@@ -42,6 +43,7 @@ test('keeps defaults for legacy rows without config and derives only show_tool_c
     long_poll_timeout_ms: 30000,
     poll_interval_ms: 1000,
     merge_single_poll_messages: true,
+    message_merge_wait_ms: 5000,
     stream_llm_request: false,
     session_settings: {
       enable_markdown: false,
@@ -163,6 +165,7 @@ test('builds only the payload whitelist, trims name, and preserves false and zer
       long_poll_timeout_ms: 0,
       poll_interval_ms: 0,
       merge_single_poll_messages: false,
+      message_merge_wait_ms: 5000,
       stream_llm_request: false,
       session_settings: {
         enable_markdown: false,
@@ -174,6 +177,34 @@ test('builds only the payload whitelist, trims name, and preserves false and zer
     }
   })
   assert.equal(Object.hasOwn(payload, 'uid'), false)
+})
+
+test('preserves saved merge settings while editing and rebuilding the payload', () => {
+  const row = {
+    name: 'stored platform',
+    config: {
+      merge_single_poll_messages: false,
+      message_merge_wait_ms: 1200
+    }
+  }
+  const before = structuredClone(row)
+  const form = loadMessagePlatformForm(row)
+
+  const savedPayload = buildMessagePlatformPayload(form)
+
+  assert.equal(savedPayload.config.merge_single_poll_messages, false)
+  assert.equal(savedPayload.config.message_merge_wait_ms, 1200)
+
+  form.config.merge_single_poll_messages = true
+  form.config.message_merge_wait_ms = MESSAGE_PLATFORM_MERGE_MAX_WAIT_MS
+
+  const firstPayload = buildMessagePlatformPayload(form)
+  const secondPayload = buildMessagePlatformPayload(form)
+
+  assert.equal(firstPayload.config.merge_single_poll_messages, true)
+  assert.equal(firstPayload.config.message_merge_wait_ms, 60000)
+  assert.deepEqual(firstPayload, secondPayload)
+  assert.deepEqual(row, before)
 })
 
 test('includes uid only when requested and converts an empty uid to null', () => {

@@ -253,6 +253,7 @@ test('ordinary create and update preserve business fields while omitting uid', a
     api_timeout_ms: 22000,
     long_poll_timeout_ms: 44000,
     poll_interval_ms: 1500,
+    message_merge_wait_ms: 2400,
     merge_single_poll_messages: false,
   })
 
@@ -272,6 +273,7 @@ test('ordinary create and update preserve business fields while omitting uid', a
       api_timeout_ms: 22000,
       long_poll_timeout_ms: 44000,
       poll_interval_ms: 1500,
+      message_merge_wait_ms: 2400,
       merge_single_poll_messages: false,
       stream_llm_request: false,
       session_settings: {
@@ -299,6 +301,7 @@ test('ordinary create and update preserve business fields while omitting uid', a
       api_timeout_ms: 23000,
       long_poll_timeout_ms: 45000,
       poll_interval_ms: 1600,
+      message_merge_wait_ms: 3200,
       merge_single_poll_messages: false,
     },
   })
@@ -315,6 +318,7 @@ test('ordinary create and update preserve business fields while omitting uid', a
     api_timeout_ms: 23000,
     long_poll_timeout_ms: 45000,
     poll_interval_ms: 1600,
+    message_merge_wait_ms: 3200,
     merge_single_poll_messages: false,
     stream_llm_request: false,
     session_settings: {
@@ -346,6 +350,7 @@ test('ordinary create and update preserve business fields while omitting uid', a
         api_timeout_ms: 23000,
         long_poll_timeout_ms: 45000,
         poll_interval_ms: 1600,
+        message_merge_wait_ms: 3200,
         merge_single_poll_messages: false,
         stream_llm_request: false,
         session_settings: {
@@ -405,6 +410,7 @@ test('superusers load admin users, submit selected owners, and require uid for e
       api_timeout_ms: 24000,
       long_poll_timeout_ms: 30000,
       poll_interval_ms: 1000,
+      message_merge_wait_ms: 5000,
       merge_single_poll_messages: true,
       stream_llm_request: false,
       session_settings: {
@@ -461,6 +467,7 @@ test('superusers load admin users, submit selected owners, and require uid for e
         api_timeout_ms: 15000,
         long_poll_timeout_ms: 30000,
         poll_interval_ms: 1700,
+        message_merge_wait_ms: 5000,
         merge_single_poll_messages: true,
         stream_llm_request: false,
         session_settings: {

@@ -7,7 +7,13 @@ from pydantic import Field as PydanticField
 from sqlalchemy import String, UniqueConstraint, event
 from sqlmodel import JSON, Column, DateTime, Field, SQLModel
 
-from app.core.constants import DEFAULT_SESSION_GOAL_MODE, DEFAULT_SESSION_MAX_TURNS, SESSION_MAX_TURNS_UPPER_BOUND
+from app.core.constants import (
+    DEFAULT_MESSAGE_PLATFORM_MERGE_WAIT_MS,
+    DEFAULT_SESSION_GOAL_MODE,
+    DEFAULT_SESSION_MAX_TURNS,
+    MESSAGE_PLATFORM_MERGE_MAX_WAIT_MS,
+    SESSION_MAX_TURNS_UPPER_BOUND,
+)
 from app.core.crypto import decrypt_api_key, encrypt_api_key
 from app.core.i18n.locale import DEFAULT_LOCALE, SupportedLocale
 from app.core.utils.time import get_local_time
@@ -41,6 +47,11 @@ class MessagePlatformConfig(BaseModel):
 
     session_settings: MessagePlatformSessionSettings = PydanticField(default_factory=MessagePlatformSessionSettings)
     stream_llm_request: StrictBool = False
+    message_merge_wait_ms: StrictInt = PydanticField(
+        default=DEFAULT_MESSAGE_PLATFORM_MERGE_WAIT_MS,
+        ge=1,
+        le=MESSAGE_PLATFORM_MERGE_MAX_WAIT_MS,
+    )
 
 
 class MessagePlatformBase(SQLModel):

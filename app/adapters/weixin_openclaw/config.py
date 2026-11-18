@@ -14,6 +14,7 @@ from app.adapters.weixin_openclaw.constants import (
     DEFAULT_MERGE_SINGLE_POLL_MESSAGES,
     DEFAULT_POLL_INTERVAL_MS,
 )
+from app.core.constants import DEFAULT_MESSAGE_PLATFORM_MERGE_WAIT_MS
 
 
 def default_weixin_openclaw_config() -> dict[str, Any]:
@@ -26,6 +27,7 @@ def default_weixin_openclaw_config() -> dict[str, Any]:
         "poll_interval_ms": DEFAULT_POLL_INTERVAL_MS,
         "max_inbound_media_size_mb": DEFAULT_MAX_INBOUND_MEDIA_SIZE_MB,
         "merge_single_poll_messages": DEFAULT_MERGE_SINGLE_POLL_MESSAGES,
+        "message_merge_wait_ms": DEFAULT_MESSAGE_PLATFORM_MERGE_WAIT_MS,
     }
 
 
@@ -69,5 +71,4 @@ class WeixinOpenClawConfig:
     long_poll_timeout_ms: int = DEFAULT_LONG_POLL_TIMEOUT_MS
     poll_interval_ms: int = DEFAULT_POLL_INTERVAL_MS
     max_inbound_media_size_mb: int = DEFAULT_MAX_INBOUND_MEDIA_SIZE_MB
-    merge_single_poll_messages: bool = DEFAULT_MERGE_SINGLE_POLL_MESSAGES
     owner_uid: str = ""

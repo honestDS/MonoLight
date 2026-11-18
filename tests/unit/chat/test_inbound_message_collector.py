@@ -111,6 +111,49 @@ async def test_collector_keeps_sessions_isolated():
 
 
 @pytest.mark.asyncio
+async def test_collector_dispatches_unmerged_messages_in_session_order():
+    dispatch_order: list[str] = []
+    a1_started = asyncio.Event()
+    a2_started = asyncio.Event()
+    b_completed = asyncio.Event()
+    release_a1 = asyncio.Event()
+
+    async def dispatch(message: CollectedMessage) -> None:
+        text = message.texts[0]
+        dispatch_order.append(text)
+        if text == "A1":
+            a1_started.set()
+            await release_a1.wait()
+        elif text == "A2":
+            a2_started.set()
+        elif text == "B":
+            b_completed.set()
+
+    collector = InboundMessageCollector(
+        quiet_period_seconds=0,
+        max_wait_seconds=2,
+        merge=merge_message,
+        dispatch=dispatch,
+    )
+
+    try:
+        await collector.add("session-a", CollectedMessage(session_id="session-a", texts=["A1"]))
+        await asyncio.wait_for(a1_started.wait(), timeout=2)
+        await collector.add("session-a", CollectedMessage(session_id="session-a", texts=["A2"]))
+        await collector.add("session-b", CollectedMessage(session_id="session-b", texts=["B"]))
+
+        await asyncio.wait_for(b_completed.wait(), timeout=2)
+        assert not a2_started.is_set()
+    finally:
+        release_a1.set()
+        await collector.close()
+
+    assert dispatch_order.count("A1") == 1
+    assert dispatch_order.count("A2") == 1
+    assert dispatch_order.index("A1") < dispatch_order.index("A2")
+
+
+@pytest.mark.asyncio
 async def test_collector_close_flushes_pending_messages():
     dispatched: list[CollectedMessage] = []
 

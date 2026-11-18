@@ -1,10 +1,14 @@
 import { SESSION_MAX_TURNS_UPPER_BOUND } from '../constants/index.js'
 
+export const DEFAULT_MESSAGE_PLATFORM_MERGE_WAIT_MS = 5000
+export const MESSAGE_PLATFORM_MERGE_MAX_WAIT_MS = 60000
+
 const createDefaultConfig = () => ({
   api_timeout_ms: 15000,
   long_poll_timeout_ms: 30000,
   poll_interval_ms: 1000,
   merge_single_poll_messages: true,
+  message_merge_wait_ms: DEFAULT_MESSAGE_PLATFORM_MERGE_WAIT_MS,
   stream_llm_request: false,
   session_settings: {
     enable_markdown: false,
@@ -84,6 +88,7 @@ export const buildMessagePlatformPayload = (form, { includeUid = false } = {}) =
       long_poll_timeout_ms: config.long_poll_timeout_ms ?? defaultForm.config.long_poll_timeout_ms,
       poll_interval_ms: config.poll_interval_ms ?? defaultForm.config.poll_interval_ms,
       merge_single_poll_messages: config.merge_single_poll_messages ?? defaultForm.config.merge_single_poll_messages,
+      message_merge_wait_ms: config.message_merge_wait_ms ?? defaultForm.config.message_merge_wait_ms,
       stream_llm_request: config.stream_llm_request ?? defaultForm.config.stream_llm_request,
       session_settings: {
         enable_markdown: sessionSettings.enable_markdown ?? defaultForm.config.session_settings.enable_markdown,

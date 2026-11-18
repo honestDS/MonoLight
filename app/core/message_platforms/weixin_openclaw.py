@@ -5,10 +5,9 @@ from typing import Any
 from aiohttp import SocketTimeoutError
 
 from app.adapters.weixin_openclaw import DEFAULT_BASE_URL, DEFAULT_BOT_TYPE, DEFAULT_CHANNEL_VERSION, WeixinOpenClawAdapter, WeixinOpenClawConfig, WeixinOpenClawMessage, normalize_weixin_openclaw_config
-from app.adapters.weixin_openclaw.constants import INBOUND_COLLECTION_MAX_WAIT_SECONDS, INBOUND_COLLECTION_QUIET_PERIOD_SECONDS
 from app.adapters.weixin_openclaw.message import merge_message_pair, parse_session_user_id
 from app.core.audit.confirmation import is_confirmation_candidate, message_has_quote
-from app.core.constants import ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED, MESSAGE_PLATFORM_RECONNECT_INTERVAL_SECONDS
+from app.core.constants import DEFAULT_MESSAGE_PLATFORM_MERGE_WAIT_MS, ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED, MESSAGE_PLATFORM_MERGE_MAX_WAIT_MS, MESSAGE_PLATFORM_RECONNECT_INTERVAL_SECONDS
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.session.session import session_crud
 from app.core.i18n import t
@@ -33,7 +32,6 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
         try:
             while True:
                 is_reconnecting = False
-                platform_uid = ""
                 previous_sync_buf = ""
                 try:
                     async with AsyncSessionLocal() as db:
@@ -42,7 +40,6 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                         return
                     assert platform is not None
                     is_reconnecting = platform.status == MessagePlatformStatus.ERROR
-                    platform_uid = platform.uid or ""
                     use_stream_dispatch = self._resolve_use_stream_dispatch(platform)
                     previous_sync_buf = str((platform.state or {}).get("sync_buf") or "")
                     next_signature = self._adapter_signature(platform)
@@ -59,15 +56,15 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                             await self._handle_message(
                                 adapter,
                                 message,
-                                uid=platform_uid or message.user_id,
+                                uid=adapter.config.owner_uid,
                                 platform_id=platform_id,
                                 adapter_signature=adapter_signature,
                                 use_stream_dispatch=use_stream_dispatch,
                             )
 
                         collector = InboundMessageCollector(
-                            quiet_period_seconds=INBOUND_COLLECTION_QUIET_PERIOD_SECONDS,
-                            max_wait_seconds=INBOUND_COLLECTION_MAX_WAIT_SECONDS,
+                            quiet_period_seconds=DEFAULT_MESSAGE_PLATFORM_MERGE_WAIT_MS / 1000,
+                            max_wait_seconds=MESSAGE_PLATFORM_MERGE_MAX_WAIT_MS / 1000,
                             merge=merge_message_pair,
                             dispatch=dispatch_collected,
                         )
@@ -84,7 +81,10 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                         use_stream_dispatch = self._resolve_use_stream_dispatch(platform)
                         if adapter.sync_buf != previous_sync_buf or platform.status == MessagePlatformStatus.ERROR or platform.last_error:
                             await message_platform_crud.update_runtime_state(db, platform=platform, state={"sync_buf": adapter.sync_buf}, status=MessagePlatformStatus.CONNECTED, last_error="")
+                        config = normalize_weixin_openclaw_config(platform.config)
+                        merge_wait_ms = config["message_merge_wait_ms"] if config["merge_single_poll_messages"] else 0
                     assert collector is not None
+                    await collector.set_quiet_period(merge_wait_ms / 1000)
                     for message in messages:
                         collector_key = (message.user_id, message.session_id)
                         if is_confirmation_candidate(
@@ -96,7 +96,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                             await self._handle_message(
                                 adapter,
                                 message,
-                                uid=platform_uid or message.user_id,
+                                uid=adapter.config.owner_uid,
                                 platform_id=platform_id,
                                 adapter_signature=adapter_signature,
                                 use_stream_dispatch=use_stream_dispatch,
@@ -186,7 +186,6 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                 long_poll_timeout_ms=config["long_poll_timeout_ms"],
                 poll_interval_ms=config["poll_interval_ms"],
                 max_inbound_media_size_mb=config["max_inbound_media_size_mb"],
-                merge_single_poll_messages=config["merge_single_poll_messages"],
             )
         )
 
@@ -203,7 +202,6 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
             config["long_poll_timeout_ms"],
             config["poll_interval_ms"],
             config["max_inbound_media_size_mb"],
-            config["merge_single_poll_messages"],
         )
 
     async def _mark_error(self, platform_id: int, error: str, *, adapter_signature: tuple | None = None) -> None:

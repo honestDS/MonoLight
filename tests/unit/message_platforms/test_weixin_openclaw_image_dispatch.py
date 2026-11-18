@@ -424,6 +424,7 @@ async def test_platform_handler_reads_platform_by_id_and_resolves_stream_dispatc
 async def test_platform_handler_run_passes_platform_stream_dispatch_to_collector(monkeypatch):
     handler = WeixinOpenClawPlatformHandler()
     captured_stream_requests = []
+    captured_uids = []
     collector_instances = []
     platform_stream_settings = iter([True, True, False, False, False])
     session_enter_count = 0
@@ -435,7 +436,7 @@ async def test_platform_handler_run_passes_platform_stream_dispatch_to_collector
 
     class FakeAdapter:
         def __init__(self):
-            self.config = SimpleNamespace(poll_interval_ms=0)
+            self.config = WeixinOpenClawConfig(poll_interval_ms=0, owner_uid="owner")
             self.sync_buf = ""
             self.poll_count = 0
 
@@ -463,6 +464,9 @@ async def test_platform_handler_run_passes_platform_stream_dispatch_to_collector
         async def flush_and_wait(self, _key):
             return None
 
+        async def set_quiet_period(self, _quiet_period_seconds):
+            return None
+
         async def close(self):
             return None
 
@@ -486,6 +490,7 @@ async def test_platform_handler_run_passes_platform_stream_dispatch_to_collector
             status=MessagePlatformStatus.CONNECTED,
             last_error="",
             state={},
+            config={},
             use_stream_dispatch=next(platform_stream_settings),
         )
 
@@ -494,6 +499,7 @@ async def test_platform_handler_run_passes_platform_stream_dispatch_to_collector
 
     async def handle_message(_adapter, _message, **kwargs):
         captured_stream_requests.append(kwargs["use_stream_dispatch"])
+        captured_uids.append(kwargs["uid"])
 
     monkeypatch.setattr(handler, "is_pollable", lambda current_platform: current_platform is not None)
     monkeypatch.setattr(handler, "_adapter_signature", lambda _platform: ("adapter",))
@@ -508,6 +514,7 @@ async def test_platform_handler_run_passes_platform_stream_dispatch_to_collector
         await handler.run(7)
 
     assert captured_stream_requests == [True, False]
+    assert captured_uids == ["owner", "owner"]
 
 
 @pytest.mark.asyncio

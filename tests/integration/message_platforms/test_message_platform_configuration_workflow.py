@@ -1,5 +1,8 @@
+import asyncio
+import time
 from collections.abc import AsyncGenerator
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -9,21 +12,35 @@ from sqlalchemy import event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+import app.adapters.weixin_openclaw.adapter as weixin_openclaw_adapter_module
 import app.core.crypto
+import app.core.message_platforms.inbound_collector as inbound_collector_module
+import app.core.message_platforms.weixin_openclaw as weixin_openclaw_platform_module
+from app.adapters.weixin_openclaw.adapter import WeixinOpenClawAdapter
 from app.api.v1.message_platforms import router
 from app.core.constants import ERR_MESSAGE_PLATFORM_NAME_EXISTS, SESSION_MAX_TURNS_UPPER_BOUND
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.i18n import t
 from app.core.security import get_current_user
+from app.core.system_secrets import initialize_system_secrets
 from app.handler import register_handlers
 from app.models.channel import ModelChannel
+from app.models.message import Message, MessageRole
 from app.models.message_platform import MessagePlatform, MessagePlatformCreate, MessagePlatformResponse, MessagePlatformStatus, MessagePlatformUpdate
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
+from app.models.session_reply_work_item import SessionReplyWorkItem
 from app.models.user import User
 from app.providers.database import get_db
 from tests.database_support import clone_sqlite_schema
+from tests.integration.message_platforms.test_message_platform_session_settings import (
+    EXTERNAL_USER,
+    UID,
+    _patch_runtime_database,
+    _seed_platform_data,
+    _session_settings,
+)
 
 
 @pytest_asyncio.fixture
@@ -749,6 +766,11 @@ async def test_message_platform_session_settings_api_round_trip_and_partial_upda
         pytest.param({"session_settings": {"max_turns": "7"}}, "max-turns-string"),
         pytest.param({"session_settings": {"max_turns": True}}, "max-turns-bool"),
         pytest.param({"session_settings": {"max_turns": SESSION_MAX_TURNS_UPPER_BOUND + 1}}, "max-turns-too-large"),
+        pytest.param({"message_merge_wait_ms": 0}, "message-merge-wait-ms-zero"),
+        pytest.param({"message_merge_wait_ms": 60_001}, "message-merge-wait-ms-too-large"),
+        pytest.param({"message_merge_wait_ms": 1.5}, "message-merge-wait-ms-float"),
+        pytest.param({"message_merge_wait_ms": "500"}, "message-merge-wait-ms-string"),
+        pytest.param({"message_merge_wait_ms": True}, "message-merge-wait-ms-bool"),
         pytest.param({"session_settings": {"goal_mode": "false"}}, "goal-mode-string"),
         pytest.param({"stream_llm_request": "true"}, "stream-llm-request-string"),
         pytest.param({"session_settings": {"unknown_setting": False}}, "unknown-session-setting"),
@@ -826,3 +848,225 @@ async def test_message_platform_session_settings_api_rejects_invalid_config_on_c
             assert after_platform is not None
             assert after_config == before_config
             assert after_platform.use_stream_dispatch == before_use_stream_dispatch
+
+
+@pytest.mark.asyncio
+async def test_weixin_openclaw_applies_saved_merge_wait_during_polling(
+    database_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    poll_requests: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    poll_responses: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    completed_first_messages: asyncio.Queue[tuple[str, float]] = asyncio.Queue()
+    clock_offset = 0.0
+
+    async def _request_json(
+        _adapter: WeixinOpenClawAdapter,
+        method: str,
+        endpoint: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        assert method == "POST"
+        assert endpoint == "ilink/bot/getupdates"
+        assert payload is not None
+        await poll_requests.put(payload)
+        return await poll_responses.get()
+
+    def _text_message(text: str) -> dict[str, Any]:
+        return {
+            "from_user_id": EXTERNAL_USER,
+            "context_token": "context-token",
+            "item_list": [{"type": 1, "text_item": {"text": text}}],
+        }
+
+    async def _next_poll(expected_cursor: str) -> None:
+        request = await asyncio.wait_for(poll_requests.get(), timeout=3)
+        assert request["get_updates_buf"] == expected_cursor
+
+    async def _respond(next_cursor: str, messages: list[dict[str, Any]]) -> None:
+        await poll_responses.put({"ret": 0, "get_updates_buf": next_cursor, "msgs": messages})
+
+    async def _take_completed_titles(count: int) -> list[tuple[str, float]]:
+        return [await completed_first_messages.get() for _ in range(count)]
+
+    async def _complete_title(**kwargs: Any) -> None:
+        first_message = kwargs["first_message"]
+        assert isinstance(first_message, str)
+        await completed_first_messages.put((first_message, time.monotonic()))
+
+    monkeypatch.setattr(WeixinOpenClawAdapter, "request_json", _request_json)
+    monkeypatch.setattr(weixin_openclaw_adapter_module, "generate_session_title_for_selected_profile", _complete_title)
+
+    async with database_factory(wal=True, foreign_keys=True) as factory:
+        _patch_runtime_database(monkeypatch, factory)
+        system_secrets = initialize_system_secrets(
+            tmp_path / "system_secrets.json",
+            tmp_path / "system_secrets.lock",
+            environment={},
+        )
+        monkeypatch.setattr(app.core.crypto, "get_channel_encryption_key", lambda: system_secrets.channel_encryption_key)
+        monkeypatch.setattr(
+            inbound_collector_module,
+            "time",
+            SimpleNamespace(monotonic=lambda: time.monotonic() + clock_offset),
+        )
+        monkeypatch.setattr(weixin_openclaw_platform_module, "AsyncSessionLocal", factory)
+        platform_data = await _seed_platform_data(
+            factory,
+            stream_llm_request=False,
+            session_settings=_session_settings(enable_markdown=False),
+        )
+        platform_id = platform_data["platform_id"]
+
+        test_app = FastAPI()
+        register_handlers(test_app)
+        test_app.include_router(router, prefix="/api/v1")
+
+        async def _override_get_db():
+            async with factory() as db:
+                yield db
+
+        test_app.dependency_overrides[get_db] = _override_get_db
+        test_app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(uid=UID, is_superuser=False)
+
+        async def _update_config(client: httpx.AsyncClient, **config: Any) -> dict[str, Any]:
+            response = await client.post(
+                "/api/v1/message-platforms/update",
+                params={"platform_id": platform_id},
+                json={"config": config},
+            )
+            assert response.status_code == 200
+            return response.json()["data"]["config"]
+
+        handler_task: asyncio.Task[None] | None = None
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=test_app),
+                base_url="http://test",
+            ) as client:
+                poll_interval_config = await _update_config(client, poll_interval_ms=0)
+                assert poll_interval_config["poll_interval_ms"] == 0
+                assert poll_interval_config["message_merge_wait_ms"] == 5000
+
+                handler = weixin_openclaw_platform_module.WeixinOpenClawPlatformHandler()
+                handler_task = asyncio.create_task(handler.run(platform_id))
+
+                await _next_poll("")
+                await _respond("cursor-one", [_text_message("before-change")])
+                await _next_poll("cursor-one")
+
+                merge_wait_config = await _update_config(client, message_merge_wait_ms=500)
+                assert merge_wait_config["message_merge_wait_ms"] == 500
+                assert merge_wait_config["poll_interval_ms"] == 0
+
+                await _respond("cursor-two", [_text_message("part-one")])
+                await _next_poll("cursor-two")
+                part_two_response_at = time.monotonic()
+                await _respond("cursor-three", [_text_message("part-two")])
+                await _next_poll("cursor-three")
+
+                completed_before_disable = await asyncio.wait_for(_take_completed_titles(2), timeout=3)
+                assert [message for message, _completed_at in completed_before_disable] == [
+                    "before-change",
+                    "part-one\npart-two",
+                ]
+                assert completed_before_disable[1][1] - part_two_response_at >= 0.49
+                assert completed_before_disable[1][1] - part_two_response_at < 3
+
+                minimum_wait_config = await _update_config(client, message_merge_wait_ms=1)
+                assert minimum_wait_config["message_merge_wait_ms"] == 1
+
+                await _respond(
+                    "cursor-four",
+                    [_text_message("min-one"), _text_message("min-two")],
+                )
+                await _next_poll("cursor-four")
+                completed_minimum_wait = await asyncio.wait_for(_take_completed_titles(1), timeout=3)
+                assert [message for message, _completed_at in completed_minimum_wait] == ["min-one\nmin-two"]
+
+                maximum_wait_config = await _update_config(client, message_merge_wait_ms=60_000)
+                assert maximum_wait_config["message_merge_wait_ms"] == 60_000
+
+                cap_started_at = time.monotonic()
+                await _respond("cursor-five", [_text_message("cap-one")])
+                await _next_poll("cursor-five")
+                clock_offset = 58
+                await _respond("cursor-six", [_text_message("cap-two")])
+                await _next_poll("cursor-six")
+                completed_maximum_wait = await asyncio.wait_for(_take_completed_titles(1), timeout=3)
+                assert completed_maximum_wait[0][1] - cap_started_at >= 1.98
+                assert [message for message, _completed_at in completed_maximum_wait] == ["cap-one\ncap-two"]
+
+                merge_disabled_config = await _update_config(client, merge_single_poll_messages=False)
+                assert merge_disabled_config["merge_single_poll_messages"] is False
+                assert merge_disabled_config["message_merge_wait_ms"] == 60_000
+
+                await _respond(
+                    "cursor-seven",
+                    [_text_message("separate-one"), _text_message("separate-two")],
+                )
+                await _next_poll("cursor-seven")
+                completed_after_disable = await asyncio.wait_for(_take_completed_titles(2), timeout=3)
+                assert [message for message, _completed_at in completed_after_disable] == [
+                    "separate-one",
+                    "separate-two",
+                ]
+
+                final_get = await client.get(
+                    "/api/v1/message-platforms/get",
+                    params={"platform_id": platform_id},
+                )
+                assert final_get.status_code == 200
+                final_config = final_get.json()["data"]["config"]
+                assert final_config["poll_interval_ms"] == 0
+                assert final_config["message_merge_wait_ms"] == 60_000
+                assert final_config["merge_single_poll_messages"] is False
+
+                async with factory() as db:
+                    platform_sessions = await db.scalars(
+                        select(ChatSession).where(
+                            ChatSession.message_platform_id == platform_id,
+                            ChatSession.message_platform_user_id == EXTERNAL_USER,
+                            ChatSession.uid == UID,
+                        )
+                    )
+                    platform_session = platform_sessions.one()
+                    works = await db.scalars(
+                        select(SessionReplyWorkItem)
+                        .where(
+                            SessionReplyWorkItem.session_id == platform_session.session_id,
+                            SessionReplyWorkItem.uid == UID,
+                        )
+                        .order_by(SessionReplyWorkItem.sequence_no)
+                    )
+                    persisted_works = works.all()
+                    messages = await db.scalars(
+                        select(Message)
+                        .where(
+                            Message.session_id == platform_session.session_id,
+                            Message.uid == UID,
+                            Message.role == MessageRole.USER,
+                        )
+                        .order_by(Message.id)
+                    )
+                    persisted_messages = messages.all()
+
+                assert [message.content for message in persisted_messages] == [
+                    "before-change",
+                    "part-one\npart-two",
+                    "min-one\nmin-two",
+                    "cap-one\ncap-two",
+                    "separate-one",
+                    "separate-two",
+                ]
+                assert [work.source_id for work in persisted_works] == [str(message.id) for message in persisted_messages]
+        finally:
+            if handler_task is not None:
+                handler_task.cancel()
+                try:
+                    await asyncio.wait_for(handler_task, timeout=3)
+                except asyncio.CancelledError:
+                    pass

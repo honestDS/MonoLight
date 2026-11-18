@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 from starlette.websockets import WebSocketDisconnect
 
+import app.core.crypto
 from app.adapters.chat_web import web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
 from app.adapters.weixin_openclaw.adapter import WeixinOpenClawAdapter
@@ -26,6 +27,7 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.i18n import t
 from app.core.message_platforms.weixin_openclaw import WeixinOpenClawPlatformHandler
 from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.system_secrets import initialize_system_secrets
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.time import get_local_time
 from app.models.audit import (
@@ -38,7 +40,7 @@ from app.models.audit import (
     AuditToolResultVersion,
 )
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
-from app.models.message_platform import MessagePlatformStatus
+from app.models.message_platform import MessagePlatform
 from app.models.profile import Profile
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
@@ -51,6 +53,14 @@ from app.models.session_reply_work_item import (
 )
 from app.models.session_todo import SessionTodoPlan
 from app.models.user import User
+from tests.integration.message_platforms.test_message_platform_session_settings import (
+    EXTERNAL_USER,
+    SESSION_ID,
+    UID,
+    _patch_runtime_database,
+    _seed_platform_data,
+    _session_settings,
+)
 from tests.unit.response_test_support import audit_confirmation_payload, pending_audit_tool_result
 
 
@@ -847,69 +857,96 @@ async def test_repeated_weixin_approval_cannot_create_second_confirmed_execution
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("merge_single_poll_messages", [True, False])
 @pytest.mark.parametrize("decision_text", ["同意", "继续", "拒绝", "忽略"])
-async def test_weixin_platform_flushes_old_batch_before_independent_decision(monkeypatch, decision_text):
-    handler = WeixinOpenClawPlatformHandler()
-    platform = SimpleNamespace(
-        id=1,
-        uid="owner",
-        is_enabled=True,
-        use_stream_dispatch=False,
-        platform_type=handler.platform_type,
-        status=MessagePlatformStatus.CONNECTED,
-        last_error="",
-        account_id="account",
-        config={},
-        state={},
-        get_config_secret=lambda key: "token" if key == "token" else "",
-    )
-    disabled_platform = SimpleNamespace(**{**platform.__dict__, "status": MessagePlatformStatus.DISCONNECTED})
-    old_message = WeixinOpenClawMessage(user_id="weixin-user", text="旧批次", session_id="session-1")
-    decision_message = WeixinOpenClawMessage(user_id="weixin-user", text=decision_text, session_id="session-1")
-    order: list[str] = []
+async def test_weixin_platform_flushes_old_batch_before_independent_decision(
+    monkeypatch,
+    database_factory,
+    tmp_path,
+    merge_single_poll_messages,
+    decision_text,
+):
+    async with database_factory(wal=True, foreign_keys=True) as factory:
+        _patch_runtime_database(monkeypatch, factory)
+        system_secrets = initialize_system_secrets(
+            tmp_path / "system_secrets.json",
+            tmp_path / "system_secrets.lock",
+            environment={},
+        )
+        monkeypatch.setattr(app.core.crypto, "get_channel_encryption_key", lambda: system_secrets.channel_encryption_key)
+        monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.AsyncSessionLocal", factory)
+        monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.generate_session_title_for_selected_profile", _noop_async)
+        monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", _noop_async)
 
-    class FakeAdapter:
-        config = SimpleNamespace(poll_interval_ms=0)
-        sync_buf = ""
+        data = await _seed_platform_data(
+            factory,
+            stream_llm_request=False,
+            session_settings=_session_settings(enable_markdown=False),
+        )
+        async with factory() as db:
+            platform = await db.get(MessagePlatform, data["platform_id"])
+            assert platform is not None
+            platform.config = {
+                **(platform.config or {}),
+                "poll_interval_ms": 0,
+                "merge_single_poll_messages": merge_single_poll_messages,
+            }
+            db.add(
+                ChatSession(
+                    session_id=SESSION_ID,
+                    uid=UID,
+                    profile_id=data["primary_profile_id"],
+                    source="weixin-openclaw",
+                    message_platform_id=data["platform_id"],
+                    message_platform_user_id=EXTERNAL_USER,
+                )
+            )
+            await db.commit()
 
-        def __init__(self):
-            self.poll_count = 0
+        async with factory() as db:
+            record = await add_pending_confirmation(db, session_id=SESSION_ID)
+            assert record.id is not None
+            record_id = record.id
 
-        async def poll_messages_once(self):
-            self.poll_count += 1
-            return [old_message, decision_message] if self.poll_count == 1 else []
+        poll_count = 0
 
-        async def close(self):
-            return None
+        async def _request_json(_adapter, method, endpoint, **_kwargs):
+            nonlocal poll_count
+            assert method == "POST"
+            assert endpoint == "ilink/bot/getupdates"
+            poll_count += 1
+            if poll_count == 1:
+                return {
+                    "ret": 0,
+                    "msgs": [
+                        {
+                            "from_user_id": EXTERNAL_USER,
+                            "item_list": [{"type": 1, "text_item": {"text": "旧批次"}}],
+                        },
+                        {
+                            "from_user_id": EXTERNAL_USER,
+                            "item_list": [{"type": 1, "text_item": {"text": decision_text}}],
+                        },
+                    ],
+                }
+            raise asyncio.CancelledError
 
-    adapter = FakeAdapter()
-    get_count = 0
+        monkeypatch.setattr(WeixinOpenClawAdapter, "request_json", _request_json)
+        handler = WeixinOpenClawPlatformHandler()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(handler.run(data["platform_id"]), timeout=5)
 
-    async def get_platform(*_args, **_kwargs):
-        nonlocal get_count
-        get_count += 1
-        return platform if get_count <= 2 else disabled_platform
-
-    class SessionContext:
-        async def __aenter__(self):
-            return SimpleNamespace()
-
-        async def __aexit__(self, _exc_type, _exc, _traceback):
-            return False
-
-    async def handle_message(*args, **_kwargs):
-        order.append(args[1].text)
-
-    monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.AsyncSessionLocal", lambda: SessionContext())
-    monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.message_platform_crud.get", get_platform)
-    monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.message_platform_crud.get_for_update", get_platform)
-    monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.message_platform_crud.update_runtime_state", _noop_async)
-    monkeypatch.setattr(handler, "_build_adapter", lambda _platform: adapter)
-    monkeypatch.setattr(handler, "_handle_message", handle_message)
-
-    await handler.run(1)
-
-    assert order == ["旧批次", decision_text]
+        async with factory() as db:
+            record = await db.get(AuditRecord, record_id)
+            assert record is not None
+            assert record.status == AuditRecordStatus.CANCELLED
+            messages_result = await db.scalars(select(Message).where(Message.session_id == SESSION_ID, Message.role == MessageRole.USER).order_by(Message.id))
+            messages = messages_result.all()
+            assert [message.type for message in messages] == [MessageType.TEXT, MessageType.TEXT]
+            assert [message.content for message in messages] == ["旧批次", decision_text]
+            works = await list_work(db, SESSION_ID)
+            assert [work.work_type for work in works] == [SessionReplyWorkType.FOREGROUND_REPLY] * 2
+            assert [work.source_id for work in works] == [str(message.id) for message in messages]
 
 
 @pytest.mark.asyncio

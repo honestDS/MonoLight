@@ -308,7 +308,6 @@ async def start_weixin_openclaw_login(
             long_poll_timeout_ms=config["long_poll_timeout_ms"],
             poll_interval_ms=config["poll_interval_ms"],
             max_inbound_media_size_mb=config["max_inbound_media_size_mb"],
-            merge_single_poll_messages=config["merge_single_poll_messages"],
         )
     )
     try:
@@ -358,7 +357,6 @@ async def get_weixin_openclaw_login_status(
             long_poll_timeout_ms=config["long_poll_timeout_ms"],
             poll_interval_ms=config["poll_interval_ms"],
             max_inbound_media_size_mb=config["max_inbound_media_size_mb"],
-            merge_single_poll_messages=config["merge_single_poll_messages"],
         )
     )
     try:
