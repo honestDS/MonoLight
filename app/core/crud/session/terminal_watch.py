@@ -7,6 +7,7 @@ from sqlmodel import select
 
 from app.core.constants import ERR_SESSION_REPLY_LEASE_LOST, SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
+from app.core.crud.session.subagent_revision import bump_subagent_board_revisions
 from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
@@ -724,6 +725,8 @@ class CRUDTerminalWatchReply:
         updated = (result.rowcount or 0) == 1
         if updated:
             await session_reply_work_item_crud.save_checkpoint(db, work.id, checkpoint)
+        if updated and work.subagent_id is not None:
+            await bump_subagent_board_revisions(db, [work.session_id])
         return updated
 
 

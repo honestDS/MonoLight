@@ -32,6 +32,7 @@ from app.models import (
 from app.models.provider_usage import ProviderUsageType
 from app.models.scheduled_task import ScheduledTaskStatus
 from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkType
+from app.models.subagent import SessionSubagentBoardRevision
 
 EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
     # audit
@@ -127,6 +128,7 @@ EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
         ("session_id", "uid"),
         "CASCADE",
     ),
+    ("session_subagent_board_revision", ("session_id",), "chat_session", ("session_id",), "CASCADE"),
     (
         "session_todo_plan",
         ("session_id", "uid"),
@@ -270,6 +272,7 @@ async def db_session_factory(database_factory) -> AsyncGenerator[async_sessionma
             ContextSummaryStage.__table__,
             ContextSummaryFragment.__table__,
             SessionEvent.__table__,
+            SessionSubagentBoardRevision.__table__,
             ScheduledTask.__table__,
         ],
         foreign_keys=True,
@@ -307,12 +310,14 @@ async def test_sqlite_enforces_session_owner_foreign_key_and_cascade(db_session_
             session_id="session-1",
             event={"type": "test"},
         )
+        session_board_revision = SessionSubagentBoardRevision(session_id="session-1")
         db.add(chat_session)
         await db.flush()
-        db.add(session_event)
+        db.add_all([session_event, session_board_revision])
         await db.commit()
         session_event_id = session_event.id
         assert session_event_id is not None
+        assert await db.get(SessionSubagentBoardRevision, "session-1") is not None
 
         db.add(
             SessionEvent(
@@ -328,7 +333,10 @@ async def test_sqlite_enforces_session_owner_foreign_key_and_cascade(db_session_
 
         await db.delete(chat_session)
         await db.commit()
-        assert await db.get(SessionEvent, session_event_id) is None
+
+    async with db_session_factory() as check_db:
+        assert await check_db.get(SessionEvent, session_event_id) is None
+        assert await check_db.get(SessionSubagentBoardRevision, "session-1") is None
 
 
 @pytest.mark.asyncio

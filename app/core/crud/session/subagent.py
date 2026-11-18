@@ -17,6 +17,7 @@ from app.core.constants import (
     SUBAGENT_ROUND_RETENTION_LIMIT,
 )
 from app.core.crud.session.reply_work_item import reply_work_is_protected, session_reply_work_item_crud
+from app.core.crud.session.subagent_revision import bump_subagent_board_revisions
 from app.core.utils.time import get_local_time
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session_reply_work_item import (
@@ -152,6 +153,7 @@ class CRUDSubagent:
         )
 
         deleted_count = 0
+        changed_session_ids: set[str] = set()
         try:
             count_result = await db.execute(select(func.count(Subagent.id)).select_from(Subagent).where(*eligible_conditions))
             eligible_count = int(count_result.scalar_one())
@@ -218,7 +220,9 @@ class CRUDSubagent:
 
                 if delete_result.rowcount == 1:
                     deleted_count += 1
+                    changed_session_ids.add(session_id)
 
+            await bump_subagent_board_revisions(db, changed_session_ids)
             await db.commit()
             return deleted_count
         except BaseException:
@@ -327,6 +331,7 @@ class CRUDSubagent:
         )
 
         deleted_count = 0
+        changed_session_ids: set[str] = set()
         try:
             count_result = await db.execute(select(func.count()).select_from(eligible_rounds.subquery()))
             eligible_count = int(count_result.scalar_one())
@@ -381,7 +386,9 @@ class CRUDSubagent:
                     profile_id=profile_id,
                 )
                 deleted_count += 1
+                changed_session_ids.add(session_id)
 
+            await bump_subagent_board_revisions(db, changed_session_ids)
             await db.commit()
             return deleted_count
         except BaseException:
@@ -932,6 +939,7 @@ class CRUDSubagent:
         )
         db.add(post)
         await db.flush()
+        await bump_subagent_board_revisions(db, [session_id])
         return post
 
     async def list_board_posts(

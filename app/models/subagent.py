@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import ForeignKeyConstraint, Text
+from sqlalchemy import BigInteger, ForeignKeyConstraint, Text
 from sqlmodel import JSON, Column, DateTime, Field, SQLModel, UniqueConstraint
 
 from app.core.utils.time import get_local_time
@@ -134,4 +134,20 @@ class SubagentBoardPost(SQLModel, table=True):
     created_at: datetime = Field(
         default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
+    )
+
+
+class SessionSubagentBoardRevision(SQLModel, table=True):
+    __tablename__ = "session_subagent_board_revision"
+
+    session_id: str = Field(
+        primary_key=True,
+        max_length=100,
+        foreign_key="chat_session.session_id",
+        ondelete="CASCADE",
+        nullable=False,
+    )
+    revision: int = Field(
+        default=0,
+        sa_column=Column(BigInteger, nullable=False, server_default="0"),
     )

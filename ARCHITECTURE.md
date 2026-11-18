@@ -491,6 +491,7 @@ app/core/crud/
 │   ├── message.py              # 主会话与独立工作消息读写、历史隔离与专属消息清理、无引用子代理通知清理
 │   ├── session.py              # 会话设置、上下文状态与累计用量访问
 │   ├── subagent.py             # 子代理身份、轮次、工具关联、看板阶段记录与分页查询、历史轮次清理、交付状态与空闲数据清理
+│   ├── subagent_revision.py    # 子代理看板版本写入
 │   ├── event.py                # 会话事件数据访问
 │   ├── external_work.py        # 外部异步操作关联数据访问
 │   ├── todo.py                 # 会话 Todo 计划数据访问
@@ -704,7 +705,7 @@ app/models/
 ├── message_platform.py     # 消息平台模型
 ├── message_platform_outbox.py # 消息发件箱模型
 ├── agent_work.py           # 独立 AgentWork 执行契约与结果目标
-├── subagent.py              # Subagent、SubagentWork、SubagentToolCall 与 SubagentBoardPost 持久化模型
+├── subagent.py              # Subagent、SubagentWork、SubagentToolCall、SubagentBoardPost 与会话看板版本持久化模型
 ├── profile.py              # Profile 模型及对话、总结、辅助渠道与上下文压缩并发配置
 ├── prompt.py               # Prompt 模型
 ├── provider_usage.py       # 短期请求明细与长期每日汇总
@@ -896,7 +897,7 @@ dashboard/src/composables/
 │   ├── sessionAgentSettings.js   # 目标模式与轮次设置
 │   ├── sessionListLoading.js     # 会话列表工作状态轮询
 │   ├── sessionTasks.js           # 会话任务列表与状态协调
-│   ├── sessionSubagentBoard.js   # 子代理看板列表、轮次、进展分页与轮询刷新
+│   ├── sessionSubagentBoard.js   # 子代理看板列表、轮次、进展分页与按会话活动刷新
 │   ├── sessionTodoOverlay.js     # 会话任务面板展开状态与偏好保存
 │   ├── sessionTransportMode.js   # 会话传输方式切换与恢复
 │   ├── streamEventIdentity.js    # 流事件身份提取

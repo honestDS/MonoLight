@@ -260,7 +260,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   ArrowLeft,
@@ -274,6 +274,7 @@ import {
 import { chatApi } from '../api/index.js'
 import { createSessionSubagentBoard } from '../composables/chat/sessionSubagentBoard.js'
 import { createSessionTodoOverlay } from '../composables/chat/sessionTodoOverlay.js'
+import { SESSION_ACTIVITY_KEY } from '../composables/chat/useSessionTasks.js'
 
 const props = defineProps({
   plan: { type: Object, default: null },
@@ -283,6 +284,7 @@ const props = defineProps({
 
 const emit = defineEmits(['expanded-change'])
 const { t, locale } = useI18n()
+const activityService = inject(SESSION_ACTIVITY_KEY, null)
 const triggerRef = ref(null)
 const panelTitleRef = ref(null)
 const detailTitleRef = ref(null)
@@ -446,8 +448,22 @@ watch(
 )
 
 watch(
-  [() => props.sessionId, () => props.profileKey],
-  ([nextSessionId, nextProfileKey]) => board.setScope(nextSessionId, nextProfileKey),
+  [() => props.sessionId, () => props.profileKey, () => activityService?.snapshot?.value],
+  ([nextSessionId, nextProfileKey, snapshot]) => {
+    const row = snapshot?.activities?.find(activity => activity.session_id === nextSessionId) || null
+    board.setScope(
+      row?.session_id ?? null,
+      nextProfileKey,
+      row?.subagent_board_revision,
+      row?.subagent_board_profile_id
+    )
+    if (!row) return
+    board.observeActivity(
+      row.session_id,
+      row.subagent_board_revision,
+      row.subagent_board_profile_id
+    )
+  },
   { immediate: true, flush: 'sync' }
 )
 

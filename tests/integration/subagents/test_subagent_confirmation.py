@@ -70,6 +70,21 @@ async def test_subagent_file_write_confirmation_round_returns_to_parent(
     decision: str,
 ) -> None:
     async with image_chat_runtime(goal_mode=False) as runtime:
+
+        async def activity_revision() -> int:
+            response = await runtime.client.get("/api/v1/chat/sessions/activity")
+            assert response.status_code == 200
+            row = next(item for item in response.json()["data"] if item["session_id"] == runtime.session_id)
+            return row["subagent_board_revision"]
+
+        async def board_data() -> dict[str, Any]:
+            response = await runtime.client.get(
+                "/api/v1/chat/sessions/subagents",
+                params={"session_id": runtime.session_id},
+            )
+            assert response.status_code == 200
+            return response.json()["data"]
+
         target = (tmp_path / "subagent-confirmation.txt").resolve()
         child_instruction = f"独立将 {target} 写入 exactly 'confirmed\n'，完成后报告子轮总结。"
 
@@ -198,6 +213,8 @@ async def test_subagent_file_write_confirmation_round_returns_to_parent(
             assert round_row is not None
             assert round_row.current_work_id == child_work_id
 
+        initial_revision = await activity_revision()
+
         runtime.outputs.append(
             InternalMessage(
                 role=MessageRole.ASSISTANT,
@@ -242,6 +259,12 @@ async def test_subagent_file_write_confirmation_round_returns_to_parent(
             assert audit_record.status == AuditRecordStatus.PENDING
             audit_record_id = audit_record.id
 
+        pending_revision = await activity_revision()
+        assert pending_revision > initial_revision
+        pending_entry = next(entry for entry in (await board_data())["active"] if entry["work_id"] == child_work_id)
+        assert pending_entry["status"] is None
+        assert pending_entry["completed"] is False
+
         decision_response = await runtime.client.post(
             "/api/v1/chat/completions",
             json={
@@ -256,6 +279,11 @@ async def test_subagent_file_write_confirmation_round_returns_to_parent(
         decision_work_id = decision_data["work_id"]
 
         if decision == "同意":
+            approved_revision = await activity_revision()
+            assert approved_revision > pending_revision
+            approved_entry = next(entry for entry in (await board_data())["active"] if entry["work_id"] == child_work_id)
+            assert approved_entry["status"] == SessionReplyWorkStatus.READY_FOR_LLM.value
+
             async with runtime.factory() as db:
                 confirmed_work = await db.get(SessionReplyWorkItem, decision_work_id)
                 round_row = await db.get(SubagentWork, child_work_id)
@@ -357,6 +385,10 @@ async def test_subagent_file_write_confirmation_round_returns_to_parent(
             assert rejected_done.status == SessionReplyWorkStatus.SUCCEEDED
 
             await SessionReplyConsumer()._recover_expired()
+            rejected_revision = await activity_revision()
+            assert rejected_revision > pending_revision
+            rejected_entry = next(entry for entry in (await board_data())["recent"] if entry["work_id"] == child_work_id)
+            assert rejected_entry["status"] == SessionReplyWorkStatus.CANCELLED.value
             assert not target.exists()
 
             async with runtime.factory() as db:

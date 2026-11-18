@@ -29,6 +29,7 @@ from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.session.subagent import subagent_crud
+from app.core.crud.session.subagent_revision import bump_subagent_board_revisions
 from app.core.exceptions import ParameterException
 from app.core.i18n import get_current_locale, t
 from app.core.utils.dispatcher.frozen_context import serialize_frozen_context_messages
@@ -582,6 +583,9 @@ class SessionReplySubmission:
         if source_dispatcher_checkpoint is not None:
             await db.flush()
             await session_reply_work_item_crud.save_checkpoint(db, work.id, source_dispatcher_checkpoint)
+        if source_child_round is not None:
+            await db.flush()
+            await bump_subagent_board_revisions(db, [session_id])
         await db.commit()
         if confirmation_projection is not None and confirmation_projection.status_update is not None:
             await _broadcast_confirmation_status_update(

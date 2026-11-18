@@ -19,33 +19,6 @@ const flushMicrotasks = async (turns = 8) => {
   }
 }
 
-const createManualTimerQueue = () => {
-  const pending = []
-  const scheduled = []
-  const cancelled = []
-
-  const schedule = (callback, delay) => {
-    const handle = { callback, delay }
-    pending.push(handle)
-    scheduled.push(handle)
-    return handle
-  }
-
-  const cancel = handle => {
-    cancelled.push(handle)
-    const index = pending.indexOf(handle)
-    if (index !== -1) pending.splice(index, 1)
-  }
-
-  const tick = async () => {
-    const handle = pending.shift()
-    assert.ok(handle, 'expected a scheduled timer')
-    return handle.callback()
-  }
-
-  return { pending, scheduled, cancelled, schedule, cancel, tick }
-}
-
 const makeEntry = (subagentId, workId, overrides = {}) => ({
   name: `Agent ${subagentId}`,
   subagent_id: subagentId,
@@ -101,7 +74,8 @@ const listResponse = ({
   active_page: activePage = 1,
   active_page_size: activePageSize = 20,
   active_total: activeTotal = active.length,
-  selected = null
+  selected = null,
+  lease_recheck_in_ms: leaseRecheckInMs
 } = {}) => ({
   data: {
     data: {
@@ -112,7 +86,8 @@ const listResponse = ({
       active,
       recent,
       has_more_recent: hasMoreRecent,
-      selected
+      selected,
+      lease_recheck_in_ms: leaseRecheckInMs
     }
   }
 })
@@ -204,18 +179,15 @@ const assertScopeCleared = board => {
   assert.equal(board.nextBeforePostId.value, null)
 }
 
-test('does not fetch without a session or while disabled, polls once after each completion, and preserves server active order', async t => {
-  const timers = createManualTimerQueue()
+test('does not fetch without a session or while disabled, observes activity revisions, and preserves server active order', async t => {
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   await board.refresh()
-  board.setScope('session-a', 'profile-a')
+  assert.equal(board.observeActivity('session-a', 0), false)
+  board.setScope('session-a', 'profile-a', 0)
+  board.observeActivity('session-a', 0)
   assert.equal(harness.listCalls.length, 0)
 
   const firstList = createDeferred()
@@ -223,11 +195,23 @@ test('does not fetch without a session or while disabled, polls once after each 
   board.setEnabled(true)
   assert.equal(harness.listCalls.length, 1)
   assert.deepEqual(harness.listCalls[0].params, { recent_limit: 10, active_page: 1 })
+  board.observeActivity('session-a', 0)
+  await flushMicrotasks()
+  assert.equal(harness.listCalls.length, 1)
 
   const activeTwenty = makeEntry('active-twenty', 20)
   const activeTen = makeEntry('active-ten', 10)
   const recentSecond = makeEntry('recent-second', 30, { completed: true })
   const recentFirst = makeEntry('recent-first', 40, { completed: true })
+  const secondList = createDeferred()
+  harness.queueList(secondList.promise)
+  board.observeActivity('session-a', 1)
+  board.observeActivity('session-a', 2)
+  board.observeActivity('session-a', 3)
+  await flushMicrotasks()
+  assert.equal(harness.listCalls.length, 1)
+  assert.equal(harness.getMaxActiveListRequests(), 1)
+
   firstList.resolve(listResponse({
     active: [activeTwenty, activeTen],
     recent: [recentSecond, recentFirst],
@@ -241,49 +225,45 @@ test('does not fetch without a session or while disabled, polls once after each 
     'recent-first'
   ])
   assert.equal(board.hasMoreRecent.value, true)
-  assert.equal(board.loading.value, false)
-  assert.equal(timers.pending.length, 1)
-  assert.equal(timers.pending[0].delay, 2000)
+  assert.equal(board.loading.value, true)
+  assert.equal(harness.listCalls.length, 2)
+  assert.equal(harness.getMaxActiveListRequests(), 1)
 
-  const secondList = createDeferred()
-  harness.queueList(secondList.promise)
-  const secondTick = timers.tick()
+  secondList.resolve(listResponse({
+    active: [activeTwenty, activeTen],
+    recent: [recentSecond, recentFirst],
+    has_more_recent: true
+  }))
+  await flushMicrotasks()
+  assert.equal(board.loading.value, false)
+  assert.equal(harness.getMaxActiveListRequests(), 1)
+  assert.equal(harness.listCalls.length, 2)
+
+  board.observeActivity('session-a', 3)
+  board.observeActivity('session-a', 2)
+  board.observeActivity('other-session', 4)
+  board.observeActivity('session-a', -1)
+  board.observeActivity('session-a', 1.5)
   await flushMicrotasks()
   assert.equal(harness.listCalls.length, 2)
-  await board.refresh()
-  assert.equal(harness.listCalls.length, 2)
-  assert.equal(harness.getMaxActiveListRequests(), 1)
-
-  secondList.resolve(listResponse({ active: [activeTen, activeTwenty] }))
-  await secondTick
-  assert.equal(harness.getMaxActiveListRequests(), 1)
-  assert.equal(timers.pending.length, 1)
-  assert.equal(timers.pending[0].delay, 2000)
-  assert.equal(timers.scheduled.every(handle => handle.delay === 2000), true)
 })
 
-test('disabling aborts in-flight work and cancels timers, reopening recovers, and dispose blocks later mutations', async t => {
-  const timers = createManualTimerQueue()
+test('disabling aborts in-flight work, ignores background updates, reopening recovers, and dispose blocks later mutations', async t => {
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   const keptEntry = makeEntry('kept', 10)
   harness.queueList(Promise.resolve(listResponse({ active: [keptEntry] })))
-  board.setScope('session-a', 'profile-a')
+  board.setScope('session-a', 'profile-a', 0, 1)
   board.setEnabled(true)
   await flushMicrotasks()
   assert.deepEqual(board.active.value, [keptEntry])
-  assert.equal(timers.pending.length, 1)
 
-  const scheduledTimer = timers.pending[0]
   board.setEnabled(false)
-  assert.equal(timers.pending.length, 0)
-  assert.equal(timers.cancelled.includes(scheduledTimer), true)
+  board.observeActivity('session-a', 1)
+  await flushMicrotasks()
+  assert.equal(harness.listCalls.length, 1)
 
   const inFlight = createDeferred()
   harness.queueList(inFlight.promise)
@@ -293,7 +273,6 @@ test('disabling aborts in-flight work and cancels timers, reopening recovers, an
   const inFlightCall = harness.listCalls[1]
   board.setEnabled(false)
   assert.equal(inFlightCall.signal.aborted, true)
-  assert.equal(timers.pending.length, 0)
 
   inFlight.resolve(listResponse({
     active: [makeEntry('stale', 99)],
@@ -309,13 +288,10 @@ test('disabling aborts in-flight work and cancels timers, reopening recovers, an
   board.setEnabled(true)
   await flushMicrotasks()
   assert.deepEqual(board.active.value.map(entry => entry.subagent_id), ['recovered'])
-  assert.equal(timers.pending.length, 1)
 
   const callsBeforeDispose = harness.listCalls.length
-  const lateTimer = timers.pending[0]
   board.dispose()
-  assert.equal(timers.pending.length, 0)
-  await lateTimer.callback()
+  board.observeActivity('session-a', 2)
   board.setEnabled(true)
   board.setScope('session-b', 'profile-b')
   await board.refresh()
@@ -324,13 +300,8 @@ test('disabling aborts in-flight work and cancels timers, reopening recovers, an
 })
 
 test('scope changes clear state immediately and ignore stale list/detail success and failure paths', async t => {
-  const timers = createManualTimerQueue()
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   const listA = createDeferred()
@@ -400,18 +371,13 @@ test('scope changes clear state immediately and ignore stale list/detail success
 })
 
 test('a server profile change clears the selected agent and invalidates its detail request', async t => {
-  const timers = createManualTimerQueue()
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   const entry = makeEntry('agent-a', 10)
   harness.queueList(Promise.resolve(listResponse({ profile_id: 1, active: [entry] })))
-  board.setScope('session-a', 'profile-a')
+  board.setScope('session-a', 'profile-a', 0, 1)
   board.setEnabled(true)
   await flushMicrotasks()
 
@@ -425,7 +391,8 @@ test('a server profile change clears the selected agent and invalidates its deta
     profile_id: 2,
     active: [makeEntry('agent-a', 11)]
   })))
-  await board.refresh()
+  board.observeActivity('session-a', 0, 2)
+  await flushMicrotasks()
   assert.equal(harness.detailCalls[0].signal.aborted, true)
   assert.equal(board.selectedId.value, null)
   assert.equal(board.selectedWorkId.value, null)
@@ -439,70 +406,286 @@ test('a server profile change clears the selected agent and invalidates its deta
   assert.equal(board.detailFailed.value, false)
 })
 
-test('failed list requests preserve data, keep failed until success, and recover on manual and timer retries', async t => {
-  const timers = createManualTimerQueue()
+test('failed list requests preserve data, recover on the next fixed revision snapshot, and do not recheck after success', async t => {
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   const initialEntry = makeEntry('initial', 10)
   harness.queueList(Promise.resolve(listResponse({ active: [initialEntry] })))
-  board.setScope('session-a', 'profile-a')
+  board.setScope('session-a', 'profile-a', 0, 1)
   board.setEnabled(true)
   await flushMicrotasks()
   assert.deepEqual(board.active.value, [initialEntry])
 
   const automaticFailure = new Error('automatic failure')
   harness.queueList(Promise.reject(automaticFailure))
-  await timers.tick()
+  board.observeActivity('session-a', 1)
+  await flushMicrotasks()
   assert.equal(board.failed.value, true)
   assert.deepEqual(board.active.value, [initialEntry])
-  assert.equal(timers.pending.length, 1)
 
   const manualRetry = createDeferred()
   harness.queueList(manualRetry.promise)
-  const retryRequest = board.refresh()
+  board.observeActivity('session-a', 1)
   await flushMicrotasks()
   assert.equal(board.loading.value, true)
   assert.equal(board.failed.value, true)
   assert.deepEqual(board.active.value, [initialEntry])
-  assert.equal(timers.pending.length, 0)
 
   const recoveredEntry = makeEntry('recovered', 20)
   manualRetry.resolve(listResponse({ active: [recoveredEntry] }))
-  await retryRequest
+  await flushMicrotasks()
   assert.equal(board.failed.value, false)
   assert.deepEqual(board.active.value, [recoveredEntry])
-  assert.equal(timers.pending.length, 1)
-
-  const timerFailure = new Error('timer failure')
-  harness.queueList(Promise.reject(timerFailure))
-  await timers.tick()
-  assert.equal(board.failed.value, true)
-  assert.deepEqual(board.active.value, [recoveredEntry])
-  assert.equal(timers.pending.length, 1)
-
-  harness.queueList(Promise.resolve(listResponse({
-    active: [makeEntry('timer-recovered', 30)]
-  })))
-  await timers.tick()
-  assert.equal(board.failed.value, false)
-  assert.deepEqual(board.active.value.map(entry => entry.subagent_id), ['timer-recovered'])
-  assert.equal(timers.pending.length, 1)
+  const callsAfterRecovery = harness.listCalls.length
+  board.observeActivity('session-a', 1)
+  await flushMicrotasks()
+  assert.equal(harness.listCalls.length, callsAfterRecovery)
 })
 
-test('selection and round changes abort stale detail requests, follow the latest round, and pass historical work ids', async t => {
-  const timers = createManualTimerQueue()
+test('rechecks an expired activity lease from a snapshot without scheduling a timer', async t => {
+  let now = 1_000
+  t.mock.method(Date, 'now', () => now)
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
+  const board = createSessionSubagentBoard({ api: harness.api })
+  t.after(() => board.dispose())
+
+  harness.queueList(Promise.resolve(listResponse({
+    active: [makeEntry('agent-a', 10)],
+    lease_recheck_in_ms: 100
+  })))
+  board.setScope('session-a', 'profile-a', 0, 1)
+  board.setEnabled(true)
+  await flushMicrotasks()
+  assert.equal(harness.listCalls.length, 1)
+
+  now = 1_099
+  board.observeActivity('session-a', 0, 1)
+  await flushMicrotasks()
+  assert.equal(harness.listCalls.length, 1)
+
+  harness.queueList(Promise.resolve(listResponse({ active: [makeEntry('agent-a', 10)] })))
+  now = 1_100
+  board.observeActivity('session-a', 0, 1)
+  await flushMicrotasks()
+  assert.equal(harness.listCalls.length, 2)
+})
+
+test('loadMoreRecent adds one follow-up after an in-flight list request', async t => {
+  const harness = createApi()
+  const board = createSessionSubagentBoard({ api: harness.api })
+  t.after(() => board.dispose())
+
+  const firstList = createDeferred()
+  const secondList = createDeferred()
+  harness.queueList(firstList.promise)
+  board.setScope('session-a', 'profile-a', 0, 1)
+  board.setEnabled(true)
+  await flushMicrotasks()
+
+  harness.queueList(secondList.promise)
+  await board.loadMoreRecent()
+  assert.equal(board.recentLimit.value, 20)
+  assert.equal(harness.listCalls.length, 1)
+
+  firstList.resolve(listResponse({ active: [makeEntry('agent-a', 10)] }))
+  await flushMicrotasks()
+  assert.equal(harness.listCalls.length, 2)
+  assert.equal(harness.listCalls[1].params.recent_limit, 20)
+  assert.equal(harness.getMaxActiveListRequests(), 1)
+
+  secondList.resolve(listResponse({ active: [makeEntry('agent-a', 10)] }))
+  await flushMicrotasks()
+  assert.equal(harness.listCalls.length, 2)
+  assert.equal(board.loading.value, false)
+})
+
+test('a selected detail refresh adds one follow-up when a newer summary arrives in flight', async t => {
+  const harness = createApi()
+  const board = createSessionSubagentBoard({ api: harness.api })
+  t.after(() => board.dispose())
+
+  const firstEntry = makeEntry('agent-a', 20, { latest_post_id: 1 })
+  harness.queueList(Promise.resolve(listResponse({ active: [firstEntry] })))
+  board.setScope('session-a', 'profile-a', 0, 1)
+  board.setEnabled(true)
+  await flushMicrotasks()
+
+  harness.queueDetail(Promise.resolve(detailResponse({
+    subagent_id: 'agent-a',
+    work_id: 20,
+    posts: [makePost(1, 20)]
+  })))
+  await board.selectSubagent('agent-a')
+
+  const laggingDetail = createDeferred()
+  const followUpDetail = createDeferred()
+  harness.queueDetail(laggingDetail.promise)
+  const laggingRequest = board.refreshDetail()
+  await flushMicrotasks()
+
+  const newerEntry = { ...firstEntry, latest_post_id: 2 }
+  harness.queueDetail(followUpDetail.promise)
+  harness.queueList(Promise.resolve(listResponse({
+    active: [newerEntry],
+    selected: newerEntry
+  })))
+  board.observeActivity('session-a', 1, 1)
+  await flushMicrotasks()
+  assert.equal(harness.listCalls.length, 2)
+  assert.equal(harness.detailCalls.length, 2)
+
+  laggingDetail.resolve(detailResponse({
+    subagent_id: 'agent-a',
+    work_id: 20,
+    posts: [makePost(1, 20, { content: 'lagging detail' })]
+  }))
+  await laggingRequest
+  await flushMicrotasks()
+  assert.equal(harness.detailCalls.length, 3)
+
+  followUpDetail.resolve(detailResponse({
+    subagent_id: 'agent-a',
+    work_id: 20,
+    posts: [makePost(2, 20, { content: 'updated detail' })]
+  }))
+  await flushMicrotasks()
+  assert.equal(harness.detailCalls.length, 3)
+  assert.equal(board.detail.value.posts.find(post => post.id === 2).content, 'updated detail')
+})
+
+test('does not refresh first-open detail when another task changes in the same list snapshot', async t => {
+  const harness = createApi()
+  const board = createSessionSubagentBoard({ api: harness.api })
+  t.after(() => board.dispose())
+
+  const firstEntry = makeEntry('agent-a', 20, { latest_post_id: 1 })
+  const otherEntry = makeEntry('agent-b', 30, { latest_post_id: 1 })
+  harness.queueList(Promise.resolve(listResponse({
+    active: [firstEntry, otherEntry]
+  })))
+  board.setScope('session-a', 'profile-a', 0, 1)
+  board.setEnabled(true)
+  await flushMicrotasks()
+
+  const firstDetail = createDeferred()
+  harness.queueDetail(firstDetail.promise)
+  const selection = board.selectSubagent('agent-a')
+  await flushMicrotasks()
+  assert.equal(harness.detailCalls.length, 1)
+
+  const unchangedSelected = { ...firstEntry }
+  const progressedOther = {
+    ...otherEntry,
+    latest_post_id: 2,
+    updated_at: '2026-11-14T12:03:00Z'
+  }
+  harness.queueList(Promise.resolve(listResponse({
+    active: [unchangedSelected, progressedOther],
+    selected: { ...unchangedSelected }
+  })))
+  board.observeActivity('session-a', 1, 1)
+  await flushMicrotasks()
+  assert.equal(harness.listCalls.length, 2)
+  assert.equal(harness.detailCalls.length, 1)
+  assert.deepEqual(board.selectedEntry.value, firstEntry)
+  assert.equal(board.active.value.find(entry => entry.subagent_id === 'agent-b').latest_post_id, 2)
+
+  firstDetail.resolve(detailResponse({
+    subagent_id: 'agent-a',
+    work_id: 20,
+    posts: [makePost(1, 20, { content: 'first-open detail' })]
+  }))
+  await selection
+  await flushMicrotasks()
+  assert.equal(harness.detailCalls.length, 1)
+  assert.equal(board.detail.value.posts[0].content, 'first-open detail')
+  assert.deepEqual(board.selectedEntry.value, firstEntry)
+})
+
+for (const scenario of [
+  {
+    title: 'a detail failure under a stable snapshot retries detail only',
+    revision: 0,
+    retryThroughList: false
+  },
+  {
+    title: 'a detail failure with unchanged selected summary retries through a newer list snapshot',
+    revision: 1,
+    retryThroughList: true
+  }
+]) {
+  test(scenario.title, async t => {
+    const harness = createApi()
+    const board = createSessionSubagentBoard({ api: harness.api })
+    t.after(() => board.dispose())
+
+    const entry = makeEntry('agent-a', 20)
+    const otherEntry = makeEntry('agent-b', 30, { latest_post_id: 1 })
+    harness.queueList(Promise.resolve(listResponse({
+      active: [entry, otherEntry]
+    })))
+    board.setScope('session-a', 'profile-a', 0, 1)
+    board.setEnabled(true)
+    await flushMicrotasks()
+
+    harness.queueDetail(Promise.resolve(detailResponse({
+      subagent_id: 'agent-a',
+      work_id: 20,
+      posts: [makePost(1, 20, { content: 'old detail' })],
+      result_text: 'old result'
+    })))
+    await board.selectSubagent('agent-a')
+
+    harness.queueDetail(Promise.reject(new Error('detail request failed')))
+    await board.refreshDetail()
+    assert.equal(board.detailFailed.value, true)
+    assert.equal(harness.listCalls.length, 1)
+    assert.equal(harness.detailCalls.length, 2)
+    assert.equal(board.detail.value.posts[0].content, 'old detail')
+    assert.equal(board.detail.value.result_text, 'old result')
+
+    const retriedDetail = createDeferred()
+    harness.queueDetail(retriedDetail.promise)
+    if (scenario.retryThroughList) {
+      harness.queueList(Promise.resolve(listResponse({
+        active: [entry, {
+          ...otherEntry,
+          latest_post_id: 2,
+          updated_at: '2026-11-14T12:03:00Z'
+        }],
+        selected: { ...entry }
+      })))
+    }
+    board.observeActivity('session-a', scenario.revision, 1)
+    await flushMicrotasks()
+    assert.equal(harness.listCalls.length, scenario.retryThroughList ? 2 : 1)
+    assert.equal(harness.detailCalls.length, 3)
+    if (scenario.retryThroughList) {
+      assert.equal(harness.listCalls[1].params.selected_subagent_id, 'agent-a')
+      assert.deepEqual(board.selectedEntry.value, entry)
+      assert.equal(board.active.value.find(item => item.subagent_id === 'agent-b').latest_post_id, 2)
+    }
+    assert.equal(board.detail.value.posts[0].content, 'old detail')
+    assert.equal(board.detail.value.result_text, 'old result')
+
+    retriedDetail.resolve(detailResponse({
+      subagent_id: 'agent-a',
+      work_id: 20,
+      posts: [makePost(2, 20, { content: 'recovered detail' })],
+      result_text: 'recovered result'
+    }))
+    await flushMicrotasks()
+    assert.equal(board.detailFailed.value, false)
+    assert.equal(board.detail.value.posts.find(post => post.id === 2).content, 'recovered detail')
+    assert.equal(board.detail.value.result_text, 'recovered result')
   })
+}
+
+test('selection and round changes abort stale detail requests, follow the latest round, and pass historical work ids', async t => {
+  const harness = createApi()
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   harness.queueList(Promise.resolve(listResponse({
@@ -575,13 +758,8 @@ test('selection and round changes abort stale detail requests, follow the latest
 })
 
 test('a detail failure keeps the previous detail until a later refresh succeeds', async t => {
-  const timers = createManualTimerQueue()
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   const entry = makeEntry('agent-a', 20)
@@ -635,13 +813,8 @@ test('a detail failure keeps the previous detail until a later refresh succeeds'
 })
 
 test('detail pages deduplicate and sort posts, keep loaded work state, preserve records on refresh, and reset on disconnected latest pages', async t => {
-  const timers = createManualTimerQueue()
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   const entry = makeEntry('agent-a', 20)
@@ -788,13 +961,8 @@ test('detail pages deduplicate and sort posts, keep loaded work state, preserve 
 })
 
 test('new rounds replace old posts, different agents never share details, transitions do not duplicate cards, and missing selections clear', async t => {
-  const timers = createManualTimerQueue()
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   const agentA10 = makeEntry('agent-a', 10)
@@ -896,13 +1064,8 @@ test('new rounds replace old posts, different agents never share details, transi
 })
 
 test('load more increases the recent limit by ten up to one hundred, stays capped, and resets per scope', async t => {
-  const timers = createManualTimerQueue()
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   board.setScope('session-a', 'profile-a')
@@ -931,13 +1094,8 @@ test('load more increases the recent limit by ten up to one hundred, stays cappe
 })
 
 test('auto-refreshes latest detail only when its selected summary changes', async t => {
-  const timers = createManualTimerQueue()
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   const runningEntry = makeEntry('agent-a', 20, {
@@ -947,7 +1105,7 @@ test('auto-refreshes latest detail only when its selected summary changes', asyn
   harness.queueList(Promise.resolve(listResponse({
     active: [runningEntry]
   })))
-  board.setScope('session-a', 'profile-a')
+  board.setScope('session-a', 'profile-a', 0, 1)
   board.setEnabled(true)
   await flushMicrotasks()
 
@@ -978,7 +1136,8 @@ test('auto-refreshes latest detail only when its selected summary changes', asyn
     active: [renewedEntry],
     selected: renewedEntry
   })))
-  await timers.tick()
+  board.observeActivity('session-a', 1)
+  await flushMicrotasks()
   assert.equal(harness.detailCalls.length, 2)
   assert.equal(board.selectedEntry.value.updated_at, renewedEntry.updated_at)
   assert.deepEqual({
@@ -1007,7 +1166,7 @@ test('auto-refreshes latest detail only when its selected summary changes', asyn
     active: [newPostEntry],
     selected: newPostEntry
   })))
-  await timers.tick()
+  board.observeActivity('session-a', 2)
   await flushMicrotasks()
   assert.equal(harness.detailCalls.length, 3)
   assert.deepEqual(harness.detailCalls[2].params, { work_id: 20 })
@@ -1030,7 +1189,7 @@ test('auto-refreshes latest detail only when its selected summary changes', asyn
     active: [newRoundEntry],
     selected: newRoundEntry
   })))
-  await timers.tick()
+  board.observeActivity('session-a', 3)
   await flushMicrotasks()
   assert.equal(harness.detailCalls.length, 4)
   assert.deepEqual(harness.detailCalls[3].params, { work_id: 20 })
@@ -1048,7 +1207,7 @@ test('auto-refreshes latest detail only when its selected summary changes', asyn
     active: [newRoundRenewal],
     selected: newRoundRenewal
   })))
-  await timers.tick()
+  board.observeActivity('session-a', 4)
   await flushMicrotasks()
   assert.equal(harness.detailCalls.length, 4)
   assert.equal(board.selectedEntry.value.work_id, 21)
@@ -1056,20 +1215,15 @@ test('auto-refreshes latest detail only when its selected summary changes', asyn
 })
 
 test('keeps an explicitly selected historical detail while latest list data arrives and manual retry runs', async t => {
-  const timers = createManualTimerQueue()
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   const latestEntry = makeEntry('agent-a', 20, { latest_post_id: 2 })
   harness.queueList(Promise.resolve(listResponse({
     active: [latestEntry]
   })))
-  board.setScope('session-a', 'profile-a')
+  board.setScope('session-a', 'profile-a', 0, 1)
   board.setEnabled(true)
   await flushMicrotasks()
 
@@ -1102,7 +1256,7 @@ test('keeps an explicitly selected historical detail while latest list data arri
 
   const listInFlight = createDeferred()
   harness.queueList(listInFlight.promise)
-  const listRefresh = timers.tick()
+  board.observeActivity('session-a', 1)
   await flushMicrotasks()
   assert.equal(board.loading.value, true)
 
@@ -1128,7 +1282,6 @@ test('keeps an explicitly selected historical detail while latest list data arri
     active: [latestEntry],
     selected: latestEntry
   }))
-  await listRefresh
   await flushMicrotasks()
   assert.equal(harness.detailCalls.length, 4)
   assert.equal(board.selectedEntry.value.work_id, 20)
@@ -1138,13 +1291,8 @@ test('keeps an explicitly selected historical detail while latest list data arri
 })
 
 test('round pages preserve the loaded directory across historical detail and retry independently', async t => {
-  const timers = createManualTimerQueue()
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   const latestEntry = makeEntry('agent-a', 60)
@@ -1222,13 +1370,8 @@ test('round pages preserve the loaded directory across historical detail and ret
 })
 
 test('round pages ignore cancelled late responses after a session or agent switch', async t => {
-  const timers = createManualTimerQueue()
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   const agentA = makeEntry('agent-a', 30)
@@ -1312,13 +1455,8 @@ test('round pages ignore cancelled late responses after a session or agent switc
 })
 
 test('keeps an explicitly selected old detail while a refreshed first page fills the round directory gap', async t => {
-  const timers = createManualTimerQueue()
   const harness = createApi()
-  const board = createSessionSubagentBoard({
-    api: harness.api,
-    schedule: timers.schedule,
-    cancel: timers.cancel
-  })
+  const board = createSessionSubagentBoard({ api: harness.api })
   t.after(() => board.dispose())
 
   const latestEntry = makeEntry('agent-a', 60)

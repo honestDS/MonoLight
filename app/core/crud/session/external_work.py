@@ -9,6 +9,7 @@ from app.core.constants import AGENT_WORK_TOOL_NAME, ERR_SUBAGENT_CONTEXT_INVALI
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
 from app.core.crud.session.subagent import subagent_crud
+from app.core.crud.session.subagent_revision import bump_subagent_board_revisions
 from app.core.crud.session.terminal_watch import get_terminal_watch_deliveries
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -289,7 +290,11 @@ class CRUDExternalWork:
             .values(**{**values, "updated_at": get_local_time()})
             .execution_options(synchronize_session=False)
         )
-        return (result.rowcount or 0) == 1
+        updated = (result.rowcount or 0) == 1
+        next_status = values.get("status")
+        if updated and work.subagent_id is not None and next_status and next_status != work.status:
+            await bump_subagent_board_revisions(db, [work.session_id])
+        return updated
 
     async def mark_stopped_results_delivered(self, db: AsyncSession, *, uid: str, task_ids: list[int]) -> None:
         if not task_ids:
@@ -590,6 +595,8 @@ class CRUDExternalWork:
         updated = (result.rowcount or 0) == 1
         if updated:
             await session_reply_work_item_crud.save_checkpoint(db, work.id, checkpoint)
+        if updated and work.subagent_id is not None:
+            await bump_subagent_board_revisions(db, [work.session_id])
         await db.flush()
         return updated
 
@@ -621,9 +628,12 @@ class CRUDExternalWork:
             )
             .execution_options(synchronize_session=False)
         )
+        updated = (result.rowcount or 0) == 1
+        if updated and work.subagent_id is not None:
+            await bump_subagent_board_revisions(db, [work.session_id])
         if commit:
             await db.commit()
-        return (result.rowcount or 0) == 1
+        return updated
 
     async def interrupt_waiting(
         self,
@@ -655,9 +665,12 @@ class CRUDExternalWork:
             )
             .execution_options(synchronize_session=False)
         )
+        updated = (result.rowcount or 0) == 1
+        if updated and work.subagent_id is not None:
+            await bump_subagent_board_revisions(db, [work.session_id])
         if commit:
             await db.commit()
-        return (result.rowcount or 0) == 1
+        return updated
 
     async def list_waiting(
         self,

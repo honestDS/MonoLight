@@ -7,6 +7,12 @@ const ROUND_TASK_KEY = 'session-subagent-rounds'
 const DEFAULT_RECENT_LIMIT = 10
 const MAX_RECENT_LIMIT = 100
 
+const isValidRevision = revision => Number.isSafeInteger(revision) && revision >= 0
+const isValidLeaseDelay = delay => Number.isSafeInteger(delay) && delay > 0
+const normalizeActivityProfileId = profileId => Number.isSafeInteger(profileId) && profileId >= 0
+  ? profileId
+  : null
+
 const mergePosts = (...postGroups) => {
   const postsById = new Map()
   for (const posts of postGroups) {
@@ -44,10 +50,7 @@ const sameDetailEntry = (left, right) => Boolean(left && right)
   && left.completed === right.completed
 
 export const createSessionSubagentBoard = ({
-  api,
-  intervalMs = 2000,
-  schedule = (fn, ms) => setTimeout(fn, ms),
-  cancel = clearTimeout
+  api
 } = {}) => {
   const active = ref([])
   const activePage = ref(1)
@@ -75,28 +78,22 @@ export const createSessionSubagentBoard = ({
   let lastProfileId
   let enabled = false
   let disposed = false
-  let timer = null
+  let observedRevision = null
+  let observedActivityProfileId = null
+  let loadedRevision = null
+  let leaseRecheckAt = null
+  let pendingDetailRefresh = false
   let lastDetailEntry = null
   const canRequest = () => !disposed && enabled && Boolean(sessionId)
-  const stopTimer = () => {
-    if (timer === null) return
-    cancel(timer)
-    timer = null
-  }
-  const scheduleNext = () => {
-    stopTimer()
-    if (!canRequest()) return
+  const activityNeedsRefresh = () => observedRevision !== loadedRevision
+    || (observedActivityProfileId !== null
+      && observedActivityProfileId !== (lastProfileId ?? 0))
+    || failed.value
+    || (leaseRecheckAt !== null && Date.now() >= leaseRecheckAt)
 
-    let handle
-    handle = schedule(async () => {
-      if (timer !== handle) return
-      timer = null
-      await refresh({ forceDetail: false })
-    }, intervalMs)
-    timer = handle
-  }
   const resetDetail = () => {
     taskManager.cancel(DETAIL_TASK_KEY)
+    pendingDetailRefresh = false
     lastDetailEntry = null
     detail.value = null
     detailLoading.value = false
@@ -215,6 +212,9 @@ export const createSessionSubagentBoard = ({
       if (!taskManager.isCurrent(token)) return
       taskManager.finish(token)
       detailLoading.value = false
+      const shouldRefresh = pendingDetailRefresh
+      pendingDetailRefresh = false
+      if (shouldRefresh) void requestDetail()
     }
   }
 
@@ -237,6 +237,7 @@ export const createSessionSubagentBoard = ({
       return
     }
 
+    const selectionChanged = !sameDetailEntry(selectedEntry.value, payload.selected)
     selectedEntry.value = payload.selected
     const followsLatest = selectedWorkId.value === null
       || selectedWorkId.value === selectedEntry.value?.work_id
@@ -252,17 +253,23 @@ export const createSessionSubagentBoard = ({
       || needsInitialDetail
       || latestChanged
       || supersededRunningDetail
-    if (shouldRefresh) void requestDetail()
+      || (followsLatest && detailFailed.value)
+    if (!shouldRefresh) return
+    if (taskManager.isRunning(DETAIL_TASK_KEY)) {
+      if (forceDetail || selectionChanged) pendingDetailRefresh = true
+      return
+    }
+    void requestDetail()
   }
 
   const refresh = async ({ page = activePage.value, forceDetail = true } = {}) => {
     if (!canRequest()) {
-      stopTimer()
       return
     }
     if (taskManager.isRunning(LIST_TASK_KEY)) return
 
-    stopTimer()
+    const requestRevision = observedRevision
+    const requestActivityProfileId = observedActivityProfileId
     const token = taskManager.begin(LIST_TASK_KEY)
     if (!token) return
     const requestSelection = selectedId.value
@@ -276,29 +283,68 @@ export const createSessionSubagentBoard = ({
     try {
       const response = await api.sessionSubagents(sessionId, params, { signal: token.signal })
       if (!taskManager.isCurrent(token)) return
-      applyList(response.data.data, requestSelection, forceDetail)
+      const payload = response.data.data
+      applyList(payload, requestSelection, forceDetail)
       failed.value = false
+      loadedRevision = requestRevision
+      const leaseDelay = payload.lease_recheck_in_ms
+      leaseRecheckAt = isValidLeaseDelay(leaseDelay)
+        ? Date.now() + leaseDelay
+        : null
     } catch {
       if (taskManager.isCurrent(token)) failed.value = true
     } finally {
       if (!taskManager.isCurrent(token)) return
       taskManager.finish(token)
       loading.value = false
-      scheduleNext()
+      const profileChangedInFlight = observedActivityProfileId !== requestActivityProfileId
+        && observedActivityProfileId !== null
+        && observedActivityProfileId !== (lastProfileId ?? 0)
+      if (
+        observedRevision !== requestRevision
+        || profileChangedInFlight
+        || params.recent_limit !== recentLimit.value
+      ) {
+        void refresh({ forceDetail: false })
+      }
     }
   }
 
   const refreshDetail = () => requestDetail()
 
-  const setScope = (nextSessionId, nextProfileKey) => {
+  const observeActivity = (observedSessionId, revision, activityProfileId = null) => {
+    if (disposed || sessionId === null || observedSessionId !== sessionId || !isValidRevision(revision)) {
+      return false
+    }
+    if (observedRevision !== null && revision < observedRevision) return false
+
+    observedRevision = revision
+    observedActivityProfileId = normalizeActivityProfileId(activityProfileId)
+    if (!enabled) return true
+    if (activityNeedsRefresh()) {
+      void refresh({ forceDetail: false })
+    } else if (
+      detailFailed.value
+      && selectedId.value !== null
+      && (selectedWorkId.value === null || selectedWorkId.value === selectedEntry.value?.work_id)
+    ) {
+      void requestDetail()
+    }
+    return true
+  }
+
+  const setScope = (nextSessionId, nextProfileKey, revision = null, activityProfileId = null) => {
     if (disposed) return
     if (sessionId === nextSessionId && profileKey === nextProfileKey) return
 
-    stopTimer()
     taskManager.invalidate()
     sessionId = nextSessionId
     profileKey = nextProfileKey
     lastProfileId = undefined
+    observedRevision = isValidRevision(revision) ? revision : null
+    observedActivityProfileId = normalizeActivityProfileId(activityProfileId)
+    loadedRevision = null
+    leaseRecheckAt = null
 
     active.value = []
     activePage.value = 1
@@ -322,7 +368,7 @@ export const createSessionSubagentBoard = ({
     taskManager.invalidate()
     enabled = nextEnabled
     if (!enabled) {
-      stopTimer()
+      pendingDetailRefresh = false
       loading.value = false
       detailLoading.value = false
       roundsLoading.value = false
@@ -411,7 +457,7 @@ export const createSessionSubagentBoard = ({
   const dispose = () => {
     if (disposed) return
     disposed = true
-    stopTimer()
+    pendingDetailRefresh = false
     taskManager.invalidate()
     loading.value = false
     detailLoading.value = false
@@ -422,7 +468,7 @@ export const createSessionSubagentBoard = ({
     active, activePage, activePageSize, activeTotal, recent, hasMoreRecent, recentLimit, loading, failed,
     detail, detailLoading, detailFailed, selectedId, selectedWorkId, selectedEntry,
     rounds, nextBeforeRoundId, roundsLoading, roundsFailed, nextBeforePostId,
-    setScope, setEnabled, refresh, refreshDetail, selectSubagent, selectRound, loadOlderPosts,
+    setScope, setEnabled, observeActivity, refresh, refreshDetail, selectSubagent, selectRound, loadOlderPosts,
     loadOlderRounds, loadMoreRecent, changeActivePage, clearSelection, dispose
   }
 }

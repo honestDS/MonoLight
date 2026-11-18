@@ -402,6 +402,8 @@ async def get_user_sessions_activity(db: AsyncSession = Depends(get_db), current
             "completed_message_id": row.completed_message_id if row.uid == uid else None,
             "completed_status": row.completed_status.value if row.uid == uid and row.completed_status else None,
             "has_unread_result": bool(row.has_unread_result) if row.uid == uid else False,
+            "subagent_board_revision": row.subagent_board_revision,
+            "subagent_board_profile_id": row.subagent_board_profile_id,
         }
         for row in sessions
     ]
@@ -532,6 +534,7 @@ async def list_session_subagent_board(
                 "has_more_recent": False,
                 "profile_id": None,
                 "selected": None,
+                "lease_recheck_in_ms": None,
             }
         )
     data = await list_session_subagents(

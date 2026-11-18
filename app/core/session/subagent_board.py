@@ -1,4 +1,5 @@
 import json
+from math import ceil
 from time import time
 from typing import Any
 
@@ -181,6 +182,7 @@ async def list_session_subagents(
     has_more_recent = len(recent_candidates) > recent_limit
     recent = recent_candidates[:recent_limit]
     selected = None
+    selected_rows = []
     if selected_subagent_id is not None:
         selected = next((entry for entry in active + recent if entry["subagent_id"] == selected_subagent_id), None)
     if selected_subagent_id is not None and selected is None:
@@ -194,6 +196,15 @@ async def list_session_subagents(
             subagent_id=selected_subagent_id,
         )
         selected = next((_build_entry(row, now=now) for row in selected_rows), None)
+    lease_recheck_in_ms = None
+    for row in [*active_rows, *selected_rows]:
+        if row["completed"] or row["waiting_confirmation"] or row["work_status"].value != SessionReplyWorkStatus.RUNNING.value:
+            continue
+        lock_until = row["lock_until"]
+        if lock_until is None or lock_until <= now:
+            continue
+        delay_ms = ceil((lock_until - now) * 1000)
+        lease_recheck_in_ms = delay_ms if lease_recheck_in_ms is None else min(lease_recheck_in_ms, delay_ms)
     return {
         "active": active,
         "recent": recent,
@@ -203,6 +214,7 @@ async def list_session_subagents(
         "has_more_recent": has_more_recent,
         "profile_id": profile_id,
         "selected": selected,
+        "lease_recheck_in_ms": lease_recheck_in_ms,
     }
 
 

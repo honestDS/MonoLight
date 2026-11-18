@@ -10,6 +10,7 @@ from app.core.constants import (
 )
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud as reply_work_crud
 from app.core.crud.session.subagent import subagent_crud
+from app.core.crud.session.subagent_revision import bump_subagent_board_revisions
 from app.core.exceptions import ParameterException
 from app.core.session_reply_queue.child_result import build_subagent_work_result, get_child_snapshot
 from app.core.utils.message_parser import parse_db_messages_to_internal
@@ -129,10 +130,11 @@ async def finish_child_work(db: AsyncSession, *, work: SessionReplyWorkItem) -> 
         return False
 
     snapshot = await get_child_snapshot(db, subagent=subagent, round_row=round_row)
-    if snapshot.get("status") == "waiting_confirmation":
+    if snapshot.get("status") == "waiting_confirmation" and not round_row.waiting_confirmation:
         round_row.waiting_confirmation = True
         db.add(round_row)
         await db.flush()
+        await bump_subagent_board_revisions(db, [actual_work.session_id])
         return False
     if snapshot.get("completed") is not True:
         return False

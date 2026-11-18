@@ -12,7 +12,9 @@ from app.core.constants import SESSION_REPLY_WORK_CLAIM_INFO_KEY, TERMINAL_WATCH
 from app.core.crud.session.external_work import external_work_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
+from app.core.crud.session.subagent import subagent_crud
 from app.core.crud.task.background import background_task_crud
+from app.core.session.subagent_board import list_session_subagents
 from app.core.session_reply_queue import executor_common as executor_common_module
 from app.core.session_reply_queue import executor_lifecycle as executor_lifecycle_module
 from app.core.tools.background_tasks import ManageBackgroundTasksExecutor
@@ -765,6 +767,89 @@ async def test_complete_stopped_task_replies_cleans_unledgered_terminal_watch_wa
         task_id=task_id,
     )
     assert repeated == first
+
+
+@pytest.mark.asyncio
+async def test_complete_stopped_task_replies_updates_real_subagent_board(
+    external_work_database,
+) -> None:
+    case, closing_work_id, _ = await _prepare_stopped_task_reply_case(
+        external_work_database,
+        ledger_mode="empty",
+        mixed_wait=False,
+    )
+
+    async with external_work_database() as db:
+        work = await db.get(SessionReplyWorkItem, case.work_id)
+        assert work is not None and work.id is not None
+
+        subagent = await subagent_crud.create(
+            db,
+            uid=case.uid,
+            session_id=case.session_id,
+            profile_id=case.profile_id,
+            name="terminal worker",
+        )
+        subagent_id = subagent.id
+        assert subagent_id is not None
+        round_row = await subagent_crud.create_round(db, subagent_id=subagent_id, child_work_id=work.id)
+        subagent.active_child_work_id = work.id
+        subagent.latest_child_work_id = work.id
+        work.subagent_id = subagent_id
+        work.work_type = SessionReplyWorkType.AGENT_WORK
+        work.source_type = SessionReplySourceType.PARENT_WORK
+        work.source_id = str(closing_work_id)
+        await subagent_crud.create_board_post(
+            db,
+            uid=case.uid,
+            session_id=case.session_id,
+            profile_id=case.profile_id,
+            subagent_id=subagent_id,
+            child_work_id=work.id,
+            stage="progress",
+            content="waiting for terminal result",
+        )
+        await db.commit()
+
+        assert round_row.current_work_id == work.id
+
+    async def observe_board() -> tuple[int, dict[str, Any]]:
+        async with external_work_database() as db:
+            activity = next(row for row in await session_crud.get_user_activity(db, uid=case.uid) if row.session_id == case.session_id)
+            board = await list_session_subagents(
+                db,
+                uid=case.uid,
+                session_id=case.session_id,
+                profile_id=case.profile_id,
+            )
+            return activity.subagent_board_revision, board
+
+    initial_revision, initial_board = await observe_board()
+    assert [entry["work_id"] for entry in initial_board["active"]] == [case.work_id]
+    assert initial_board["active"][0]["subagent_id"] == subagent_id
+    assert initial_board["active"][0]["status"] == SessionReplyWorkStatus.WAITING_EXTERNAL_WORK.value
+    assert initial_board["recent"] == []
+
+    async with external_work_database() as db:
+        await external_work_module.complete_stopped_task_replies(db, work_id=closing_work_id)
+        await db.commit()
+
+    completed_revision, completed_board = await observe_board()
+    assert completed_revision > initial_revision
+    assert completed_board["active"] == []
+    assert [entry["work_id"] for entry in completed_board["recent"]] == [case.work_id]
+    assert completed_board["recent"][0]["subagent_id"] == subagent_id
+    assert completed_board["recent"][0]["status"] == SessionReplyWorkStatus.CANCELLED.value
+
+    async with external_work_database() as db:
+        await external_work_module.complete_stopped_task_replies(db, work_id=closing_work_id)
+        await db.commit()
+
+    repeated_revision, repeated_board = await observe_board()
+    assert repeated_revision == completed_revision
+    assert repeated_board["active"] == []
+    assert [entry["work_id"] for entry in repeated_board["recent"]] == [case.work_id]
+    assert repeated_board["recent"][0]["status"] == SessionReplyWorkStatus.CANCELLED.value
 
 
 @pytest.mark.asyncio

@@ -15,8 +15,10 @@ from app.core.constants import (
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
 )
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.subagent import subagent_crud
 from app.core.i18n import t
 from app.core.session_reply_queue.child_recovery import reconcile_child_work
+from app.core.session_reply_queue.executor_lifecycle import execute_session_reply_work
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.dispatcher.process_single_tool import get_tool_execution_status
 from app.core.utils.dispatcher.save_message import save_message
@@ -745,6 +747,201 @@ async def test_cancel_queued_child_during_parent_review_does_not_rewake_parent(
         assert history_response.status_code == 200
         history = history_response.json()["data"]
         assert sum(item.get("content") == parent_final for item in history) == 1
+
+
+@pytest.mark.asyncio
+async def test_subagent_board_http_workflow_tracks_committed_revision_and_hides_rolled_back_posts(image_chat_runtime) -> None:
+    progress_stage = "investigating"
+    progress_content = "The child verified the first independent check and is continuing with the remaining work."
+    rolled_back_stage = "rolled-back"
+    rolled_back_content = "This progress must not become visible after rollback."
+    child_final = "inspection-http-board-child-final"
+    worker_id = "inspection-http-board-worker"
+
+    async def activity_row(runtime):
+        response = await runtime.client.get("/api/v1/chat/sessions/activity")
+        assert response.status_code == 200
+        return next(row for row in response.json()["data"] if row["session_id"] == runtime.session_id)
+
+    async def board_data(runtime):
+        response = await runtime.client.get(
+            "/api/v1/chat/sessions/subagents",
+            params={"session_id": runtime.session_id},
+        )
+        assert response.status_code == 200
+        return response.json()["data"]
+
+    async def detail_data(runtime, subagent_id: str):
+        response = await runtime.client.get(
+            f"/api/v1/chat/sessions/subagents/{subagent_id}",
+            params={"session_id": runtime.session_id},
+        )
+        assert response.status_code == 200
+        return response.json()["data"]
+
+    async with _create_case(image_chat_runtime, protocol="OPENAI_RESPONSES") as case:
+        runtime = case.runtime
+        child = case.children[0]
+
+        initial_activity = await activity_row(runtime)
+        assert initial_activity["subagent_board_revision"] > 0
+        assert await activity_row(runtime) == initial_activity
+
+        initial_board = await board_data(runtime)
+        initial_entry = next(entry for entry in initial_board["active"] if entry["work_id"] == child["work_id"])
+        assert initial_entry["status"] == SessionReplyWorkStatus.READY_FOR_LLM.value
+        assert initial_entry["completed"] is False
+
+        async with runtime.factory() as db:
+            claimed = await session_reply_work_item_crud.claim_next(
+                db,
+                worker_id=worker_id,
+                lease_seconds=300,
+                independent_only=True,
+            )
+            assert claimed is not None
+            assert claimed.id == child["work_id"]
+            assert claimed.status == SessionReplyWorkStatus.RUNNING
+
+        claimed_activity = await activity_row(runtime)
+        assert claimed_activity["subagent_board_revision"] > initial_activity["subagent_board_revision"]
+        claimed_board = await board_data(runtime)
+        claimed_entry = next(entry for entry in claimed_board["active"] if entry["work_id"] == child["work_id"])
+        assert claimed_entry["status"] == SessionReplyWorkStatus.RUNNING.value
+
+        async with runtime.factory() as db:
+            db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (child["work_id"], worker_id)
+            assert await child_work_module.post_subagent_board(
+                db,
+                uid=runtime.uid,
+                session_id=runtime.session_id,
+                profile_id=runtime.profile.id,
+                stage=progress_stage,
+                content=progress_content,
+            ) == {"status": "saved"}
+
+        progress_activity = await activity_row(runtime)
+        assert progress_activity["subagent_board_revision"] > claimed_activity["subagent_board_revision"]
+        progress_board = await board_data(runtime)
+        progress_entry = next(entry for entry in progress_board["active"] if entry["work_id"] == child["work_id"])
+        assert progress_entry["status"] == SessionReplyWorkStatus.RUNNING.value
+        assert progress_entry["stage"] == progress_stage
+        assert progress_entry["preview"] == progress_content
+        progress_detail = await detail_data(runtime, child["subagent_id"])
+        assert progress_detail["status"] == SessionReplyWorkStatus.RUNNING.value
+        assert [(post["stage"], post["content"]) for post in progress_detail["posts"]] == [(progress_stage, progress_content)]
+
+        async with runtime.factory() as db:
+            rolled_back_post = await subagent_crud.create_board_post(
+                db,
+                uid=runtime.uid,
+                session_id=runtime.session_id,
+                profile_id=runtime.profile.id,
+                subagent_id=child["subagent_id"],
+                child_work_id=child["work_id"],
+                stage=rolled_back_stage,
+                content=rolled_back_content,
+            )
+            assert rolled_back_post.id is not None
+            await db.rollback()
+
+        rolled_back_activity = await activity_row(runtime)
+        assert rolled_back_activity["subagent_board_revision"] == progress_activity["subagent_board_revision"]
+        rolled_back_detail = await detail_data(runtime, child["subagent_id"])
+        assert rolled_back_detail == progress_detail
+        assert rolled_back_content not in json.dumps(rolled_back_detail, ensure_ascii=False)
+
+        runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=child_final))
+        await execute_session_reply_work(child["work_id"], worker_id)
+        assert not runtime.outputs
+
+        completed_activity = await activity_row(runtime)
+        assert completed_activity["subagent_board_revision"] > rolled_back_activity["subagent_board_revision"]
+        completed_board = await board_data(runtime)
+        assert completed_board["active"] == []
+        completed_entry = next(entry for entry in completed_board["recent"] if entry["work_id"] == child["work_id"])
+        assert completed_entry["status"] == SessionReplyWorkStatus.SUCCEEDED.value
+        assert completed_entry["completed"] is True
+        completed_detail = await detail_data(runtime, child["subagent_id"])
+        assert completed_detail["status"] == SessionReplyWorkStatus.SUCCEEDED.value
+        assert completed_detail["completed"] is True
+        assert completed_detail["result_text"] == child_final
+        assert completed_detail["posts"] == progress_detail["posts"]
+
+        assert await activity_row(runtime) == completed_activity
+        assert await board_data(runtime) == completed_board
+        assert await detail_data(runtime, child["subagent_id"]) == completed_detail
+
+
+@pytest.mark.asyncio
+async def test_http_stop_cancels_queued_child_and_preserves_board_revision_for_foreground_stop(image_chat_runtime) -> None:
+    async def activity_revision(runtime) -> int:
+        response = await runtime.client.get("/api/v1/chat/sessions/activity")
+        assert response.status_code == 200
+        row = next(item for item in response.json()["data"] if item["session_id"] == runtime.session_id)
+        return row["subagent_board_revision"]
+
+    async def board_data(runtime) -> dict:
+        response = await runtime.client.get(
+            "/api/v1/chat/sessions/subagents",
+            params={"session_id": runtime.session_id},
+        )
+        assert response.status_code == 200
+        return response.json()["data"]
+
+    async with _create_case(image_chat_runtime, protocol="OPENAI_RESPONSES") as case:
+        runtime = case.runtime
+        child = case.children[0]
+        initial_revision = await activity_revision(runtime)
+
+        first_stop = await runtime.client.post(
+            "/api/v1/chat/sessions/stop",
+            params={"session_id": runtime.session_id},
+        )
+        assert first_stop.status_code == 200
+        assert first_stop.json()["data"] == {
+            "session_id": runtime.session_id,
+            "cancelled_count": 2,
+        }
+
+        cancelled_revision = await activity_revision(runtime)
+        assert cancelled_revision > initial_revision
+        cancelled_entry = next(entry for entry in (await board_data(runtime))["recent"] if entry["work_id"] == child["work_id"])
+        assert cancelled_entry["subagent_id"] == child["subagent_id"]
+        assert cancelled_entry["status"] == SessionReplyWorkStatus.CANCELLED.value
+        assert cancelled_entry["completed"] is True
+
+        foreground_work_id = await _submit(
+            runtime,
+            request_id="http-stop-foreground-after-child-cancel",
+            message="Answer this ordinary foreground request without running any worker.",
+        )
+        assert next(entry for entry in (await board_data(runtime))["recent"] if entry["work_id"] == child["work_id"]) == cancelled_entry
+        before_foreground_stop_revision = await activity_revision(runtime)
+        assert before_foreground_stop_revision == cancelled_revision
+
+        async with runtime.factory() as db:
+            foreground = await db.get(SessionReplyWorkItem, foreground_work_id)
+            assert foreground is not None
+            assert foreground.status == SessionReplyWorkStatus.READY_FOR_LLM
+
+        second_stop = await runtime.client.post(
+            "/api/v1/chat/sessions/stop",
+            params={"session_id": runtime.session_id},
+        )
+        assert second_stop.status_code == 200
+        assert second_stop.json()["data"] == {
+            "session_id": runtime.session_id,
+            "cancelled_count": 1,
+        }
+
+        async with runtime.factory() as db:
+            foreground = await db.get(SessionReplyWorkItem, foreground_work_id)
+            assert foreground is not None
+            assert foreground.status == SessionReplyWorkStatus.CANCELLED
+
+        assert await activity_revision(runtime) == before_foreground_stop_revision
+        assert next(entry for entry in (await board_data(runtime))["recent"] if entry["work_id"] == child["work_id"])["status"] == SessionReplyWorkStatus.CANCELLED.value
 
 
 @pytest.mark.parametrize(

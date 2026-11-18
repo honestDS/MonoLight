@@ -47,7 +47,8 @@ const injectedImports = {
   },
   '../api/index.js': { chatApi: api },
   '../composables/chat/sessionSubagentBoard.js': { createSessionSubagentBoard },
-  '../composables/chat/sessionTodoOverlay.js': { createSessionTodoOverlay }
+  '../composables/chat/sessionTodoOverlay.js': { createSessionTodoOverlay },
+  '../composables/chat/useSessionTasks.js': { SESSION_ACTIVITY_KEY: 'sessionActivity' }
 }
 
 const panelCode = compiledPanel.content
@@ -220,6 +221,14 @@ const passthrough = (tag = 'div') => ({
 const mountScenario = async (initialSessionId, panelComponent = SessionTodoPanel) => {
   const { root, renderer } = createHost()
   const state = Vue.reactive({ sessionId: initialSessionId })
+  const activitySnapshot = Vue.shallowRef(initialSessionId
+    ? {
+        activities: [{
+          session_id: initialSessionId,
+          subagent_board_revision: 0
+        }]
+      }
+    : null)
   const errors = []
   const warnings = []
   const chatRoute = {
@@ -247,6 +256,7 @@ const mountScenario = async (initialSessionId, panelComponent = SessionTodoPanel
   })
   const app = renderer.createApp({ render: () => Vue.h(RouterView) })
   app.use(router)
+  app.provide('sessionActivity', { snapshot: activitySnapshot })
   app.config.errorHandler = (error, _instance, info) => errors.push({ error, info })
   app.config.warnHandler = (message, _instance, trace) => warnings.push(`${message}${trace}`)
   app.component('el-aside', passthrough('aside'))
@@ -270,7 +280,7 @@ const mountScenario = async (initialSessionId, panelComponent = SessionTodoPanel
   app.mount(root)
   await Vue.nextTick()
 
-  return { app, root, router, state, errors, warnings }
+  return { app, root, router, state, activitySnapshot, errors, warnings }
 }
 
 const taskButtons = target => target.querySelectorAll('.session-task-trigger')
@@ -538,29 +548,173 @@ test('keeps subagent statuses in the list rather than detail', async t => {
   assert.equal(harness.warnings.length, 0, harness.warnings.join('\n'))
 })
 
-test('keeps an empty subagent list visible while polling is pending', async t => {
-  let resolveSessionSubagents
-  let scheduledCallback = null
+test('clears stale subagent content while activity is unavailable', async t => {
+  const sessionSubagentResponses = []
+  const sessionSubagentDetailResponses = []
 
   const Panel = createPanelComponent(() => createSessionSubagentBoard({
     api: {
       sessionSubagents: () => new Promise(resolve => {
-        resolveSessionSubagents = resolve
+        sessionSubagentResponses.push(resolve)
+      }),
+      sessionSubagentDetail: () => new Promise(resolve => {
+        sessionSubagentDetailResponses.push(resolve)
       })
-    },
-    schedule: callback => {
-      scheduledCallback = callback
-      return callback
-    },
-    cancel: callback => {
-      if (scheduledCallback === callback) scheduledCallback = null
     }
   }), false)
 
-  const respondWith = (active = []) => resolveSessionSubagents({
+  const respondWithList = (requestIndex, active = []) => sessionSubagentResponses[requestIndex]({
     data: {
       data: {
-        profile_id: 'profile',
+        profile_id: 1,
+        active_page: 1,
+        active_page_size: 10,
+        active_total: active.length,
+        active,
+        recent: [],
+        has_more_recent: false,
+        selected: null
+      }
+    }
+  })
+  const respondWithDetail = (requestIndex, detail) => sessionSubagentDetailResponses[requestIndex]({
+    data: {
+      data: {
+        ...detail,
+        rounds: [{ work_id: detail.work_id, created_at: '2026-01-01T00:00:00.000Z' }],
+        next_before_round_id: null,
+        next_before_post_id: null
+      }
+    }
+  })
+  const settle = async () => {
+    await Promise.resolve()
+    await Vue.nextTick()
+  }
+  const oldEntry = {
+    name: 'Old worker',
+    subagent_id: 'old-worker',
+    status: 'running',
+    work_id: 1,
+    updated_at: null,
+    preview: '',
+    stage: 'Working',
+    completed: false
+  }
+  const oldDetail = {
+    work_id: 1,
+    name: 'Old worker',
+    status: 'succeeded',
+    result_text: 'Old result',
+    posts: [],
+    reason: '',
+    ended_without_reply: false
+  }
+  const newEntry = {
+    name: 'New worker',
+    subagent_id: 'new-worker',
+    status: 'running',
+    work_id: 2,
+    updated_at: null,
+    preview: '',
+    stage: 'Working again',
+    completed: false
+  }
+  const newDetail = {
+    work_id: 2,
+    name: 'New worker',
+    status: 'succeeded',
+    result_text: 'New result',
+    posts: [],
+    reason: '',
+    ended_without_reply: false
+  }
+
+  const harness = await mountScenario('activity-refresh-session', Panel)
+  t.after(() => harness.app.unmount())
+
+  click(taskButtons(harness.root)[0])
+  await Vue.nextTick()
+  assert.equal(sessionSubagentResponses.length, 1)
+
+  respondWithList(0, [oldEntry])
+  await settle()
+  assert.equal(harness.root.querySelector('.subagent-card-name').textContent, 'Old worker')
+
+  click(harness.root.querySelector('.subagent-card'))
+  await Vue.nextTick()
+  assert.equal(sessionSubagentDetailResponses.length, 1)
+  respondWithDetail(0, oldDetail)
+  await settle()
+  assert.equal(harness.root.querySelector('.subagent-detail-copy').textContent, 'Old result')
+
+  harness.activitySnapshot.value = {
+    activities: [{
+      session_id: 'activity-refresh-session',
+      subagent_board_revision: 1
+    }]
+  }
+  await Vue.nextTick()
+  assert.equal(sessionSubagentResponses.length, 2)
+
+  harness.activitySnapshot.value = null
+  await Vue.nextTick()
+  assert.equal(harness.root.querySelector('.subagent-card'), null)
+  assert.equal(harness.root.querySelector('.subagent-detail-copy'), null)
+
+  harness.activitySnapshot.value = {
+    activities: [{
+      session_id: 'other-session',
+      subagent_board_revision: 1
+    }]
+  }
+  await Vue.nextTick()
+  assert.equal(sessionSubagentResponses.length, 2)
+  assert.equal(sessionSubagentDetailResponses.length, 1)
+
+  respondWithList(1, [oldEntry])
+  await settle()
+  assert.equal(harness.root.querySelector('.subagent-card'), null)
+  assert.equal(harness.root.querySelector('.subagent-detail-copy'), null)
+
+  harness.activitySnapshot.value = {
+    activities: [{
+      session_id: 'activity-refresh-session',
+      subagent_board_revision: 2
+    }]
+  }
+  await Vue.nextTick()
+  assert.equal(sessionSubagentResponses.length, 3)
+
+  respondWithList(2, [newEntry])
+  await settle()
+  assert.equal(harness.root.querySelector('.subagent-card-name').textContent, 'New worker')
+
+  click(harness.root.querySelector('.subagent-card'))
+  await Vue.nextTick()
+  assert.equal(sessionSubagentDetailResponses.length, 2)
+  respondWithDetail(1, newDetail)
+  await settle()
+  assert.equal(harness.root.querySelector('.subagent-detail-copy').textContent, 'New result')
+  assert.equal(harness.errors.length, 0, JSON.stringify(harness.errors))
+  assert.equal(harness.warnings.length, 0, harness.warnings.join('\n'))
+})
+
+test('keeps an empty subagent list visible while activity refresh is pending', async t => {
+  const sessionSubagentResponses = []
+
+  const Panel = createPanelComponent(() => createSessionSubagentBoard({
+    api: {
+      sessionSubagents: () => new Promise(resolve => {
+        sessionSubagentResponses.push(resolve)
+      })
+    }
+  }), false)
+
+  const respondWith = (requestIndex, active = []) => sessionSubagentResponses[requestIndex]({
+    data: {
+      data: {
+        profile_id: 1,
         active_page: 1,
         active_page_size: 10,
         active_total: active.length,
@@ -572,15 +726,23 @@ test('keeps an empty subagent list visible while polling is pending', async t =>
     }
   })
 
-  const harness = await mountScenario('polling-session', Panel)
+  const harness = await mountScenario('activity-refresh-session', Panel)
   t.after(() => harness.app.unmount())
+
+  harness.activitySnapshot.value = {
+    activities: [{
+      session_id: 'activity-refresh-session',
+      subagent_board_revision: 0
+    }]
+  }
+  await Vue.nextTick()
 
   const trigger = taskButtons(harness.root)[0]
   click(trigger)
   await Vue.nextTick()
-  assert.equal(typeof resolveSessionSubagents, 'function')
+  assert.equal(sessionSubagentResponses.length, 1)
 
-  respondWith()
+  respondWith(0)
   await Promise.resolve()
   await Vue.nextTick()
 
@@ -589,19 +751,42 @@ test('keeps an empty subagent list visible while polling is pending', async t =>
   assert.ok(groups)
   assert.equal(empty.textContent, 'chat.subagent_empty_active')
 
-  const poll = scheduledCallback
-  assert.equal(typeof poll, 'function')
-  const pollPromise = poll()
+  harness.activitySnapshot.value = {
+    activities: [
+      { session_id: 'other-session', subagent_board_revision: 1 },
+      { session_id: 'activity-refresh-session', subagent_board_revision: 0 }
+    ]
+  }
   await Vue.nextTick()
+  assert.equal(sessionSubagentResponses.length, 1)
+
+  harness.activitySnapshot.value = {
+    activities: [{
+      session_id: 'activity-refresh-session',
+      subagent_board_revision: 0
+    }]
+  }
+  await Vue.nextTick()
+  assert.equal(sessionSubagentResponses.length, 1)
+
+  harness.activitySnapshot.value = {
+    activities: [{
+      session_id: 'activity-refresh-session',
+      subagent_board_revision: 1
+    }]
+  }
+  await Vue.nextTick()
+  assert.equal(sessionSubagentResponses.length, 2)
+
   assert.strictEqual(
     harness.root.querySelector('.subagent-groups'),
     groups,
-    'subagent list should remain the same node while polling'
+    'subagent list should remain the same node while activity refresh'
   )
   assert.equal(harness.root.querySelector('.subagent-empty').textContent, 'chat.subagent_empty_active')
   assert.equal(harness.root.querySelector('.subagent-loading'), null)
 
-  respondWith([{
+  respondWith(1, [{
     name: 'Worker',
     subagent_id: 'worker',
     status: 'running',
@@ -611,8 +796,19 @@ test('keeps an empty subagent list visible while polling is pending', async t =>
     stage: 'Working',
     completed: false
   }])
-  await pollPromise
+  await Promise.resolve()
   await Vue.nextTick()
   assert.strictEqual(harness.root.querySelector('.subagent-groups'), groups)
   assert.equal(harness.root.querySelector('.subagent-card-name').textContent, 'Worker')
+
+  click(trigger)
+  await Vue.nextTick()
+  harness.activitySnapshot.value = {
+    activities: [{
+      session_id: 'activity-refresh-session',
+      subagent_board_revision: 2
+    }]
+  }
+  await Vue.nextTick()
+  assert.equal(sessionSubagentResponses.length, 2)
 })

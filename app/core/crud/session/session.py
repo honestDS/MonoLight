@@ -1,6 +1,6 @@
 from typing import Any
 
-from sqlalchemy import and_, delete, exists, func, or_, update
+from sqlalchemy import and_, case, delete, exists, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -20,10 +20,56 @@ from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage
 from app.models.message import Message
 from app.models.message_platform import MessagePlatform
+from app.models.profile import Profile
 from app.models.session import ChatSession
 from app.models.session_event import SessionEvent
 from app.models.session_reply_work_item import SESSION_REPLY_ACTIVE_STATUSES, SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.models.session_todo import SessionTodoPlan
+from app.models.subagent import SessionSubagentBoardRevision
+
+
+# Match resolve_profile_for_session's selection order; only sessions with a subagent need this comparison signal.
+def _subagent_board_profile_id_expression():
+    override_profile_id = (
+        select(Profile.id)
+        .where(
+            Profile.id == ChatSession.profile_override_id,
+            Profile.id > 0,
+            Profile.uid == ChatSession.uid,
+        )
+        .limit(1)
+        .correlate(ChatSession)
+        .scalar_subquery()
+    )
+    platform_profile_id = (
+        select(Profile.id)
+        .join(MessagePlatform, MessagePlatform.profile_id == Profile.id)
+        .where(
+            MessagePlatform.id == ChatSession.message_platform_id,
+            MessagePlatform.uid == ChatSession.uid,
+            Profile.id > 0,
+            Profile.uid == ChatSession.uid,
+        )
+        .limit(1)
+        .correlate(ChatSession)
+        .scalar_subquery()
+    )
+    default_profile_id = (
+        select(Profile.id)
+        .where(
+            Profile.uid == ChatSession.uid,
+            Profile.is_default.is_(True),
+        )
+        .limit(1)
+        .correlate(ChatSession)
+        .scalar_subquery()
+    )
+    return case(
+        (
+            SessionSubagentBoardRevision.session_id.is_not(None),
+            func.coalesce(override_profile_id, platform_profile_id, default_profile_id, 0),
+        )
+    ).label("subagent_board_profile_id")
 
 
 class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
@@ -86,23 +132,32 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             .label("completed_status")
         )
         has_unread_result = (completed_message_id > func.coalesce(ChatSession.last_read_message_id, 0)).label("has_unread_result")
-        stmt = select(
-            ChatSession.session_id,
-            ChatSession.uid,
-            ChatSession.title,
-            ChatSession.source,
-            ChatSession.latest_message_id,
-            last_active,
-            ChatSession.last_read_message_id,
-            ChatSession.last_read_at,
-            is_loading,
-            is_reply_running,
-            context_summary_running_expression(),
-            is_running,
-            completed_message_id,
-            completed_status,
-            has_unread_result,
-        ).order_by(last_active.desc(), ChatSession.session_id.asc())
+        stmt = (
+            select(
+                ChatSession.session_id,
+                ChatSession.uid,
+                ChatSession.title,
+                ChatSession.source,
+                ChatSession.latest_message_id,
+                last_active,
+                ChatSession.last_read_message_id,
+                ChatSession.last_read_at,
+                is_loading,
+                is_reply_running,
+                context_summary_running_expression(),
+                is_running,
+                completed_message_id,
+                completed_status,
+                has_unread_result,
+                func.coalesce(SessionSubagentBoardRevision.revision, 0).label("subagent_board_revision"),
+                _subagent_board_profile_id_expression(),
+            )
+            .outerjoin(
+                SessionSubagentBoardRevision,
+                ChatSession.session_id == SessionSubagentBoardRevision.session_id,
+            )
+            .order_by(last_active.desc(), ChatSession.session_id.asc())
+        )
         if not is_admin:
             stmt = stmt.where(ChatSession.uid == uid)
         result = await db.execute(stmt)

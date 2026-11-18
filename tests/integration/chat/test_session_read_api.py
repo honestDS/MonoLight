@@ -174,6 +174,8 @@ async def test_fixed_old_cursor_does_not_consume_a_new_result(api_context) -> No
         "is_loading",
         "is_reply_running",
         "is_context_summarizing",
+        "subagent_board_revision",
+        "subagent_board_profile_id",
     }
     assert row["session_id"] == session.session_id
     assert row["title"] is None
@@ -187,6 +189,8 @@ async def test_fixed_old_cursor_does_not_consume_a_new_result(api_context) -> No
     assert row["completed_status"] == SessionReplyWorkStatus.SUCCEEDED.value
     assert row["has_unread_result"] is True
     assert row["is_context_summarizing"] is False
+    assert row["subagent_board_revision"] == 0
+    assert row["subagent_board_profile_id"] is None
 
     stale_body = _assert_code(
         await client.post(

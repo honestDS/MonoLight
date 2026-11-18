@@ -419,6 +419,9 @@ async def test_board_reads_are_repeatable_and_do_not_mark_tool_delivery_or_touch
             params={"session_id": "board-api-session"},
         )
     )
+    first_delay = first_list.pop("lease_recheck_in_ms")
+    second_delay = second_list.pop("lease_recheck_in_ms")
+    assert 0 < second_delay <= first_delay <= 300_000
     assert first_list == second_list
     assert first_detail == second_detail
 

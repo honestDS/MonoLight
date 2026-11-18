@@ -28,6 +28,7 @@ from app.core.crud.session.reply_work_item import (
     session_reply_work_item_crud,
 )
 from app.core.crud.session.subagent import subagent_crud
+from app.core.crud.session.subagent_revision import bump_subagent_board_revisions
 from app.core.crud.task.background import background_task_crud
 from app.core.crud.terminal.session import terminal_session_crud
 from app.core.exceptions import ParameterException
@@ -488,6 +489,8 @@ async def _start_subagent_round(
             previous_checkpoint,
         )
 
+    await db.flush()
+    await bump_subagent_board_revisions(db, [session_id])
     return call
 
 

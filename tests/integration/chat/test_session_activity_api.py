@@ -1,3 +1,4 @@
+import re
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -44,6 +45,8 @@ ACTIVITY_EXTENDED_FIELDS = {
     "completed_message_id",
     "completed_status",
     "has_unread_result",
+    "subagent_board_revision",
+    "subagent_board_profile_id",
 }
 ACTIVITY_RESPONSE_FIELDS = ACTIVITY_FIELDS | ACTIVITY_EXTENDED_FIELDS
 INTERACTIVE_WORK_TYPES = (
@@ -64,6 +67,8 @@ def _activity_defaults(*, is_owned: bool, **overrides: object) -> dict[str, obje
         "completed_message_id": None,
         "completed_status": None,
         "has_unread_result": False,
+        "subagent_board_revision": 0,
+        "subagent_board_profile_id": None,
     }
     defaults.update(overrides)
     return defaults
@@ -911,10 +916,12 @@ async def test_activity_uses_one_lightweight_select_without_message_or_full_work
     ]
     assert len(statements) == 1
     sql = statements[0].lower()
-    assert "from message" not in sql
-    assert "join message" not in sql
+    assert re.search(r"\bfrom\s+message\b", sql) is None
+    assert re.search(r"\bjoin\s+message\b", sql) is None
     assert "content" not in sql
     assert "llm_request_metadata" not in sql
     assert "execution_state" not in sql
+    assert "subagent_board_post" not in sql
+    assert "subagent_work" not in sql
     assert "row_number" not in sql
     assert " over " not in sql

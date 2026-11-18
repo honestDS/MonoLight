@@ -22,6 +22,7 @@ from app.core.constants import (
     SESSION_REPLY_WORK_RETENTION_LIMIT,
 )
 from app.core.crud.session.reply_checkpoint_message import session_reply_checkpoint_message_crud
+from app.core.crud.session.subagent_revision import bump_subagent_board_revisions
 from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.audit import AUDIT_TERMINAL_STATUSES, AuditRecord
@@ -212,6 +213,19 @@ def _work_category_expression(table: Any) -> Any:
 
 def _is_subagent_board_review() -> Any:
     return SessionReplyWorkItem.execution_state["subagent_board_review_pending"].as_boolean().is_(True)
+
+
+async def _bump_subagent_board_revision_for_work(db: AsyncSession, work_id: int) -> None:
+    result = await db.execute(
+        select(SessionReplyWorkItem.session_id).where(
+            SessionReplyWorkItem.id == work_id,
+            SessionReplyWorkItem.subagent_id.is_not(None),
+        )
+    )
+    session_id = result.scalar_one_or_none()
+    if session_id is None:
+        return
+    await bump_subagent_board_revisions(db, [session_id])
 
 
 @dataclass(frozen=True)
@@ -885,6 +899,8 @@ class CRUDSessionReplyWorkItem:
         )
         result = await db.execute(statement)
         claimed = result.scalars().first()
+        if claimed is not None and claimed.subagent_id is not None:
+            await bump_subagent_board_revisions(db, [claimed.session_id])
         await db.commit()
         return claimed
 
@@ -918,27 +934,42 @@ class CRUDSessionReplyWorkItem:
         lease_seconds: int,
     ) -> set[tuple[int, str]]:
         active_claims = await self.get_active_claims(db, claims)
-        if active_claims:
-            await db.execute(
-                update(SessionReplyWorkItem)
-                .where(
-                    or_(
-                        *[
-                            and_(
-                                SessionReplyWorkItem.id == work_id,
-                                SessionReplyWorkItem.locked_by == worker_id,
-                            )
-                            for work_id, worker_id in active_claims
-                        ]
-                    ),
-                    SessionReplyWorkItem.status == SessionReplyWorkStatus.RUNNING,
+        if not active_claims:
+            return active_claims
+
+        claim_condition = or_(
+            *[
+                and_(
+                    SessionReplyWorkItem.id == work_id,
+                    SessionReplyWorkItem.locked_by == worker_id,
                 )
-                .values(
-                    lock_until=int(time.time()) + lease_seconds,
-                    updated_at=get_local_time(),
-                )
+                for work_id, worker_id in active_claims
+            ]
+        )
+        running_condition = SessionReplyWorkItem.status == SessionReplyWorkStatus.RUNNING
+        now = int(time.time())
+        expired_subagent_sessions_result = await db.execute(
+            select(SessionReplyWorkItem.session_id)
+            .where(
+                claim_condition,
+                running_condition,
+                SessionReplyWorkItem.subagent_id.is_not(None),
+                or_(SessionReplyWorkItem.lock_until.is_(None), SessionReplyWorkItem.lock_until <= now),
             )
-            await db.commit()
+            .distinct()
+        )
+        expired_subagent_session_ids = set(expired_subagent_sessions_result.scalars().all())
+        await db.execute(
+            update(SessionReplyWorkItem)
+            .where(claim_condition, running_condition)
+            .values(
+                lock_until=now + lease_seconds,
+                updated_at=get_local_time(),
+            )
+        )
+        if expired_subagent_session_ids:
+            await bump_subagent_board_revisions(db, list(expired_subagent_session_ids))
+        await db.commit()
         return active_claims
 
     async def list_ready_agent_profile_ids(self, db: AsyncSession) -> set[int]:
@@ -997,8 +1028,11 @@ class CRUDSessionReplyWorkItem:
                 updated_at=get_local_time(),
             )
         )
+        released = (result.rowcount or 0) == 1
+        if released:
+            await _bump_subagent_board_revision_for_work(db, work_id)
         await db.commit()
-        return (result.rowcount or 0) == 1
+        return released
 
     async def delete_by_session(
         self,
@@ -1288,14 +1322,11 @@ class CRUDSessionReplyWorkItem:
         commit: bool = True,
         interactive_only: bool = False,
     ) -> int:
-        conditions = [
-            SessionReplyWorkItem.session_id == session_id,
-            SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
-        ]
+        scope_conditions = [SessionReplyWorkItem.session_id == session_id]
         if not is_admin:
-            conditions.append(SessionReplyWorkItem.uid == uid)
+            scope_conditions.append(SessionReplyWorkItem.uid == uid)
         if interactive_only:
-            conditions.append(
+            scope_conditions.append(
                 SessionReplyWorkItem.work_type.in_(
                     [
                         SessionReplyWorkType.FOREGROUND_REPLY,
@@ -1303,7 +1334,11 @@ class CRUDSessionReplyWorkItem:
                     ]
                 )
             )
-        result = await db.execute(
+        conditions = [
+            *scope_conditions,
+            SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
+        ]
+        statement = (
             update(SessionReplyWorkItem)
             .where(*conditions)
             .values(
@@ -1313,9 +1348,14 @@ class CRUDSessionReplyWorkItem:
                 updated_at=get_local_time(),
             )
         )
+        non_subagent_result = await db.execute(statement.where(SessionReplyWorkItem.subagent_id.is_(None)))
+        subagent_result = await db.execute(statement.where(SessionReplyWorkItem.subagent_id.is_not(None)))
+        cancelled_count = (non_subagent_result.rowcount or 0) + (subagent_result.rowcount or 0)
+        if (subagent_result.rowcount or 0) > 0:
+            await bump_subagent_board_revisions(db, [session_id])
         if commit:
             await db.commit()
-        return result.rowcount or 0
+        return cancelled_count
 
     async def cancel_agent_work_by_profile(
         self,
@@ -1430,6 +1470,7 @@ class CRUDSessionReplyWorkItem:
 
         terminal_claims: list[tuple[int, str, str]] = []
         recovered_count = 0
+        recovered_subagent_session_ids: set[str] = set()
         for work in expired_work:
             if work.id is None or work.locked_by is None:
                 continue
@@ -1481,7 +1522,11 @@ class CRUDSessionReplyWorkItem:
                     updated_at=get_local_time(),
                 )
             )
-            recovered_count += retry_result.rowcount or 0
+            retry_count = retry_result.rowcount or 0
+            recovered_count += retry_count
+            if retry_count > 0 and work.subagent_id is not None:
+                recovered_subagent_session_ids.add(work.session_id)
+        await bump_subagent_board_revisions(db, recovered_subagent_session_ids)
         await db.commit()
         return recovered_count + len(terminal_claims), terminal_claims
 
@@ -1508,6 +1553,9 @@ class CRUDSessionReplyWorkItem:
         if claimed and checkpoint is not None:
             # 工作行条件更新与快照写入须在同一事务内完成，以串行化多执行者更新。
             await self.save_checkpoint(db, work_id, checkpoint)
+        status = values.get("status")
+        if claimed and status is not None and status != SessionReplyWorkStatus.RUNNING:
+            await _bump_subagent_board_revision_for_work(db, work_id)
         if commit:
             await db.commit()
         return claimed

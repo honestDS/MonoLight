@@ -12,10 +12,12 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.chat import router
+from app.core.crud.session.subagent import subagent_crud
 from app.core.security import get_current_user
 from app.handler import register_handlers
 from app.models.audit import AuditRecord, AuditRecordStatus
 from app.models.message import Message, MessageContentFormat, MessageRole, MessageType
+from app.models.message_platform import MessagePlatform, MessagePlatformType
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
@@ -230,6 +232,38 @@ async def _add_agent_round(
     return subagent, round_row, work
 
 
+async def _add_board_version(
+    db: AsyncSession,
+    *,
+    work_id: int,
+    uid: str,
+    session_id: str,
+    profile_id: int,
+    name: str,
+) -> Subagent:
+    subagent, _round, _work = await _add_agent_round(
+        db,
+        work_id=work_id,
+        uid=uid,
+        session_id=session_id,
+        profile_id=profile_id,
+        name=name,
+        status=SessionReplyWorkStatus.READY_FOR_LLM,
+        active=True,
+    )
+    await subagent_crud.create_board_post(
+        db,
+        uid=uid,
+        session_id=session_id,
+        profile_id=profile_id,
+        subagent_id=subagent.id,
+        child_work_id=work_id,
+        stage="progress",
+        content=f"{name} progress",
+    )
+    return subagent
+
+
 async def _add_parent_work(
     db: AsyncSession,
     *,
@@ -362,6 +396,117 @@ async def test_board_list_returns_active_recent_and_only_latest_round(api_contex
     assert active_by_name["multi-round"]["preview"] == "new round preview"
     assert all(entry["stage"] != "old-stage" for entry in data["active"])
     assert [entry["work_id"] for entry in data["recent"]] == [7, 6]
+    assert 0 < data["lease_recheck_in_ms"] <= 300_000
+
+
+@pytest.mark.asyncio
+async def test_activity_tracks_board_profile_selection_without_new_progress(api_context) -> None:
+    db, _auth_state, client = api_context
+    uid = "board-api-owner"
+    platform_session_id = "board-api-platform-session"
+    default_session_id = "board-api-default-session"
+    control_session_id = "board-api-control-session"
+
+    await _add_user(db, uid)
+    default_profile = await _add_profile(db, uid=uid, profile_id=1, name="owner-default", is_default=True)
+    platform_profile = await _add_profile(db, uid=uid, profile_id=2, name="owner-platform")
+    override_profile = await _add_profile(db, uid=uid, profile_id=3, name="owner-override")
+
+    platform = MessagePlatform(
+        name="owner-weixin",
+        platform_type=MessagePlatformType.WEIXIN_OPENCLAW,
+        uid=uid,
+        profile_id=platform_profile.id,
+    )
+    db.add(platform)
+    await db.flush()
+
+    platform_session = await _add_session(db, session_id=platform_session_id, uid=uid)
+    platform_session.message_platform_id = platform.id
+    await _add_session(db, session_id=default_session_id, uid=uid)
+    await _add_session(db, session_id=control_session_id, uid=uid)
+
+    await _add_board_version(
+        db,
+        work_id=20,
+        uid=uid,
+        session_id=platform_session_id,
+        profile_id=platform_profile.id,
+        name="platform-agent",
+    )
+    await _add_board_version(
+        db,
+        work_id=21,
+        uid=uid,
+        session_id=default_session_id,
+        profile_id=default_profile.id,
+        name="default-agent",
+    )
+    await db.commit()
+
+    async def assert_activity_profiles(expected: dict[str, int]) -> dict[str, Any]:
+        activity = _ok(await client.get("/api/v1/chat/sessions/activity"))
+        activity_by_session = {entry["session_id"]: entry for entry in activity}
+        for session_id, expected_profile_id in expected.items():
+            board = _ok(
+                await client.get(
+                    "/api/v1/chat/sessions/subagents",
+                    params={"session_id": session_id},
+                )
+            )
+            assert board["profile_id"] == expected_profile_id
+            assert activity_by_session[session_id]["subagent_board_profile_id"] == board["profile_id"]
+        assert activity_by_session[control_session_id]["subagent_board_profile_id"] is None
+        assert activity_by_session[control_session_id]["subagent_board_revision"] == 0
+        return activity_by_session
+
+    expected_profiles = {
+        platform_session_id: platform_profile.id,
+        default_session_id: default_profile.id,
+    }
+    activity_by_session = await assert_activity_profiles(expected_profiles)
+    initial_revisions = {
+        platform_session_id: activity_by_session[platform_session_id]["subagent_board_revision"],
+        default_session_id: activity_by_session[default_session_id]["subagent_board_revision"],
+    }
+    assert initial_revisions == {platform_session_id: 1, default_session_id: 1}
+
+    def assert_work_revisions(activity_rows: dict[str, Any]) -> None:
+        assert {
+            platform_session_id: activity_rows[platform_session_id]["subagent_board_revision"],
+            default_session_id: activity_rows[default_session_id]["subagent_board_revision"],
+        } == initial_revisions
+
+    default_profile.is_default = False
+    override_profile.is_default = True
+    await db.commit()
+    activity_by_session = await assert_activity_profiles(
+        {
+            platform_session_id: platform_profile.id,
+            default_session_id: override_profile.id,
+        }
+    )
+    assert_work_revisions(activity_by_session)
+
+    platform.profile_id = None
+    await db.commit()
+    activity_by_session = await assert_activity_profiles(
+        {
+            platform_session_id: override_profile.id,
+            default_session_id: override_profile.id,
+        }
+    )
+    assert_work_revisions(activity_by_session)
+
+    platform_session.profile_override_id = default_profile.id
+    await db.commit()
+    activity_by_session = await assert_activity_profiles(
+        {
+            platform_session_id: default_profile.id,
+            default_session_id: override_profile.id,
+        }
+    )
+    assert_work_revisions(activity_by_session)
 
 
 @pytest.mark.asyncio
@@ -756,6 +901,7 @@ async def test_board_scope_permissions_and_owner_profile_selection(api_context) 
         "has_more_recent": False,
         "profile_id": None,
         "selected": None,
+        "lease_recheck_in_ms": None,
     }
 
 
