@@ -14,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
 import app.core.security as security
+import app.core.tools.send_file_to_user as send_file_to_user
 import app.core.user.file_cleanup as file_cleanup
 from app.api.v1 import auth, users
-from app.core.audit.startup import recover_and_cleanup_audit_data
 from app.core.audit.storage import write_audit_json
 from app.core.constants import (
     ERR_ONLY_ADMIN_ALLOWED,
@@ -65,6 +65,7 @@ from app.models.session_todo import SessionTodoPlan
 from app.models.user import User
 from app.providers.database import get_db
 from app.providers.database.time import get_database_time, get_database_timestamp
+from app.tasks import cleanup_audit_history
 
 TEST_PASSWORD = "integration-password"
 TEST_JWT_SECRET = "user-management-integration-jwt-secret"
@@ -120,6 +121,7 @@ async def api_app(
     monkeypatch.setattr(security, "get_jwt_secret_key", lambda: TEST_JWT_SECRET)
     monkeypatch.setattr(file_cleanup, "TEMP_DIR", tmp_path / "temp")
     monkeypatch.setattr(file_cleanup, "AUDIT_DIR", tmp_path / "audit")
+    monkeypatch.setattr(send_file_to_user, "FILE_TOKEN_DIR", tmp_path / "file_download_tokens")
 
     app = FastAPI()
     register_handlers(app)
@@ -1320,7 +1322,7 @@ async def test_user_delete_invalidates_old_background_memory_and_knowledge_job_l
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fail_delete", (False, True), ids=("delete-succeeds", "delete-rolls-back"))
-async def test_user_delete_audit_records_and_startup_cleanup_boundary(
+async def test_user_delete_audit_records_and_history_cleanup_boundary(
     api_app: FastAPI,
     db_session: AsyncSession,
     setup_session_factory: async_sessionmaker[AsyncSession],
@@ -1425,7 +1427,7 @@ async def test_user_delete_audit_records_and_startup_cleanup_boundary(
     assert temp_paths["peer-user"].is_file()
 
     async with setup_session_factory() as session:
-        recovery = await recover_and_cleanup_audit_data(session, retention_days=90, audit_root=audit_root)
+        recovery = await cleanup_audit_history(session, audit_root=audit_root)
     expected_deleted_files = set()
     assert set(recovery.file_cleanup.deleted_files) == expected_deleted_files
     assert recovery.file_cleanup.failed_paths == {}
@@ -1435,7 +1437,7 @@ async def test_user_delete_audit_records_and_startup_cleanup_boundary(
     assert context_paths["peer-user"].is_file()
 
     async with setup_session_factory() as session:
-        second_recovery = await recover_and_cleanup_audit_data(session, retention_days=90, audit_root=audit_root)
+        second_recovery = await cleanup_audit_history(session, audit_root=audit_root)
     assert second_recovery.file_cleanup.deleted_files == []
     assert second_recovery.file_cleanup.failed_paths == {}
     assert second_recovery.file_cleanup.missing_referenced_files == []

@@ -56,6 +56,12 @@ async def test_background_task_worker_starts_and_stops_manager_and_cleaners(monk
     monkeypatch.setattr(background_task_worker, "background_log_cleaner", lambda: cleaner("log-cleaner"))
     monkeypatch.setattr(background_task_worker, "background_log_file_cleaner", lambda: cleaner("log-file-cleaner"))
     monkeypatch.setattr(background_task_worker, "background_temp_cleaner", lambda: cleaner("temp-cleaner"))
+    monkeypatch.setattr(background_task_worker, "background_audit_cleaner", lambda: cleaner("audit-cleaner"))
+    monkeypatch.setattr(
+        background_task_worker,
+        "background_file_download_token_cleaner",
+        lambda: cleaner("file-download-token-cleaner"),
+    )
     monkeypatch.setattr(
         background_task_worker,
         "background_context_summary_cleaner",
@@ -77,11 +83,15 @@ async def test_background_task_worker_starts_and_stops_manager_and_cleaners(monk
         "log-cleaner-start",
         "log-file-cleaner-start",
         "temp-cleaner-start",
+        "audit-cleaner-start",
+        "file-download-token-cleaner-start",
         "context-summary-cleaner-start",
         "manager-stop",
         "log-cleaner-stop",
         "log-file-cleaner-stop",
         "temp-cleaner-stop",
+        "audit-cleaner-stop",
+        "file-download-token-cleaner-stop",
         "context-summary-cleaner-stop",
     ]
 

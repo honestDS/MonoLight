@@ -1,4 +1,5 @@
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import and_, delete, exists, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,6 +7,7 @@ from sqlmodel import select
 
 from app.core.utils.time import get_local_time
 from app.models.audit import (
+    AUDIT_TERMINAL_STATUSES,
     AuditConfirmationClaim,
     AuditExecutionRecord,
     AuditExecutionStatus,
@@ -17,8 +19,29 @@ from app.models.audit import (
 )
 
 __all__ = [
+    "AuditHistoryCleanupRecord",
     "CRUDAuditRecovery",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class AuditHistoryCleanupRecord:
+    id: int
+    uid: str
+    status: AuditRecordStatus
+    context_file_path: str | None
+    created_at: datetime
+    completed_at: datetime | None
+
+
+_AUDIT_HISTORY_CLEANUP_COLUMNS = (
+    AuditRecord.id,
+    AuditRecord.uid,
+    AuditRecord.status,
+    AuditRecord.context_file_path,
+    AuditRecord.created_at,
+    AuditRecord.completed_at,
+)
 
 
 class CRUDAuditRecovery:
@@ -257,20 +280,67 @@ class CRUDAuditRecovery:
         await db.commit()
         return result.rowcount or 0
 
-    async def list_context_file_paths(self, db: AsyncSession) -> dict[int, str]:
-        result = await db.execute(select(AuditRecord.id, AuditRecord.context_file_path).where(AuditRecord.context_file_path.is_not(None)))
-        return {record_id: context_path for record_id, context_path in result.all() if context_path}
-
-    async def list_records_without_context_before(self, db: AsyncSession, *, retention_days: int) -> list[int]:
-        cutoff = get_local_time() - timedelta(days=retention_days)
+    async def list_history_cleanup_records(
+        self,
+        db: AsyncSession,
+        *,
+        completed_before: datetime,
+    ) -> list[AuditHistoryCleanupRecord]:
         result = await db.execute(
-            select(AuditRecord.id).where(
-                AuditRecord.context_file_path.is_(None),
-                AuditRecord.completed_at.is_not(None),
-                AuditRecord.completed_at < cutoff,
+            select(*_AUDIT_HISTORY_CLEANUP_COLUMNS).where(
+                or_(
+                    AuditRecord.context_file_path.is_not(None),
+                    AuditRecord.status == AuditRecordStatus.PREPARING,
+                    and_(
+                        AuditRecord.context_file_path.is_(None),
+                        AuditRecord.status.in_(AUDIT_TERMINAL_STATUSES),
+                        AuditRecord.completed_at.is_not(None),
+                        AuditRecord.completed_at < completed_before,
+                    ),
+                )
             )
         )
-        return list(result.scalars().all())
+        return [
+            AuditHistoryCleanupRecord(
+                id=record_id,
+                uid=uid,
+                status=status,
+                context_file_path=context_file_path,
+                created_at=created_at,
+                completed_at=completed_at,
+            )
+            for record_id, uid, status, context_file_path, created_at, completed_at in result.all()
+        ]
+
+    async def lock_unchanged_history_records(
+        self,
+        db: AsyncSession,
+        *,
+        records: list[AuditHistoryCleanupRecord],
+    ) -> set[int]:
+        if not records:
+            return set()
+
+        result = await db.execute(
+            select(*_AUDIT_HISTORY_CLEANUP_COLUMNS)
+            .where(
+                AuditRecord.id.in_({record.id for record in records}),
+                AuditRecord.status.in_(AUDIT_TERMINAL_STATUSES),
+            )
+            .with_for_update()
+        )
+        current_records = {
+            record_id: AuditHistoryCleanupRecord(
+                id=record_id,
+                uid=uid,
+                status=status,
+                context_file_path=context_file_path,
+                created_at=created_at,
+                completed_at=completed_at,
+            )
+            for record_id, uid, status, context_file_path, created_at, completed_at in result.all()
+        }
+        return {record.id for record in records if current_records.get(record.id) == record}
 
     async def delete_by_uid(self, db: AsyncSession, *, uid: str) -> int:
         await db.execute(delete(AuditToolResultVersion).where(AuditToolResultVersion.uid == uid))
@@ -281,9 +351,9 @@ class CRUDAuditRecovery:
     async def delete_records(self, db: AsyncSession, *, audit_record_ids: set[int]) -> int:
         if not audit_record_ids:
             return 0
+        await db.execute(delete(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id.in_(audit_record_ids)))
         await db.execute(delete(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id.in_(audit_record_ids)))
         await db.execute(delete(AuditExecutionRecord).where(AuditExecutionRecord.audit_record_id.in_(audit_record_ids)))
         await db.execute(delete(AuditToolDetail).where(AuditToolDetail.audit_record_id.in_(audit_record_ids)))
         result = await db.execute(delete(AuditRecord).where(AuditRecord.id.in_(audit_record_ids)))
-        await db.commit()
         return result.rowcount or 0

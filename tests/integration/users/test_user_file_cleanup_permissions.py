@@ -1,6 +1,8 @@
 import asyncio
+import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -9,6 +11,7 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
+import app.core.tools.send_file_to_user as file_token
 from app.models.session import ChatSession
 from app.models.user import User, UserFileCleanup
 from tests.integration.users import test_user_management_permissions as user_management_permissions
@@ -27,11 +30,14 @@ setup_session_factory = user_management_permissions.setup_session_factory
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recreate_file", (False, True), ids=("normal-delete", "recreate-same-path"))
 async def test_user_delete_removes_owned_and_legacy_temp_files_without_cross_user_or_traversal(
     api_app: FastAPI,
     db_session: AsyncSession,
     setup_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recreate_file: bool,
 ) -> None:
     legacy_session_id = "legacy-owned"
     peer_named_session_id = "peer-user"
@@ -55,9 +61,41 @@ async def test_user_delete_removes_owned_and_legacy_temp_files_without_cross_use
         tmp_path / "outside-posix" / "nested" / "posix.txt",
         tmp_path / "outside-windows" / "nested" / "windows.txt",
     )
-    for path in (normal_file, legacy_file, peer_file, *escape_files):
+    shared_file = tmp_path / "shared" / "shared.txt"
+    for path in (normal_file, legacy_file, peer_file, shared_file, *escape_files):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(path.name, encoding="utf-8")
+
+    token_dir = tmp_path / "file_download_tokens"
+    monkeypatch.setattr(file_token, "FILE_TOKEN_DIR", token_dir)
+    tokens = {
+        "normal_file": file_token._encode_token({"uid": "normal-user", "path": str(normal_file), "id": "normal-file"}),
+        "normal_shared": file_token._encode_token({"uid": "normal-user", "path": str(shared_file), "id": "normal-shared"}),
+        "peer_shared": file_token._encode_token({"uid": "peer-user", "path": str(shared_file), "id": "peer-shared"}),
+        "peer_deleted": file_token._encode_token({"uid": "peer-user", "path": str(normal_file), "id": "peer-deleted"}),
+    }
+    assert all(token.startswith("v2.") for token in tokens.values())
+    token_records = {name: token_dir / f"{token.split('.')[1]}.json" for name, token in tokens.items()}
+    assert all(record.is_file() for record in token_records.values())
+
+    recreated_token: str | None = None
+    recreated_record: Path | None = None
+    if recreate_file:
+        original_remove_paths = file_cleanup._remove_user_file_cleanup_paths
+
+        def _recreate_after_remove(directory_names: list[str]) -> None:
+            nonlocal recreated_record, recreated_token
+            original_remove_paths(directory_names)
+            normal_file.parent.mkdir(parents=True, exist_ok=True)
+            normal_file.write_text("recreated-normal-content", encoding="utf-8")
+            with pytest.raises(FileNotFoundError):
+                file_token.resolve_file_token(tokens["peer_deleted"], uid="peer-user")
+            recreated_token = file_token._encode_token({"uid": "peer-user", "path": str(normal_file), "id": "peer-recreated"})
+            recreated_record = token_dir / f"{recreated_token.split('.')[1]}.json"
+            recreated_mtime_ns = time.time_ns() + 1_000_000_000
+            os.utime(recreated_record, ns=(recreated_mtime_ns, recreated_mtime_ns))
+
+        monkeypatch.setattr(file_cleanup, "_remove_user_file_cleanup_paths", _recreate_after_remove)
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_app), base_url="http://test") as client:
         response = await _request(
@@ -69,13 +107,28 @@ async def test_user_delete_removes_owned_and_legacy_temp_files_without_cross_use
         )
     assert response.status_code == 200
     assert response.json()["code"] == 200
-    assert not normal_file.exists()
+    if recreate_file:
+        assert normal_file.read_text(encoding="utf-8") == "recreated-normal-content"
+        assert normal_file.parents[1].is_dir()
+        assert recreated_token is not None
+        assert recreated_token.startswith("v2.")
+        assert recreated_record is not None
+        assert recreated_record.is_file()
+        assert file_token.resolve_file_token(recreated_token, uid="peer-user") == normal_file.resolve()
+    else:
+        assert not normal_file.exists()
+        assert not normal_file.parents[1].exists()
     assert not legacy_file.exists()
-    assert not normal_file.parents[1].exists()
     assert not legacy_file.parents[1].exists()
     assert peer_file.is_file()
     assert peer_file.parents[1].is_dir()
     assert all(path.is_file() for path in escape_files)
+    assert shared_file.is_file()
+    assert not token_records["normal_file"].exists()
+    assert not token_records["normal_shared"].exists()
+    assert not token_records["peer_deleted"].exists()
+    assert token_records["peer_shared"].is_file()
+    assert file_token.resolve_file_token(tokens["peer_shared"], uid="peer-user") == shared_file.resolve()
 
     async with setup_session_factory() as session:
         assert await session.scalar(select(User).where(User.uid == "normal-user")) is None

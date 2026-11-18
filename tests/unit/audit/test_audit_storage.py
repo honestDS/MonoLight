@@ -3,7 +3,8 @@ import os
 
 import pytest
 
-from app.core.audit.storage import cleanup_audit_storage, validate_audit_file_path, write_audit_json, write_audit_json_and_associate
+from app.core.audit.storage import cleanup_audit_storage, plan_audit_storage_cleanup, validate_audit_file_path, write_audit_json, write_audit_json_and_associate
+from app.core.crud.account.file_download_cleanup import FileDownloadCleanupJournal
 from app.core.paths import get_audit_file_path, get_user_audit_dir
 
 
@@ -73,6 +74,38 @@ async def test_write_audit_json_rejects_symlink_user_directory(tmp_path):
     assert not (outside_dir / "audit_1.json").exists()
 
 
+@pytest.mark.asyncio
+async def test_cleanup_audit_storage_preserves_referenced_file_written_through_symlink_parent(tmp_path):
+    real_parent = tmp_path / "real_parent"
+    real_parent.mkdir()
+    data_dir = tmp_path / "data"
+    try:
+        os.symlink(real_parent, data_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"当前系统不允许创建测试链接: {exc}")
+
+    stored_path = await write_audit_json(
+        uid="u1",
+        audit_record_id=1,
+        payload={"status": "pending"},
+        audit_root=data_dir / "audit",
+    )
+    now = 2_000_000_000.0
+    old_file_time = now - 2 * 3600
+    os.utime(stored_path, (old_file_time, old_file_time))
+
+    plan = plan_audit_storage_cleanup(
+        retention_days=90,
+        audit_root=real_parent / "audit",
+        referenced_paths={str(stored_path)},
+        now_timestamp=now,
+    )
+    result = cleanup_audit_storage(plan.candidates, removal_journal=FileDownloadCleanupJournal(tmp_path / "file_download_tokens"))
+
+    assert stored_path.exists()
+    assert result.deleted_files == []
+
+
 def test_cleanup_audit_storage_deletes_only_expired_files_without_database_paths(tmp_path):
     user_dir = get_user_audit_dir("u1", audit_root=tmp_path)
     user_dir.mkdir()
@@ -89,7 +122,8 @@ def test_cleanup_audit_storage_deletes_only_expired_files_without_database_paths
     os.utime(stale_temp_file, (expired_time, expired_time))
     os.utime(fresh_file, (fresh_time, fresh_time))
 
-    result = cleanup_audit_storage(retention_days=90, audit_root=tmp_path, now_timestamp=now)
+    plan = plan_audit_storage_cleanup(retention_days=90, audit_root=tmp_path, now_timestamp=now)
+    result = cleanup_audit_storage(plan.candidates, removal_journal=FileDownloadCleanupJournal(tmp_path / "file_download_tokens"))
 
     assert not expired_file.exists()
     assert not stale_temp_file.exists()
@@ -98,23 +132,61 @@ def test_cleanup_audit_storage_deletes_only_expired_files_without_database_paths
     assert result.missing_referenced_files == []
 
 
+def test_cleanup_audit_storage_skips_replaced_candidate(tmp_path):
+    user_dir = get_user_audit_dir("u1", audit_root=tmp_path)
+    user_dir.mkdir()
+    replaced_file = user_dir / "audit_1.json"
+    deleted_file = user_dir / "audit_2.json"
+    replaced_file.write_text('{"status":"old"}', encoding="utf-8")
+    deleted_file.write_text("{}", encoding="utf-8")
+    now = 2_000_000_000.0
+    expired_time = now - 91 * 86400
+    os.utime(replaced_file, (expired_time, expired_time))
+    os.utime(deleted_file, (expired_time, expired_time))
+
+    plan = plan_audit_storage_cleanup(retention_days=90, audit_root=tmp_path, now_timestamp=now)
+    replaced_path = replaced_file.resolve()
+    assert replaced_path in {candidate.path for candidate in plan.candidates}
+
+    replaced_file.unlink()
+    new_content = '{"status":"new"}'
+    replaced_file.write_text(new_content, encoding="utf-8")
+    result = cleanup_audit_storage(plan.candidates, removal_journal=FileDownloadCleanupJournal(tmp_path / "file_download_tokens"))
+
+    assert replaced_file.exists()
+    assert replaced_file.read_text(encoding="utf-8") == new_content
+    assert str(replaced_path) not in result.deleted_files
+    assert not deleted_file.exists()
+
+
 def test_cleanup_audit_storage_reports_missing_references_and_removes_orphans(tmp_path):
     user_dir = get_user_audit_dir("u1", audit_root=tmp_path)
     user_dir.mkdir()
     referenced_file = user_dir / "audit_1.json"
     orphan_file = user_dir / "audit_2.json"
+    fresh_orphan_file = user_dir / "audit_4.json"
     missing_file = get_audit_file_path("u1", 3, audit_root=tmp_path)
     referenced_file.write_text("{}", encoding="utf-8")
     orphan_file.write_text("{}", encoding="utf-8")
+    fresh_orphan_file.write_text("{}", encoding="utf-8")
+    now = 2_000_000_000.0
+    os.utime(referenced_file, (now, now))
+    old_orphan_time = now - 2 * 3600
+    os.utime(orphan_file, (old_orphan_time, old_orphan_time))
+    os.utime(fresh_orphan_file, (now, now))
 
-    result = cleanup_audit_storage(
+    plan = plan_audit_storage_cleanup(
         retention_days=90,
         audit_root=tmp_path,
         referenced_paths={str(referenced_file.resolve()), str(missing_file.resolve())},
+        now_timestamp=now,
     )
+    result = cleanup_audit_storage(plan.candidates, removal_journal=FileDownloadCleanupJournal(tmp_path / "file_download_tokens"))
 
     assert referenced_file.exists()
     assert not orphan_file.exists()
+    assert fresh_orphan_file.exists()
+    assert result.deleted_files == [str(orphan_file.resolve())]
     assert result.missing_referenced_files == [str(missing_file.resolve())]
 
 

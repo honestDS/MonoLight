@@ -11,6 +11,8 @@ from app.core.utils.context_summary.cleanup import (
 )
 from app.providers.database.bootstrap import create_database_tables
 from app.tasks import (
+    background_audit_cleaner,
+    background_file_download_token_cleaner,
     background_log_cleaner,
     background_log_file_cleaner,
     background_temp_cleaner,
@@ -42,6 +44,8 @@ async def run_owned_background_task_worker(
         asyncio.create_task(background_log_cleaner()),
         asyncio.create_task(background_log_file_cleaner()),
         asyncio.create_task(background_temp_cleaner()),
+        asyncio.create_task(background_audit_cleaner()),
+        asyncio.create_task(background_file_download_token_cleaner()),
         asyncio.create_task(background_context_summary_cleaner()),
     ]
     logger.info("Background task worker started")

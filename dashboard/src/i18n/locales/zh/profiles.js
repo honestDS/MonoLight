@@ -246,7 +246,7 @@ export default {
   llm_request_max_size_mb: '模型请求上限(MiB)',
   llm_request_max_size_mb_hint: '限制每次发送给模型的请求大小，超限时不发送。',
   audit_retention_days: '审计记录保留天数',
-  audit_retention_days_hint: '仅在系统启动时清理过期审计文件，默认保留 90 天。',
+  audit_retention_days_hint: '过期审计记录由系统定时清理，默认保留 90 天。',
   audit_report_email: '审计报告收件地址',
   audit_report_email_placeholder: "name{'@'}example.com",
   audit_report_email_hint: '当前不发送邮件，此项仅作预留。',

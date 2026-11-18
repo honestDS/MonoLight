@@ -29,6 +29,10 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
         result = await db.execute(query)
         return result.scalars().first()
 
+    async def list_uids(self, db: AsyncSession) -> set[str]:
+        result = await db.execute(select(User.uid))
+        return set(result.scalars().all())
+
     async def get_superuser(self, db: AsyncSession) -> User | None:
         result = await db.execute(select(User).where(User.is_superuser.is_(True)).order_by(User.id.asc()))
         return result.scalars().first()

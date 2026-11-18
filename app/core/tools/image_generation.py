@@ -230,7 +230,10 @@ class ImageGenerationExecutor(BaseExecutor):
             return image_path
 
         image_path = await self.run_sync(write_image)
-        token = _encode_token({"path": str(image_path), "uid": self.uid, "id": uuid.uuid4().hex})
+        token = await self.run_sync(
+            _encode_token,
+            {"path": str(image_path), "uid": self.uid, "id": uuid.uuid4().hex},
+        )
         return {
             "id": token,
             "name": file_name,

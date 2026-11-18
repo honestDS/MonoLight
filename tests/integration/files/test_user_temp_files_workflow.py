@@ -1,9 +1,11 @@
 import base64
 import io
+import os
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from urllib.parse import quote
 
+import anyio
 import httpx
 import pytest
 import pytest_asyncio
@@ -15,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import app.adapters.weixin_openclaw.media as weixin_media_module
 import app.core.security as security_module
 import app.core.tools.send_file_to_user as send_file_to_user_module
+import app.tasks as tasks_module
 from app.adapters.weixin_openclaw.constants import FILE_ITEM_TYPE, IMAGE_ITEM_TYPE, TEXT_ITEM_TYPE
 from app.adapters.weixin_openclaw.crypto import aes_ecb_encrypt, pkcs7_pad
 from app.api.v1 import files as files_module
@@ -454,6 +457,11 @@ async def test_sent_download_allows_owner_and_superuser_rejects_other_user_and_t
         base_url="http://test",
     ) as client:
         owner_download = await client.get("/api/v1/download-sent", params={"token": token})
+        owner_range_download = await client.get(
+            "/api/v1/download-sent",
+            params={"token": token},
+            headers={"Range": "bytes=0-5"},
+        )
         auth_state.update(uid="user-2", username="user_two", is_superuser=False)
         other_user_download = await client.get("/api/v1/download-sent", params={"token": token})
         auth_state.update(uid="admin", username="admin", is_superuser=True)
@@ -463,12 +471,230 @@ async def test_sent_download_allows_owner_and_superuser_rejects_other_user_and_t
 
     assert owner_download.status_code == 200
     assert owner_download.content == b"random sent content"
+    assert owner_range_download.status_code == 206
+    assert owner_range_download.content == b"random"
     assert other_user_download.status_code == 403
     assert other_user_download.json()["message"] == t(ERR_UNAUTHORIZED)
     assert admin_download.status_code == 200
     assert admin_download.content == b"random sent content"
     assert tampered_download.status_code == 403
     assert tampered_download.json()["message"] == t(ERR_UNAUTHORIZED)
+
+
+@pytest.mark.parametrize("headers", [{}, {"Range": "bytes=0-5"}])
+@pytest.mark.asyncio
+async def test_sent_download_reports_unavailable_if_source_is_removed_after_stat(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
+) -> None:
+    source_path = tmp_path / "removed-after-stat.txt"
+    source_path.write_bytes(b"source content")
+    token = send_file_to_user_module._encode_token({"path": str(source_path), "uid": "user-1", "id": "removed-after-stat-id"})
+    assert token.startswith("v2.")
+
+    auth_state: dict[str, str | bool] = {"uid": "user-1", "username": "user_one", "is_superuser": False}
+    app = _build_app(db_session, auth_state)
+    original_open_file = anyio.open_file
+    removed = False
+
+    async def remove_source_before_open(path, mode="r", *args, **kwargs):
+        nonlocal removed
+        if not removed and Path(path) == source_path and mode == "rb":
+            source_path.unlink()
+            removed = True
+        return await original_open_file(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(anyio, "open_file", remove_source_before_open)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/api/v1/download-sent", params={"token": token}, headers=headers)
+
+    payload = response.json()
+    assert removed
+    assert response.status_code == 404
+    assert payload["message"] == t(ERR_FILE_NOT_FOUND)
+    assert payload["data"]["reason"] == "file_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_temp_size_cleanup_removes_v2_tokens_for_deleted_files(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temp_root = tmp_path / "temp"
+    user_dir = temp_root / "temp_user-1"
+    user_dir.mkdir(parents=True)
+    deleted_path = user_dir / "old.txt"
+    retained_path = user_dir / "new.txt"
+    deleted_path.write_bytes(b"deleted file")
+    retained_path.write_bytes(b"retained file")
+    os.utime(deleted_path, (100.0, 100.0))
+    os.utime(retained_path, (200.0, 200.0))
+
+    missing_source_path = tmp_path / "outside-temp" / "missing.txt"
+    missing_source_path.parent.mkdir()
+    missing_source_path.write_bytes(b"missing source")
+
+    monkeypatch.setattr(tasks_module, "TEMP_DIR", temp_root)
+    deleted_tokens = (
+        send_file_to_user_module._encode_token({"path": str(deleted_path), "uid": "user-1", "id": "deleted-owner-token"}),
+        send_file_to_user_module._encode_token({"path": str(deleted_path), "uid": "user-2", "id": "deleted-other-token"}),
+    )
+    retained_token = send_file_to_user_module._encode_token({"path": str(retained_path), "uid": "user-1", "id": "retained-token"})
+    missing_token = send_file_to_user_module._encode_token({"path": str(missing_source_path), "uid": "user-1", "id": "missing-source-token"})
+    missing_source_path.unlink()
+
+    token_records = {token: Path(send_file_to_user_module.FILE_TOKEN_DIR) / f"{token.split('.')[1]}.json" for token in (*deleted_tokens, retained_token, missing_token)}
+    assert all(token.startswith("v2.") for token in token_records)
+    assert all(record.exists() for record in token_records.values())
+
+    auth_state: dict[str, str | bool] = {"uid": "user-1", "username": "user_one", "is_superuser": False}
+    app = _build_app(db_session, auth_state)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        valid_download = await client.get("/api/v1/download-sent", params={"token": deleted_tokens[0]})
+        assert valid_download.status_code == 200
+        assert valid_download.content == b"deleted file"
+
+        max_size_bytes = retained_path.stat().st_size
+        deleted_count, current_size = tasks_module._cleanup_temp_dir_by_size(max_size_bytes)
+        assert deleted_count == 1
+        assert current_size == max_size_bytes
+        assert not deleted_path.exists()
+        assert retained_path.exists()
+        assert all(not token_records[token].exists() for token in deleted_tokens)
+        assert token_records[retained_token].exists()
+        assert token_records[missing_token].exists()
+
+        for uid, username, token in (
+            ("user-1", "user_one", deleted_tokens[0]),
+            ("user-2", "user_two", deleted_tokens[1]),
+        ):
+            auth_state.update(uid=uid, username=username, is_superuser=False)
+            unavailable_download = await client.get("/api/v1/download-sent", params={"token": token})
+            unavailable_payload = unavailable_download.json()
+            assert unavailable_download.status_code == 404
+            assert unavailable_payload["message"] == t(ERR_FILE_NOT_FOUND)
+            assert unavailable_payload["data"]["reason"] == "file_unavailable"
+
+        auth_state.update(uid="user-1", username="user_one", is_superuser=False)
+        missing_download = await client.get("/api/v1/download-sent", params={"token": missing_token})
+        missing_payload = missing_download.json()
+        assert missing_download.status_code == 404
+        assert missing_payload["message"] == t(ERR_FILE_NOT_FOUND)
+        assert missing_payload["data"]["reason"] == "file_unavailable"
+
+        retained_download = await client.get("/api/v1/download-sent", params={"token": retained_token})
+        assert retained_download.status_code == 200
+        assert retained_download.content == b"retained file"
+
+        auth_state.update(uid="user-2", username="user_two", is_superuser=False)
+        other_user_download = await client.get("/api/v1/download-sent", params={"token": retained_token})
+        assert other_user_download.status_code == 403
+        assert other_user_download.json()["message"] == t(ERR_UNAUTHORIZED)
+
+        version, binding_key, secret = retained_token.split(".")
+        replacement = "A" if secret[0] != "A" else "B"
+        tampered_token = f"{version}.{binding_key}.{replacement}{secret[1:]}"
+        auth_state.update(uid="user-1", username="user_one", is_superuser=False)
+        tampered_download = await client.get("/api/v1/download-sent", params={"token": tampered_token})
+        assert tampered_download.status_code == 403
+        assert tampered_download.json()["message"] == t(ERR_UNAUTHORIZED)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_file_download_tokens_cleans_stale_orphans_and_preserves_valid_records(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_uid = "active-user"
+    disabled_uid = "disabled-user"
+    deleted_uid = "deleted-user"
+    deleted_user = User(uid=deleted_uid, username="deleted_user")
+    db_session.add_all(
+        [
+            User(uid=active_uid, username="active_user"),
+            User(uid=disabled_uid, username="disabled_user", is_active=False),
+            deleted_user,
+        ]
+    )
+    await db_session.commit()
+    await db_session.delete(deleted_user)
+    await db_session.commit()
+
+    temp_root = tmp_path / "temp"
+    audit_root = tmp_path / "audit"
+    token_root = tmp_path / "file_download_tokens"
+    monkeypatch.setattr(tasks_module, "TEMP_DIR", temp_root)
+    monkeypatch.setattr(tasks_module, "AUDIT_DIR", audit_root)
+    monkeypatch.setattr(send_file_to_user_module, "FILE_TOKEN_DIR", token_root)
+
+    stale_temp_path = temp_root / f"temp_{active_uid}" / "stale.txt"
+    active_normal_path = temp_root / f"temp_{active_uid}" / "normal.txt"
+    disabled_normal_path = audit_root / f"temp_{disabled_uid}" / "normal.json"
+    deleted_external_path = tmp_path / "external" / "deleted.txt"
+    missing_external_path = tmp_path / "external" / "temporarily-missing.txt"
+    new_temp_path = temp_root / f"temp_{active_uid}" / "new.txt"
+    source_paths = {
+        stale_temp_path: b"stale temp source",
+        active_normal_path: b"active normal source",
+        disabled_normal_path: b"disabled normal source",
+        deleted_external_path: b"deleted user source",
+        missing_external_path: b"temporarily unavailable source",
+        new_temp_path: b"new temp source",
+    }
+    for path, content in source_paths.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    def make_token(path: Path, uid: str, token_id: str) -> str:
+        return send_file_to_user_module._encode_token({"path": str(path), "uid": uid, "id": token_id})
+
+    tokens = {
+        "stale_temp": make_token(stale_temp_path, active_uid, "stale-temp"),
+        "deleted_external": make_token(deleted_external_path, deleted_uid, "deleted-external"),
+        "active_normal": make_token(active_normal_path, active_uid, "active-normal"),
+        "disabled_normal": make_token(disabled_normal_path, disabled_uid, "disabled-normal"),
+        "missing_external": make_token(missing_external_path, active_uid, "missing-external"),
+        "new_temp": make_token(new_temp_path, active_uid, "new-temp"),
+    }
+    token_records = {name: token_root / f"{token.split('.')[1]}.json" for name, token in tokens.items()}
+
+    stale_token_names = (
+        "stale_temp",
+        "deleted_external",
+        "active_normal",
+        "disabled_normal",
+        "missing_external",
+    )
+    for name in stale_token_names:
+        os.utime(token_records[name], (1.0, 1.0))
+
+    stale_temp_path.unlink()
+    missing_external_path.unlink()
+    new_temp_path.unlink()
+    deleted_count = await tasks_module.reconcile_file_download_tokens(db_session)
+
+    assert deleted_count == 2
+    assert not token_records["stale_temp"].exists()
+    assert not token_records["deleted_external"].exists()
+    assert token_records["active_normal"].exists()
+    assert token_records["disabled_normal"].exists()
+    assert token_records["missing_external"].exists()
+    assert token_records["new_temp"].exists()
+    assert deleted_external_path.exists()
+    assert not missing_external_path.exists()
+    assert not new_temp_path.exists()
 
 
 @pytest.mark.asyncio

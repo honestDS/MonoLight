@@ -249,8 +249,15 @@ export const fileApi = {
     } catch {
       throw new Error(t('common.network_request_failed'))
     }
-    const res = await request.get(verifiedUrl, { responseType: 'blob' })
-    return res.data
+    try {
+      const res = await request.get(verifiedUrl, { responseType: 'blob' })
+      return res.data
+    } catch (error) {
+      if (error?.response?.status === 404 && error?.response?.data?.data?.reason === 'file_unavailable') {
+        return null
+      }
+      throw error
+    }
   },
   resolveDownloadUrl: (url) => {
     if (!url) return '#'

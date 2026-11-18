@@ -250,7 +250,7 @@
           <div v-if="getMessageFiles(msg).length > 0" class="message-attachments message-sent-files">
             <div v-for="file in getMessageFiles(msg)" :key="file.id" class="message-attachment-item">
               <el-image
-                v-if="isPreviewImage(file)"
+                v-if="isPreviewImage(file) && getFileObjectUrl(getSentFileUrl(file))"
                 :src="getFileObjectUrl(getSentFileUrl(file))"
                 :preview-src-list="getSentFileImageUrls(msg)"
                 preview-teleported

@@ -57,6 +57,10 @@ export const createFileDownloadCache = ({ fetchBlob, createObjectUrl, revokeObje
     record.promise = (async () => {
       const blob = await fetchBlob(url)
       if (disposed || records.get(url) !== record) return null
+      if (blob === null) {
+        record.status = 'unavailable'
+        return null
+      }
 
       const objectUrl = await createObjectUrl(blob)
       if (disposed || records.get(url) !== record) {

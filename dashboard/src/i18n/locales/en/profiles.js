@@ -246,7 +246,7 @@ export default {
   llm_request_max_size_mb: 'Model Request Limit (MiB)',
   llm_request_max_size_mb_hint: 'Limits the size of each request sent to the model. Requests over the limit are not sent.',
   audit_retention_days: 'Audit Retention Days',
-  audit_retention_days_hint: 'Audit files are cleaned only at startup. Default: 90 days.',
+  audit_retention_days_hint: 'Expired audit records are cleaned periodically. Default: 90 days.',
   audit_report_email: 'Audit Report Recipient',
   audit_report_email_placeholder: "name{'@'}example.com",
   audit_report_email_hint: 'Reserved for future use; the current version does not send email.',

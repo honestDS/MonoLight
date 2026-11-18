@@ -185,6 +185,30 @@ test('removes a failed load so the next load can retry successfully', async () =
   assert.equal(fetchCalls.length, 2)
 })
 
+test('caches unavailable downloads until prune allows a successful retry', async () => {
+  let requestNumber = 0
+  const url = 'https://dashboard.example.test/api/v1/download?token=cleaned'
+  const { cache, fetchCalls, createdUrls } = createCacheHarness({
+    fetchBlob: () => {
+      requestNumber += 1
+      return requestNumber === 1 ? null : { value: 'recovered' }
+    },
+    createObjectUrl: blob => `object:${blob.value}`
+  })
+
+  assert.equal(await cache.load(url), null)
+  assert.equal(await cache.load(url), null)
+  assert.equal(cache.get(url), '')
+  assert.deepEqual(fetchCalls, [url])
+  assert.deepEqual(createdUrls, [])
+
+  cache.prune([])
+  assert.equal(await cache.load(url), 'object:recovered')
+  assert.equal(cache.get(url), 'object:recovered')
+  assert.deepEqual(fetchCalls, [url, url])
+  assert.deepEqual(createdUrls, ['object:recovered'])
+})
+
 test('loads different URLs independently', async () => {
   const firstResponse = createDeferred()
   const secondResponse = createDeferred()

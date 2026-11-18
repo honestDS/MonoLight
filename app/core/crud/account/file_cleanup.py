@@ -34,9 +34,10 @@ class CRUDUserFileCleanup:
             cleanup.legacy_session_ids = sorted(set(cleanup.legacy_session_ids).union(legacy_session_ids))
         await db.flush()
 
-    async def remove(self, db: AsyncSession, *, uid: str) -> None:
-        await db.execute(delete(UserFileCleanup).where(UserFileCleanup.uid == uid))
+    async def remove(self, db: AsyncSession, *, uid: str) -> bool:
+        result = await db.execute(delete(UserFileCleanup).where(UserFileCleanup.uid == uid))
         await db.flush()
+        return (result.rowcount or 0) > 0
 
 
 user_file_cleanup_crud = CRUDUserFileCleanup()

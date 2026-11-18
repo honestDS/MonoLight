@@ -300,6 +300,69 @@ test('parses Blob JSON message and detail errors, clears 401 tokens, and redirec
   assert.equal(fixture.location.hash, '/login')
 })
 
+test('returns null only for unavailable download 404 Blobs without changing auth or redirect state', async () => {
+  const errors = [
+    {
+      status: 404,
+      body: { data: { reason: 'file_unavailable' }, message: 'file unavailable' },
+      errorMessage: 'download unavailable'
+    },
+    {
+      status: 404,
+      body: { data: {}, message: 'download file missing' },
+      errorMessage: 'download file missing'
+    },
+    {
+      status: 403,
+      body: { data: { reason: 'file_unavailable' }, message: 'download forbidden' },
+      errorMessage: 'download forbidden'
+    }
+  ].map(({ status, body, errorMessage }) => {
+    const error = new Error(errorMessage)
+    error.response = {
+      status,
+      data: new NodeBlob([JSON.stringify(body)], { type: 'application/json' })
+    }
+    return error
+  })
+  const [, missingReasonError, forbiddenError] = errors
+  const fixture = createFixture({
+    respond: async () => { throw errors.shift() },
+    trackHash: true
+  })
+  const beforeSnapshot = fixture.setupStatusState.getSnapshot()
+  const downloadUrl = '/api/v1/download-sent?token=unavailable'
+
+  assert.equal(await fixture.fileApi.fetchDownloadBlob(downloadUrl), null)
+  assert.equal(fixture.storage.getItem('token'), 'current-token')
+  assert.deepEqual(fixture.storage.removedKeys, [])
+  assert.equal(fixture.location.hash, '#/chat')
+  assert.deepEqual(fixture.hashAssignments, [])
+  assert.strictEqual(fixture.setupStatusState.getSnapshot(), beforeSnapshot)
+
+  await assert.rejects(fixture.fileApi.fetchDownloadBlob(downloadUrl), error => {
+    assert.strictEqual(error, missingReasonError)
+    assert.equal(error.message, 'download file missing')
+    assert.equal(error.response.status, 404)
+    assert.equal(error.response.data.message, 'download file missing')
+    assert.equal(Object.hasOwn(error.response.data.data, 'reason'), false)
+    return true
+  })
+  await assert.rejects(fixture.fileApi.fetchDownloadBlob(downloadUrl), error => {
+    assert.strictEqual(error, forbiddenError)
+    assert.equal(error.message, 'download forbidden')
+    assert.equal(error.response.status, 403)
+    assert.equal(error.response.data.message, 'download forbidden')
+    assert.equal(error.response.data.data.reason, 'file_unavailable')
+    return true
+  })
+
+  assert.equal(fixture.storage.getItem('token'), 'current-token')
+  assert.equal(fixture.location.hash, '#/chat')
+  assert.deepEqual(fixture.hashAssignments, [])
+  assert.strictEqual(fixture.setupStatusState.getSnapshot(), beforeSnapshot)
+})
+
 test('does not redirect on a 500 response while preserving a non-JSON Blob error', async () => {
   const responseBlob = new NodeBlob(['not JSON'], { type: 'text/plain' })
   const backendError = new Error('wire unavailable')

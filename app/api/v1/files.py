@@ -1,17 +1,19 @@
 import asyncio
 import os
 import shutil
+import stat
 import uuid
 from pathlib import PurePosixPath, PureWindowsPath
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.types import Message, Receive, Scope, Send
 
 from app.core.constants import (
     ERR_FILE_ARGUMENT_INVALID,
+    ERR_FILE_NOT_FOUND,
     ERR_INTERNAL_SERVER_ERROR,
-    ERR_KB_DOC_NOT_FOUND,
     ERR_SESSION_NO_PERMISSION,
     ERR_UNAUTHORIZED,
 )
@@ -25,6 +27,52 @@ from app.models.user import User
 from app.providers.database import get_db
 
 router = APIRouter()
+
+
+def _sent_file_unavailable() -> ResourceNotFoundException:
+    return ResourceNotFoundException(message=ERR_FILE_NOT_FOUND, data={"reason": "file_unavailable"})
+
+
+class _SentFileResponse(FileResponse):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            self.stat_result = await asyncio.to_thread(os.stat, self.path)
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            raise _sent_file_unavailable() from exc
+
+        if not stat.S_ISREG(self.stat_result.st_mode):
+            raise _sent_file_unavailable()
+        self.set_stat_headers(self.stat_result)
+
+        extensions = dict(scope.get("extensions", {}))
+        extensions.pop("http.response.pathsend", None)
+        response_scope = {**scope, "extensions": extensions}
+        pending_start: Message | None = None
+        response_committed = False
+
+        # 暂存响应头，直到实际打开文件并发送首个内容。
+        async def _send_with_pending_start(message: Message) -> None:
+            nonlocal pending_start, response_committed
+            message_type = message["type"]
+            if message_type == "http.response.start":
+                pending_start = message
+                return
+            if message_type not in {"http.response.body", "http.response.pathsend"} or pending_start is None:
+                await send(message)
+                return
+
+            start_message = pending_start
+            pending_start = None
+            response_committed = True
+            await send(start_message)
+            await send(message)
+
+        try:
+            await super().__call__(response_scope, receive, _send_with_pending_start)
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            if response_committed:
+                raise
+            raise _sent_file_unavailable() from exc
 
 
 @router.post("/upload")
@@ -129,8 +177,8 @@ async def download_sent_file(token: str, current_user: User = Depends(get_curren
             is_admin=bool(current_user.is_superuser),
         )
     except FileNotFoundError as exc:
-        raise ResourceNotFoundException(message=ERR_KB_DOC_NOT_FOUND) from exc
-    except Exception as exc:
+        raise _sent_file_unavailable() from exc
+    except ValueError as exc:
         raise ForbiddenException(message=ERR_UNAUTHORIZED) from exc
 
-    return FileResponse(path, filename=path.name)
+    return _SentFileResponse(path, filename=path.name)

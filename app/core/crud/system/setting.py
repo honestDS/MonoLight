@@ -76,6 +76,13 @@ def _parse_log_retention(values: dict[str, str | None]) -> tuple[int, int]:
     )
 
 
+def _parse_audit_retention_days(value: str | None) -> int:
+    try:
+        return int(value) if value is not None else int(DEFAULT_SYSTEM_SETTINGS["audit_retention_days"])
+    except (TypeError, ValueError):
+        return int(DEFAULT_SYSTEM_SETTINGS["audit_retention_days"])
+
+
 class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
     async def get_by_key(self, db: AsyncSession, key: str) -> SystemSetting | None:
         result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
@@ -135,6 +142,14 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
         result = await db.execute(statement)
         return _parse_log_retention(dict(result.all()))
 
+    async def get_audit_retention_days(self, db: AsyncSession, *, lock_for_update: bool = False) -> int:
+        statement = select(SystemSetting.value).where(SystemSetting.key == "audit_retention_days")
+        if lock_for_update:
+            statement = statement.with_for_update()
+        result = await db.execute(statement)
+        days = _parse_audit_retention_days(result.scalar_one_or_none())
+        return SystemRuntimeSettings(audit_retention_days=days).audit_retention_days
+
     async def initialize_setup_state(self, db: AsyncSession, *, admin_uid: str | None) -> tuple[str, str | None]:
         initial_status = SETUP_STATUS_COMPLETED if admin_uid else SETUP_STATUS_PENDING
         await self._insert_if_missing(db, key=SETUP_STATUS_KEY, value=initial_status)
@@ -174,10 +189,7 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
             temp_dir_max_size_mb = int(raw_temp_dir_max_size_mb)
         except (TypeError, ValueError):
             temp_dir_max_size_mb = int(DEFAULT_SYSTEM_SETTINGS["temp_dir_max_size_mb"])
-        try:
-            audit_retention_days = int(raw_audit_retention_days)
-        except (TypeError, ValueError):
-            audit_retention_days = int(DEFAULT_SYSTEM_SETTINGS["audit_retention_days"])
+        audit_retention_days = _parse_audit_retention_days(raw_audit_retention_days)
         try:
             agent_work_max_concurrency = int(raw_agent_work_max_concurrency)
         except (TypeError, ValueError):

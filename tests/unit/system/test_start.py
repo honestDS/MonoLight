@@ -5,8 +5,6 @@ import sys
 import pytest
 
 import start
-from app.core.audit.startup import AuditStartupRecoveryResult
-from app.core.audit.storage import AuditCleanupResult
 from app.models.system_setting import SystemRuntimeSettings
 
 
@@ -30,9 +28,8 @@ def test_system_runtime_settings_reserves_audit_report_email():
 
 
 @pytest.mark.asyncio
-async def test_initialize_system_runs_audit_cleanup_once(monkeypatch):
+async def test_initialize_system_recovers_audit_state_after_initialization(monkeypatch):
     from app.core.audit import startup as audit_startup_module
-    from app.core.crud.system import setting as system_setting_module
     from app.providers import database as database_module
     from app.providers.database import bootstrap as bootstrap_module
 
@@ -49,27 +46,14 @@ async def test_initialize_system_runs_audit_cleanup_once(monkeypatch):
     async def init_system_data(received_session):
         events.append(("initialize", received_session))
 
-    async def get_runtime_settings(received_session):
-        events.append(("settings", received_session))
-        return SystemRuntimeSettings(audit_retention_days=45)
-
-    async def recover_and_cleanup_audit_data(received_session, *, retention_days):
-        events.append(("cleanup", received_session, retention_days))
-        return AuditStartupRecoveryResult(
-            expired_pending_records=0,
-            recovered_preparing_records=0,
-            unknown_execution_records=0,
-            unknown_execution_attempts=0,
-            deleted_database_records=0,
-            file_cleanup=AuditCleanupResult(),
-        )
+    async def recover_audit_state(received_session):
+        events.append(("recover", received_session))
 
     monkeypatch.setattr(start, "load_dotenv", lambda: events.append("dotenv"))
     monkeypatch.setattr(start, "initialize_system_secrets", lambda: events.append("system_secrets"))
     monkeypatch.setattr(database_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(bootstrap_module, "init_system_data", init_system_data)
-    monkeypatch.setattr(system_setting_module.system_setting_crud, "get_runtime_settings", get_runtime_settings)
-    monkeypatch.setattr(audit_startup_module, "recover_and_cleanup_audit_data", recover_and_cleanup_audit_data)
+    monkeypatch.setattr(audit_startup_module, "recover_audit_state", recover_audit_state)
 
     await start.initialize_system()
 
@@ -77,8 +61,7 @@ async def test_initialize_system_runs_audit_cleanup_once(monkeypatch):
         "dotenv",
         "system_secrets",
         ("initialize", session),
-        ("settings", session),
-        ("cleanup", session, 45),
+        ("recover", session),
     ]
 
 

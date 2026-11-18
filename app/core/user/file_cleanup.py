@@ -1,18 +1,19 @@
 import asyncio
 import os
-import shutil
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import ERR_FILE_ARGUMENT_INVALID, ERR_TEMP_CLEANER_DELETE_FAILED
 from app.core.crud.account.file_cleanup import user_file_cleanup_crud
+from app.core.crud.account.file_download_cleanup import FileDownloadCleanupJournal
 from app.core.crud.account.user import user_crud
 from app.core.crud.session.session import session_crud
 from app.core.exceptions import ParameterException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import AUDIT_DIR, TEMP_DIR, USER_TEMP_DIR_PREFIX
+from app.core.tools.send_file_to_user import cleanup_file_download_tokens, get_file_download_cleanup_journal
 
 
 def _is_safe_directory_name(value: object) -> bool:
@@ -56,7 +57,7 @@ def _is_junction(path: Path) -> bool:
     return bool(is_junction and is_junction())
 
 
-def _remove_cleanup_path(path: Path) -> None:
+def _remove_cleanup_path(path: Path, *, journal: FileDownloadCleanupJournal) -> None:
     try:
         path.lstat()
     except FileNotFoundError:
@@ -68,12 +69,17 @@ def _remove_cleanup_path(path: Path) -> None:
         path.rmdir()
         return
     if path.is_dir():
-        shutil.rmtree(path)
+        journal.remove_tree(path)
     else:
-        path.unlink()
+        journal.unlink_file(path)
 
 
-def _remove_cleanup_directories(root: str | Path, directory_names: list[str]) -> None:
+def _remove_cleanup_directories(
+    root: str | Path,
+    directory_names: list[str],
+    *,
+    journal: FileDownloadCleanupJournal,
+) -> None:
     root_path = Path(root)
     if root_path.is_symlink() or _is_junction(root_path):
         raise ParameterException(ERR_FILE_ARGUMENT_INVALID)
@@ -84,12 +90,13 @@ def _remove_cleanup_directories(root: str | Path, directory_names: list[str]) ->
         target_path = normalized_root / target_name
         if target_path.parent != normalized_root or target_path.name != target_name:
             raise ParameterException(ERR_FILE_ARGUMENT_INVALID)
-        _remove_cleanup_path(target_path)
+        _remove_cleanup_path(target_path, journal=journal)
 
 
 def _remove_user_file_cleanup_paths(directory_names: list[str]) -> None:
-    _remove_cleanup_directories(TEMP_DIR, directory_names)
-    _remove_cleanup_directories(AUDIT_DIR, [directory_names[0]])
+    journal = get_file_download_cleanup_journal()
+    _remove_cleanup_directories(TEMP_DIR, directory_names, journal=journal)
+    _remove_cleanup_directories(AUDIT_DIR, [directory_names[0]], journal=journal)
 
 
 async def cleanup_user_files(db: AsyncSession, *, uid: str) -> bool:
@@ -121,7 +128,11 @@ async def cleanup_user_files(db: AsyncSession, *, uid: str) -> bool:
     )
     active_user_directory_keys = {os.path.normcase(user.uid) for user in active_users}
     uid_directory_key = os.path.normcase(uid)
+    if any(user.uid == uid for user in active_users):
+        return False
     if uid_directory_key in active_user_directory_keys:
+        await db.commit()
+        await asyncio.to_thread(cleanup_file_download_tokens, uid=uid)
         return False
 
     sessions = await session_crud.get_multi_by_session_ids(
@@ -132,16 +143,29 @@ async def cleanup_user_files(db: AsyncSession, *, uid: str) -> bool:
     )
     reused_session_directory_keys = {os.path.normcase(session.session_id) for session in sessions if session.uid != uid}
     if uid_directory_key in reused_session_directory_keys:
+        await db.commit()
+        await asyncio.to_thread(cleanup_file_download_tokens, uid=uid)
         return False
 
     protected_directory_keys = active_user_directory_keys | reused_session_directory_keys
     removable_session_ids = [session_id for session_id in legacy_session_ids if os.path.normcase(session_id) not in protected_directory_keys]
 
     directory_names = [uid, *removable_session_ids]
-    await asyncio.to_thread(_remove_user_file_cleanup_paths, directory_names)
-    await user_file_cleanup_crud.remove(db, uid=uid)
+    missing_under = [(Path(TEMP_DIR) / f"{USER_TEMP_DIR_PREFIX}{directory_name}").absolute() for directory_name in directory_names]
+    missing_under.append((Path(AUDIT_DIR) / f"{USER_TEMP_DIR_PREFIX}{uid}").absolute())
+    try:
+        await asyncio.to_thread(_remove_user_file_cleanup_paths, directory_names)
+    finally:
+        await db.commit()
+        await asyncio.to_thread(
+            cleanup_file_download_tokens,
+            uid=uid,
+            missing_under=missing_under,
+            replay_removals=True,
+        )
+    removed = await user_file_cleanup_crud.remove(db, uid=uid)
     await db.commit()
-    return True
+    return removed
 
 
 async def recover_user_file_cleanup(db: AsyncSession) -> int:

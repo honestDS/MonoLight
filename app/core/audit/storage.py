@@ -1,5 +1,6 @@
 import asyncio
 import os
+import stat
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -9,6 +10,7 @@ from typing import Any
 
 from app.core.audit.integrity import canonical_json_dumps
 from app.core.constants import (
+    AUDIT_ORPHAN_FILE_GRACE_SECONDS,
     ERR_AUDIT_FILE_NAME_INVALID,
     ERR_AUDIT_FILE_OUTSIDE_USER_DIR,
     ERR_AUDIT_FILE_PATH_NOT_ABSOLUTE,
@@ -19,8 +21,22 @@ from app.core.constants import (
     ERR_AUDIT_USER_DIR_OUTSIDE,
     ERR_AUDIT_USER_DIR_SYMLINK,
 )
+from app.core.crud.account.file_download_cleanup import FileDownloadCleanupJournal
 from app.core.i18n import t
 from app.core.paths import AUDIT_DIR, AUDIT_FILE_PREFIX, AUDIT_FILE_SUFFIX, USER_TEMP_DIR_PREFIX, get_audit_file_path, get_user_audit_dir
+
+
+@dataclass(frozen=True, slots=True)
+class AuditFileCleanupCandidate:
+    path: Path
+    file_stat: os.stat_result | None
+    referenced: bool
+
+
+@dataclass(slots=True)
+class AuditStorageCleanupPlan:
+    candidates: list[AuditFileCleanupCandidate] = field(default_factory=list)
+    failed_paths: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -141,56 +157,190 @@ async def write_audit_json_and_associate(
     return validated_path
 
 
-def cleanup_audit_storage(
+def plan_audit_storage_cleanup(
     *,
     retention_days: int,
     audit_root: str | Path = AUDIT_DIR,
     referenced_paths: set[str] | None = None,
+    protected_paths: set[str] | None = None,
     now_timestamp: float | None = None,
-) -> AuditCleanupResult:
+) -> AuditStorageCleanupPlan:
     if retention_days < 1:
         raise ValueError(t(ERR_AUDIT_RETENTION_INVALID))
 
-    result = AuditCleanupResult()
-    root_path = _ensure_audit_root(audit_root)
-    cutoff = (now_timestamp if now_timestamp is not None else time.time()) - retention_days * 86400
-    normalized_references = {str(Path(path).resolve(strict=False)) for path in referenced_paths or set()}
-    existing_files: set[str] = set()
+    plan = AuditStorageCleanupPlan()
+    root_path = Path(audit_root).absolute()
 
-    with os.scandir(root_path) as user_entries:
-        for user_entry in user_entries:
-            if not user_entry.is_dir(follow_symlinks=False) or not user_entry.name.startswith(USER_TEMP_DIR_PREFIX):
-                continue
-            user_path = Path(user_entry.path)
-            try:
-                with os.scandir(user_path) as file_entries:
-                    for file_entry in file_entries:
-                        file_path = Path(file_entry.path)
-                        if file_entry.is_symlink():
-                            should_delete = True
-                        elif not file_entry.is_file(follow_symlinks=False):
-                            continue
-                        else:
-                            existing_files.add(str(file_path.resolve(strict=False)))
+    try:
+        root_path.lstat()
+    except FileNotFoundError:
+        return plan
+    except OSError as exc:
+        plan.failed_paths[str(root_path)] = str(exc)
+        return plan
+    if root_path.is_symlink() or root_path.is_junction():
+        raise ValueError(t(ERR_AUDIT_ROOT_SYMLINK))
+    root_path = root_path.resolve(strict=True)
+
+    current_timestamp = now_timestamp if now_timestamp is not None else time.time()
+    cutoff = current_timestamp - retention_days * 86400
+    orphan_cutoff = current_timestamp - AUDIT_ORPHAN_FILE_GRACE_SECONDS
+    normalized_references = {Path(path).absolute() for path in referenced_paths or set()}
+    normalized_protected = {Path(path).absolute() for path in protected_paths or set()}
+    existing_files: set[Path] = set()
+    unavailable_user_paths: set[Path] = set()
+    failed_user_paths: set[Path] = set()
+    root_scan_failed = False
+
+    def _is_local_audit_reference(path: Path) -> bool:
+        try:
+            relative_path = path.relative_to(root_path)
+        except ValueError:
+            return False
+        if len(relative_path.parts) != 2:
+            return False
+        user_name, file_name = relative_path.parts
+        if not user_name.startswith(USER_TEMP_DIR_PREFIX) or len(user_name) == len(USER_TEMP_DIR_PREFIX):
+            return False
+        if not file_name.startswith(AUDIT_FILE_PREFIX) or not file_name.endswith(AUDIT_FILE_SUFFIX):
+            return False
+        record_id = file_name[len(AUDIT_FILE_PREFIX) : -len(AUDIT_FILE_SUFFIX)]
+        return record_id.isascii() and record_id.isdecimal() and record_id.lstrip("0") != ""
+
+    def _is_protected_file(file_path: Path, is_temp_file: bool) -> bool:
+        if file_path in normalized_protected:
+            return True
+        if not is_temp_file:
+            return False
+        temp_basename = file_path.name[1:].split(".")[0]
+        protected_target = file_path.with_name(f"{temp_basename}{AUDIT_FILE_SUFFIX}")
+        return protected_target in normalized_protected
+
+    try:
+        with os.scandir(root_path) as user_entries:
+            for user_entry in user_entries:
+                if not user_entry.name.startswith(USER_TEMP_DIR_PREFIX):
+                    continue
+                user_path = Path(user_entry.path).absolute()
+                if user_entry.is_symlink() or user_entry.is_junction():
+                    unavailable_user_paths.add(user_path)
+                    continue
+                if not user_entry.is_dir(follow_symlinks=False):
+                    continue
+                try:
+                    with os.scandir(user_path) as file_entries:
+                        for file_entry in file_entries:
+                            file_path = Path(file_entry.path).absolute()
                             is_audit_json = file_entry.name.startswith(AUDIT_FILE_PREFIX) and file_entry.name.endswith(AUDIT_FILE_SUFFIX)
                             is_temp_file = file_entry.name.startswith(f".{AUDIT_FILE_PREFIX}") and file_entry.name.endswith(".tmp")
                             if not is_audit_json and not is_temp_file:
                                 continue
-                            stat_result = file_entry.stat(follow_symlinks=False)
-                            is_expired = stat_result.st_mtime < cutoff
-                            is_orphan = referenced_paths is not None and str(file_path.resolve(strict=False)) not in normalized_references
-                            should_delete = is_expired or is_orphan
 
-                        if not should_delete:
-                            continue
-                        try:
-                            file_path.unlink()
-                            result.deleted_files.append(str(file_path.resolve(strict=False)))
-                        except OSError as exc:
-                            result.failed_paths[str(file_path)] = str(exc)
-            except OSError as exc:
-                result.failed_paths[str(user_path)] = str(exc)
+                            if is_audit_json and file_path in normalized_references:
+                                existing_files.add(file_path)
+                            if _is_protected_file(file_path, is_temp_file):
+                                continue
+                            try:
+                                file_stat = file_path.lstat()
+                            except OSError as exc:
+                                plan.failed_paths[str(file_path)] = str(exc)
+                                continue
 
-    if referenced_paths is not None:
-        result.missing_referenced_files = sorted(normalized_references - existing_files)
+                            is_symlink = stat.S_ISLNK(file_stat.st_mode)
+                            if not is_symlink and not stat.S_ISREG(file_stat.st_mode):
+                                continue
+                            should_plan = is_symlink
+                            if not should_plan:
+                                is_expired = file_stat.st_mtime < cutoff
+                                is_orphan = referenced_paths is not None and file_path not in normalized_references and file_stat.st_mtime < orphan_cutoff
+                                should_plan = is_expired or is_orphan
+                            if not should_plan:
+                                continue
+                            plan.candidates.append(
+                                AuditFileCleanupCandidate(
+                                    path=file_path,
+                                    file_stat=file_stat,
+                                    referenced=file_path in normalized_references,
+                                )
+                            )
+                except OSError as exc:
+                    failed_user_paths.add(user_path)
+                    plan.failed_paths[str(user_path)] = str(exc)
+    except OSError as exc:
+        root_scan_failed = True
+        plan.failed_paths[str(root_path)] = str(exc)
+
+    if referenced_paths is None or root_scan_failed:
+        return plan
+
+    for reference_path in normalized_references:
+        if reference_path in normalized_protected or not _is_local_audit_reference(reference_path):
+            continue
+        if reference_path in existing_files or reference_path.parent in unavailable_user_paths or reference_path.parent in failed_user_paths:
+            continue
+        try:
+            reference_path.lstat()
+        except FileNotFoundError:
+            plan.candidates.append(
+                AuditFileCleanupCandidate(
+                    path=reference_path,
+                    file_stat=None,
+                    referenced=True,
+                )
+            )
+        except OSError as exc:
+            plan.failed_paths[str(reference_path)] = str(exc)
+    return plan
+
+
+def cleanup_audit_storage(
+    candidates: list[AuditFileCleanupCandidate],
+    *,
+    removal_journal: FileDownloadCleanupJournal,
+) -> AuditCleanupResult:
+    result = AuditCleanupResult()
+    missing_referenced_files: set[str] = set()
+
+    def _record_missing(candidate: AuditFileCleanupCandidate, cutoff_ns: int) -> None:
+        if not candidate.referenced:
+            return
+        try:
+            removal_journal.note_missing_file(candidate.path, cutoff_ns)
+        except OSError as exc:
+            result.failed_paths[str(candidate.path)] = str(exc)
+            return
+        missing_referenced_files.add(str(candidate.path))
+
+    def _has_same_stat(current_stat: os.stat_result, expected_stat: os.stat_result) -> bool:
+        return os.path.samestat(current_stat, expected_stat) and current_stat.st_mtime_ns == expected_stat.st_mtime_ns and current_stat.st_ctime_ns == expected_stat.st_ctime_ns and current_stat.st_size == expected_stat.st_size and current_stat.st_mode == expected_stat.st_mode
+
+    for candidate in candidates:
+        parent_path = candidate.path.parent
+        if parent_path.is_symlink() or parent_path.is_junction():
+            continue
+        lstat_cutoff_ns = time.time_ns()
+        try:
+            current_stat = candidate.path.lstat()
+        except FileNotFoundError:
+            _record_missing(candidate, lstat_cutoff_ns)
+            continue
+        except OSError as exc:
+            result.failed_paths[str(candidate.path)] = str(exc)
+            continue
+
+        if candidate.file_stat is None:
+            continue
+        if not _has_same_stat(current_stat, candidate.file_stat):
+            continue
+        unlink_cutoff_ns = time.time_ns()
+        try:
+            removal_journal.unlink_file(candidate.path, expected_stat=candidate.file_stat)
+        except FileNotFoundError:
+            _record_missing(candidate, unlink_cutoff_ns)
+        except OSError as exc:
+            result.failed_paths[str(candidate.path)] = str(exc)
+        else:
+            result.deleted_files.append(str(candidate.path))
+
+    result.missing_referenced_files = sorted(missing_referenced_files)
     return result

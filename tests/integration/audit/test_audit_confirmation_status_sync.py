@@ -7,7 +7,7 @@ from sqlalchemy import update
 from sqlmodel import select
 
 from app.core.audit.confirmation import ConfirmationDecision, notify_confirmation_tool_results, update_confirmation_message_status, update_confirmation_tool_results_for_decision
-from app.core.audit.startup import recover_and_cleanup_audit_data
+from app.core.audit.startup import recover_audit_state
 from app.core.constants import ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.session.message import message_crud
@@ -405,7 +405,7 @@ async def test_startup_expiration_syncs_confirmation_card_from_final_record(audi
         tool_result, card = await _add_pending_confirmation_messages(session, record)
         assert card is not None
 
-        await recover_and_cleanup_audit_data(session, retention_days=90, audit_root=audit_root)
+        await recover_audit_state(session)
         await session.refresh(card)
         await session.refresh(tool_result)
         stored_record = await audit_crud.get_record(session, record.id)
@@ -446,7 +446,7 @@ async def test_startup_expiration_commits_tool_result_without_confirmation_card(
         tool_result_id = tool_result.id
         assert card is None
 
-        await recover_and_cleanup_audit_data(session, retention_days=90, audit_root=audit_root)
+        await recover_audit_state(session)
 
     async with audit_database() as session:
         stored_record = await audit_crud.get_record(session, record_id)
@@ -514,7 +514,7 @@ async def test_startup_interrupted_confirmation_syncs_unknown_card(audit_databas
         )
         assert claimed is not None and execution is not None
 
-        await recover_and_cleanup_audit_data(session, retention_days=90, audit_root=audit_root)
+        await recover_audit_state(session)
         await session.refresh(card)
 
         assert json.loads(card.content)["status"] == AuditRecordStatus.EXECUTION_UNKNOWN.value

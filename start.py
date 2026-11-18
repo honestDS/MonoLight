@@ -1,7 +1,6 @@
 import asyncio
 import http.client
 import ipaddress
-import logging
 import os
 import signal
 import subprocess
@@ -28,8 +27,6 @@ from start import initialize_system
 
 asyncio.run(initialize_system())
 """
-
-logger = logging.getLogger("uvicorn.error")
 
 
 @dataclass(frozen=True)
@@ -146,21 +143,13 @@ async def initialize_system() -> None:
     load_dotenv()
     await asyncio.to_thread(initialize_system_secrets)
 
-    from app.core.audit.startup import recover_and_cleanup_audit_data
-    from app.core.crud.system.setting import system_setting_crud
+    from app.core.audit.startup import recover_audit_state
     from app.providers.database import AsyncSessionLocal
     from app.providers.database.bootstrap import init_system_data
 
     async with AsyncSessionLocal() as session:
         await init_system_data(session)
-        settings = await system_setting_crud.get_runtime_settings(session)
-        recovery_result = await recover_and_cleanup_audit_data(
-            session,
-            retention_days=settings.audit_retention_days,
-        )
-
-    if recovery_result.file_cleanup.failed_paths:
-        logger.warning("AUDIT: startup cleanup retained %s paths that could not be deleted", len(recovery_result.file_cleanup.failed_paths))
+        await recover_audit_state(session)
 
 
 def _connect_host(host: str) -> str:

@@ -1,34 +1,47 @@
 import asyncio
 import json
 import os
+import threading
 from datetime import timedelta
+from pathlib import Path
+from time import time_ns
 
 import pytest
 from sqlmodel import select
 
+import app.tasks
 from app.core.audit.integrity import build_tool_round_integrity_snapshot, serialize_tool_arguments, verify_persisted_tool_round, verify_tool_round_integrity
 from app.core.audit.persistence import persist_prepared_audit_round
-from app.core.audit.startup import recover_and_cleanup_audit_data
-from app.core.audit.storage import AuditCleanupResult
+from app.core.audit.startup import recover_audit_state
+from app.core.audit.storage import write_audit_json
 from app.core.constants import END_SESSION_SCOPE_FOREGROUND
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.task.background import background_task_crud
+from app.core.tools import send_file_to_user as send_file_to_user_module
 from app.core.utils.time import get_local_time
 from app.models.audit import (
     AuditConfirmationClaim,
     AuditExecutionRecord,
     AuditExecutionStatus,
     AuditFailureType,
+    AuditRecord,
     AuditRecordStatus,
+    AuditToolResultVersion,
 )
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import Message, MessageRole, MessageType
+from app.models.system_setting import SystemSetting
 
 
 @pytest.fixture
 async def audit_database(database_factory):
     async with database_factory(name="audit.db") as session_factory:
         yield session_factory
+
+
+@pytest.fixture(autouse=True)
+def audit_file_token_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(send_file_to_user_module, "FILE_TOKEN_DIR", tmp_path / "file_download_tokens")
 
 
 def _tool_calls():
@@ -76,6 +89,13 @@ async def _create_preparing(session, tmp_path, tool_count=2):
         tool_count=tool_count,
     )
     return record, snapshot
+
+
+async def _mark_record_completed_before_retention(session, audit_record_id):
+    record = await audit_crud.get_record(session, audit_record_id)
+    assert record is not None
+    record.completed_at = get_local_time() - timedelta(days=2)
+    await session.commit()
 
 
 def test_round_integrity_binds_order_identity_and_arguments(tmp_path):
@@ -499,7 +519,7 @@ async def test_startup_marks_interrupted_execution_unknown(audit_database, tmp_p
         )
         assert execution is not None
 
-        result = await recover_and_cleanup_audit_data(session, retention_days=90, audit_root=audit_root)
+        result = await recover_audit_state(session)
         assert result.unknown_execution_records == 1
         assert result.unknown_execution_attempts == 1
         stored = await audit_crud.get_record(session, record.id)
@@ -550,7 +570,7 @@ async def test_startup_unknown_recovery_fails_pending_background_handoff(audit_d
         session.add(task)
         await session.commit()
 
-        await recover_and_cleanup_audit_data(session, retention_days=90, audit_root=audit_root)
+        await recover_audit_state(session)
         await session.refresh(task)
         stored_task = await background_task_crud.get(session, task.id)
         active_tasks = await background_task_crud.list_active_user_tasks(session, uid="u1", session_id="session-1")
@@ -605,16 +625,22 @@ async def test_execution_failure_marks_running_attempts_and_round_unknown(audit_
 
 
 @pytest.mark.asyncio
-async def test_startup_keeps_database_record_when_file_deletion_fails(audit_database, tmp_path, monkeypatch):
-    from app.core.audit import startup as startup_module
-
+async def test_scheduled_audit_cleanup_keeps_database_record_when_file_deletion_fails(audit_database, tmp_path, monkeypatch):
     audit_root = tmp_path / "audit"
-    audit_file = audit_root / "temp_u1" / "audit_1.json"
-    audit_file.parent.mkdir(parents=True)
-    audit_file.write_text("{}", encoding="utf-8")
 
     async with audit_database() as session:
+        session.add(SystemSetting(key="audit_retention_days", value="1"))
+        await session.commit()
         record, snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        assert record.id is not None
+        audit_file = await write_audit_json(
+            uid="u1",
+            audit_record_id=record.id,
+            payload={},
+            audit_root=audit_root,
+        )
+        old_timestamp = 1_000_000_000
+        os.utime(audit_file, (old_timestamp, old_timestamp))
         await audit_crud.complete_preparation(
             session,
             audit_record_id=record.id,
@@ -622,29 +648,48 @@ async def test_startup_keeps_database_record_when_file_deletion_fails(audit_data
             tool_details=_tool_details(snapshot, conclusion="blocked"),
             context_file_path=str(audit_file.resolve()),
         )
+        await _mark_record_completed_before_retention(session, record.id)
 
-        def fail_cleanup(**kwargs):
-            return AuditCleanupResult(failed_paths={str(audit_file): "locked"})
+        original_unlink = Path.unlink
 
-        monkeypatch.setattr(startup_module, "cleanup_audit_storage", fail_cleanup)
-        result = await recover_and_cleanup_audit_data(session, retention_days=1, audit_root=audit_root)
+        def fail_target_unlink(path, *, missing_ok=False):
+            if path.absolute() == audit_file.absolute():
+                raise PermissionError("locked")
+            return original_unlink(path, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", fail_target_unlink)
+        result = await app.tasks.cleanup_audit_history(session, audit_root=audit_root)
 
         assert result.deleted_database_records == 0
-        assert await audit_crud.get_record(session, record.id) is not None
+        stored = await audit_crud.get_record(session, record.id)
+        assert stored is not None
+        assert stored.status == AuditRecordStatus.BLOCKED
         assert audit_file.exists()
+        assert result.file_cleanup.failed_paths == {str(audit_file.absolute()): "locked"}
 
 
 @pytest.mark.asyncio
-async def test_startup_deletes_file_before_expired_database_record(audit_database, tmp_path):
+@pytest.mark.parametrize(
+    "recreate_after_cleanup",
+    [False, True],
+    ids=["cleanup_only", "recreate_after_cleanup"],
+)
+async def test_scheduled_audit_cleanup_deletes_expired_file_and_database_record(audit_database, tmp_path, monkeypatch, recreate_after_cleanup):
     audit_root = tmp_path / "audit"
-    audit_file = audit_root / "temp_u1" / "audit_1.json"
-    audit_file.parent.mkdir(parents=True)
-    audit_file.write_text("{}", encoding="utf-8")
-    old_timestamp = 1_000_000_000
-    os.utime(audit_file, (old_timestamp, old_timestamp))
 
     async with audit_database() as session:
+        session.add(SystemSetting(key="audit_retention_days", value="1"))
+        await session.commit()
         record, snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        assert record.id is not None
+        audit_file = await write_audit_json(
+            uid="u1",
+            audit_record_id=record.id,
+            payload={},
+            audit_root=audit_root,
+        )
+        old_timestamp = 1_000_000_000
+        os.utime(audit_file, (old_timestamp, old_timestamp))
         await audit_crud.complete_preparation(
             session,
             audit_record_id=record.id,
@@ -652,7 +697,372 @@ async def test_startup_deletes_file_before_expired_database_record(audit_databas
             tool_details=_tool_details(snapshot, conclusion="blocked"),
             context_file_path=str(audit_file.resolve()),
         )
-        result = await recover_and_cleanup_audit_data(session, retention_days=1, audit_root=audit_root)
-        assert not audit_file.exists()
+        await _mark_record_completed_before_retention(session, record.id)
+        version = AuditToolResultVersion(
+            uid="u1",
+            session_id="session-1",
+            audit_record_id=record.id,
+            source_assistant_message_id=10,
+            original_tool_call_id="call-1",
+            message_id=20,
+            version_no=0,
+            content="historical tool result",
+        )
+        session.add(version)
+        await session.commit()
+
+        token = send_file_to_user_module._encode_token({"path": str(audit_file), "uid": "u1", "id": "audit-download"})
+        token_record_path = send_file_to_user_module.FILE_TOKEN_DIR / f"{token.split('.')[1]}.json"
+        assert token.startswith("v2.")
+        assert token_record_path.exists()
+
+        new_token_holder: list[str] = []
+        new_token_record_path_holder: list[Path] = []
+        if recreate_after_cleanup:
+            original_cleanup_batch = app.tasks._cleanup_audit_history_batch
+
+            async def cleanup_batch_and_recreate(db, *, batch, retention_days):
+                batch_result = await original_cleanup_batch(db, batch=batch, retention_days=retention_days)
+                retention_unchanged, deleted_database_records, _ = batch_result
+                new_token_timestamp_ns = time_ns() + 1_000_000_000
+                assert retention_unchanged
+                assert deleted_database_records == 1
+                assert not audit_file.exists()
+                assert token_record_path.exists()
+                with pytest.raises(FileNotFoundError):
+                    send_file_to_user_module.resolve_file_token(token, uid="u1")
+
+                async with audit_database() as recreated_session:
+                    assert await audit_crud.get_record(recreated_session, record.id) is None
+                    version_result = await recreated_session.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.id == version.id))
+                    assert version_result.scalar_one_or_none() is None
+                    new_file = await write_audit_json(
+                        uid="u1",
+                        audit_record_id=record.id,
+                        payload={"status": "recreated"},
+                        audit_root=audit_root,
+                    )
+                    recreated_record = AuditRecord(
+                        id=record.id,
+                        uid="u1",
+                        operator_username="tester",
+                        session_id="session-1",
+                        source="web",
+                        language="zh",
+                        execution_scope=END_SESSION_SCOPE_FOREGROUND,
+                        status=AuditRecordStatus.PREPARING,
+                        source_assistant_message_id=10,
+                        working_directory=str(tmp_path.resolve()),
+                        round_arguments_hash=snapshot.round_sha256,
+                        tool_count=1,
+                        context_file_path=str(new_file),
+                    )
+                    recreated_session.add(recreated_record)
+                    await recreated_session.commit()
+                    new_token = send_file_to_user_module._encode_token({"path": str(new_file), "uid": "u1", "id": "audit-download-recreated"})
+                    assert new_token != token
+                    new_token_record_path = send_file_to_user_module.FILE_TOKEN_DIR / f"{new_token.split('.')[1]}.json"
+                    os.utime(new_token_record_path, ns=(new_token_timestamp_ns, new_token_timestamp_ns))
+
+                new_token_holder.append(new_token)
+                new_token_record_path_holder.append(new_token_record_path)
+                return batch_result
+
+            monkeypatch.setattr(app.tasks, "_cleanup_audit_history_batch", cleanup_batch_and_recreate)
+
+        await recover_audit_state(session)
+        assert audit_file.exists()
+        assert await audit_crud.get_record(session, record.id) is not None
+
+        result = await app.tasks.cleanup_audit_history(session, audit_root=audit_root)
         assert result.deleted_database_records == 1
-        assert await audit_crud.get_record(session, record.id) is None
+        if not recreate_after_cleanup:
+            assert not audit_file.exists()
+            assert await audit_crud.get_record(session, record.id) is None
+        version_result = await session.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.id == version.id))
+        assert version_result.scalar_one_or_none() is None
+        assert not token_record_path.exists()
+        if recreate_after_cleanup:
+            recreated_record = await audit_crud.get_record(session, record.id)
+            assert recreated_record is not None
+            assert recreated_record.status == AuditRecordStatus.PREPARING
+            assert audit_file.exists()
+            assert len(new_token_holder) == 1
+            assert len(new_token_record_path_holder) == 1
+            assert new_token_record_path_holder[0].exists()
+            assert send_file_to_user_module.resolve_file_token(new_token_holder[0], uid="u1") == audit_file.resolve()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "keep_recent_file",
+    [False, True],
+    ids=["recent_file_missing", "recent_file_stale"],
+)
+async def test_audit_history_cleanup_retains_recent_context_record(audit_database, tmp_path, keep_recent_file):
+    audit_root = tmp_path / "audit"
+
+    async with audit_database() as session:
+        session.add(SystemSetting(key="audit_retention_days", value="1"))
+        await session.commit()
+
+        recent_record, recent_snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        assert recent_record.id is not None
+        recent_file = await write_audit_json(
+            uid="u1",
+            audit_record_id=recent_record.id,
+            payload={"status": "recent"},
+            audit_root=audit_root,
+        )
+        assert await audit_crud.complete_preparation(
+            session,
+            audit_record_id=recent_record.id,
+            status=AuditRecordStatus.BLOCKED,
+            tool_details=_tool_details(recent_snapshot, conclusion="blocked"),
+            context_file_path=str(recent_file),
+        )
+
+        expired_record, expired_snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        assert expired_record.id is not None
+        expired_file = await write_audit_json(
+            uid="u1",
+            audit_record_id=expired_record.id,
+            payload={"status": "expired"},
+            audit_root=audit_root,
+        )
+        assert await audit_crud.complete_preparation(
+            session,
+            audit_record_id=expired_record.id,
+            status=AuditRecordStatus.BLOCKED,
+            tool_details=_tool_details(expired_snapshot, conclusion="blocked"),
+            context_file_path=str(expired_file),
+        )
+
+        expired_stored = await audit_crud.get_record(session, expired_record.id)
+        assert expired_stored is not None
+        await _mark_record_completed_before_retention(session, expired_record.id)
+        old_timestamp = get_local_time().timestamp() - timedelta(days=2).total_seconds()
+        if keep_recent_file:
+            os.utime(recent_file, (old_timestamp, old_timestamp))
+        else:
+            recent_file.unlink()
+        expired_file.unlink()
+
+        result = await app.tasks.cleanup_audit_history(session, audit_root=audit_root)
+
+        assert result.deleted_database_records == 1
+        assert await audit_crud.get_record(session, expired_record.id) is None
+        stored_recent = await audit_crud.get_record(session, recent_record.id)
+        assert stored_recent is not None
+        assert stored_recent.status == AuditRecordStatus.BLOCKED
+        assert recent_file.exists() == keep_recent_file
+        assert not expired_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_online_audit_history_cleanup_preserves_active_records_and_recent_orphans(audit_database, tmp_path):
+    audit_root = tmp_path / "audit"
+    old_timestamp = 1_000_000_000
+
+    async with audit_database() as session:
+        session.add(SystemSetting(key="audit_retention_days", value="1"))
+        await session.commit()
+        pending_record, pending_snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        assert pending_record.id is not None
+        pending_file = await write_audit_json(
+            uid="u1",
+            audit_record_id=pending_record.id,
+            payload={"status": "pending"},
+            audit_root=audit_root,
+        )
+        assert await audit_crud.complete_preparation(
+            session,
+            audit_record_id=pending_record.id,
+            status=AuditRecordStatus.PENDING,
+            tool_details=_tool_details(pending_snapshot),
+            context_file_path=str(pending_file),
+            expires_at=get_local_time() + timedelta(minutes=10),
+        )
+
+        executing_record, executing_snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        assert executing_record.id is not None
+        executing_file = await write_audit_json(
+            uid="u1",
+            audit_record_id=executing_record.id,
+            payload={"status": "executing"},
+            audit_root=audit_root,
+        )
+        assert await audit_crud.complete_preparation(
+            session,
+            audit_record_id=executing_record.id,
+            status=AuditRecordStatus.PASSED,
+            tool_details=_tool_details(executing_snapshot, conclusion="passed"),
+            context_file_path=str(executing_file),
+        )
+        _, execution_claim_token = await audit_crud.claim_passed_for_execution(session, audit_record_id=executing_record.id)
+        assert execution_claim_token
+
+        preparing_record, _snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        assert preparing_record.id is not None
+        preparing_file = await write_audit_json(
+            uid="u1",
+            audit_record_id=preparing_record.id,
+            payload={"status": "preparing"},
+            audit_root=audit_root,
+        )
+        preparing_temp_file = preparing_file.with_name(f".{preparing_file.stem}.unique.tmp")
+        preparing_temp_file.write_text("preparing", encoding="utf-8")
+
+        next_file_id = max(pending_record.id, executing_record.id, preparing_record.id) + 1
+        recent_orphan_file = await write_audit_json(
+            uid="u1",
+            audit_record_id=next_file_id,
+            payload={"status": "recent-orphan"},
+            audit_root=audit_root,
+        )
+        old_orphan_file = await write_audit_json(
+            uid="u1",
+            audit_record_id=next_file_id + 1,
+            payload={"status": "old-orphan"},
+            audit_root=audit_root,
+        )
+        old_temp_file = old_orphan_file.with_name(f".{old_orphan_file.stem}.tmp")
+        old_temp_file.write_text("partial", encoding="utf-8")
+
+        for path in (pending_file, executing_file, preparing_file, preparing_temp_file, old_orphan_file, old_temp_file):
+            os.utime(path, (old_timestamp, old_timestamp))
+
+        result = await app.tasks.cleanup_audit_history(session, audit_root=audit_root)
+
+        stored_pending = await audit_crud.get_record(session, pending_record.id)
+        stored_executing = await audit_crud.get_record(session, executing_record.id)
+        stored_preparing = await audit_crud.get_record(session, preparing_record.id)
+        assert stored_pending is not None
+        assert stored_pending.status == AuditRecordStatus.PENDING
+        assert stored_executing is not None
+        assert stored_executing.status == AuditRecordStatus.EXECUTING
+        assert stored_preparing is not None
+        assert stored_preparing.status == AuditRecordStatus.PREPARING
+        assert pending_file.exists()
+        assert executing_file.exists()
+        assert preparing_file.exists()
+        assert preparing_temp_file.exists()
+        assert recent_orphan_file.exists()
+        assert not old_orphan_file.exists()
+        assert not old_temp_file.exists()
+        assert result.deleted_database_records == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "replacement_status",
+    [None, AuditRecordStatus.PREPARING, AuditRecordStatus.PENDING],
+    ids=["retention_increased", "same_id_preparing", "same_id_pending"],
+)
+async def test_audit_history_cleanup_rechecks_retention_after_scan(audit_database, tmp_path, monkeypatch, replacement_status):
+    audit_root = tmp_path / "audit"
+
+    async with audit_database() as session:
+        session.add(SystemSetting(key="audit_retention_days", value="1"))
+        await session.commit()
+        record, snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        assert record.id is not None
+        audit_file = await write_audit_json(
+            uid="u1",
+            audit_record_id=record.id,
+            payload={},
+            audit_root=audit_root,
+        )
+        await audit_crud.complete_preparation(
+            session,
+            audit_record_id=record.id,
+            status=AuditRecordStatus.BLOCKED,
+            tool_details=_tool_details(snapshot, conclusion="blocked"),
+            context_file_path=str(audit_file),
+        )
+        await _mark_record_completed_before_retention(session, record.id)
+        old_timestamp = get_local_time().timestamp() - timedelta(days=2).total_seconds()
+        os.utime(audit_file, (old_timestamp, old_timestamp))
+
+        original_plan = app.tasks.plan_audit_storage_cleanup
+        scan_finished = threading.Event()
+        release_scan = threading.Event()
+        planned_paths: list[Path] = []
+        planned_retention_days: list[int] = []
+
+        def plan_and_pause(**kwargs):
+            plan = original_plan(**kwargs)
+            planned_paths.extend(candidate.path for candidate in plan.candidates)
+            planned_retention_days.append(kwargs["retention_days"])
+            scan_finished.set()
+            if not release_scan.wait(timeout=10):
+                raise TimeoutError("audit cleanup scan was not released")
+            return plan
+
+        monkeypatch.setattr(app.tasks, "plan_audit_storage_cleanup", plan_and_pause)
+        cleanup_task = asyncio.create_task(app.tasks.cleanup_audit_history(session, audit_root=audit_root))
+        try:
+            assert await asyncio.to_thread(scan_finished.wait, 10)
+            assert planned_retention_days == [1]
+            assert audit_file.absolute() in planned_paths
+
+            replacement_time = get_local_time()
+            replacement_values = {}
+            replacement_claims = []
+            if replacement_status == AuditRecordStatus.PENDING:
+                replacement_values = {
+                    "audited_at": replacement_time,
+                    "pending_at": replacement_time,
+                    "expires_at": replacement_time + timedelta(minutes=10),
+                }
+                replacement_claims.append(
+                    AuditConfirmationClaim(
+                        uid="u1",
+                        session_id="session-1",
+                        audit_record_id=record.id,
+                    )
+                )
+
+            if replacement_status is None:
+                async with audit_database() as updated_session:
+                    setting_result = await updated_session.execute(select(SystemSetting).where(SystemSetting.key == "audit_retention_days"))
+                    setting = setting_result.scalar_one()
+                    setting.value = "90"
+                    await updated_session.commit()
+            else:
+                async with audit_database() as replacement_session:
+                    assert await audit_crud.delete_records(replacement_session, audit_record_ids={record.id}) == 1
+                    await replacement_session.commit()
+                    replacement = AuditRecord(
+                        id=record.id,
+                        uid="u1",
+                        operator_username="tester",
+                        session_id="session-1",
+                        source="web",
+                        language="zh",
+                        execution_scope=END_SESSION_SCOPE_FOREGROUND,
+                        status=replacement_status,
+                        source_assistant_message_id=10,
+                        working_directory=str(tmp_path.resolve()),
+                        round_arguments_hash=snapshot.round_sha256,
+                        tool_count=1,
+                        context_file_path=str(audit_file),
+                        created_at=replacement_time,
+                        updated_at=replacement_time,
+                        **replacement_values,
+                    )
+                    replacement_session.add(replacement)
+                    replacement_session.add_all(replacement_claims)
+                    await replacement_session.commit()
+        finally:
+            release_scan.set()
+            result = await cleanup_task
+
+        assert result.deleted_database_records == 0
+        assert audit_file.exists()
+        stored_record = await audit_crud.get_record(session, record.id)
+        assert stored_record is not None
+        if replacement_status is None:
+            assert stored_record.status == AuditRecordStatus.BLOCKED
+        else:
+            assert stored_record.status == replacement_status

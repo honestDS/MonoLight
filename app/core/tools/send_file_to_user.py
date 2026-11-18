@@ -1,13 +1,16 @@
 import asyncio
 import base64
+import errno
 import hashlib
 import hmac
 import json
 import mimetypes
 import os
 import secrets
+import stat
 import tempfile
 import uuid
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -30,6 +33,7 @@ from app.core.constants import (
     MSG_FILE_COUNT_TRUNCATED,
     SEND_FILE_TO_USER_TOOL_NAME,
 )
+from app.core.crud.account.file_download_cleanup import FileDownloadCleanupJournal
 from app.core.crypto import _get_encryption_key
 from app.core.i18n import t
 from app.core.paths import DATA_DIR
@@ -62,6 +66,10 @@ SENSITIVE_FILENAMES = {
 }
 
 
+def get_file_download_cleanup_journal() -> FileDownloadCleanupJournal:
+    return FileDownloadCleanupJournal(FILE_TOKEN_DIR)
+
+
 def _sign_payload(payload: str) -> str:
     key = _get_encryption_key()
     return hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -71,7 +79,11 @@ def _token_payload_error() -> ValueError:
     return ValueError(t(ERR_FILE_TOKEN_PAYLOAD_INVALID))
 
 
-def _normalize_token_data(data: Any, *, require_id: bool) -> dict[str, str]:
+def _is_token_secret(secret: Any) -> bool:
+    return isinstance(secret, str) and bool(secret) and secret.isascii() and all(character in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for character in secret)
+
+
+def _validate_token_data(data: Any, *, require_id: bool) -> dict[str, str]:
     if not isinstance(data, dict):
         raise _token_payload_error()
     if require_id and set(data) != _TOKEN_DATA_KEYS:
@@ -82,22 +94,16 @@ def _normalize_token_data(data: Any, *, require_id: bool) -> dict[str, str]:
         raise _token_payload_error()
 
     raw_path = data.get("path")
-    if not isinstance(raw_path, str) or not raw_path.strip():
+    if not isinstance(raw_path, str) or not raw_path.strip() or "\x00" in raw_path:
         raise _token_payload_error()
     try:
         path = Path(raw_path)
         if not path.is_absolute():
             raise _token_payload_error()
-        path = path.resolve()
     except (OSError, RuntimeError, ValueError) as exc:
         raise _token_payload_error() from exc
 
-    if _is_sensitive_path(path):
-        raise ValueError(t(ERR_FILE_SENSITIVE_NOT_ALLOWED))
-    if not path.exists() or not path.is_file():
-        raise FileNotFoundError(t(ERR_FILE_NOT_FOUND))
-
-    normalized_data = {"uid": uid, "path": str(path)}
+    normalized_data = {"uid": uid, "path": raw_path}
     if require_id:
         file_id = data.get("id")
         if not isinstance(file_id, str) or not file_id.strip():
@@ -106,51 +112,247 @@ def _normalize_token_data(data: Any, *, require_id: bool) -> dict[str, str]:
     return normalized_data
 
 
+def _normalize_token_data(data: Any, *, require_id: bool) -> tuple[dict[str, str], os.stat_result]:
+    normalized_data = _validate_token_data(data, require_id=require_id)
+    try:
+        path = Path(normalized_data["path"]).resolve(strict=False)
+    except (RuntimeError, ValueError) as exc:
+        raise _token_payload_error() from exc
+
+    if _is_sensitive_path(path):
+        raise ValueError(t(ERR_FILE_SENSITIVE_NOT_ALLOWED))
+
+    try:
+        path_stat = path.stat()
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise FileNotFoundError(t(ERR_FILE_NOT_FOUND)) from exc
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise FileNotFoundError(t(ERR_FILE_NOT_FOUND))
+
+    normalized_data["path"] = str(path)
+    return normalized_data, path_stat
+
+
 def _binding_key(data: dict[str, str]) -> str:
     normalized_payload = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return uuid.uuid5(uuid.NAMESPACE_URL, normalized_payload).hex
 
 
+def _is_token_binding_key(binding_key: Any) -> bool:
+    return isinstance(binding_key, str) and len(binding_key) == 32 and all(character in "0123456789abcdef" for character in binding_key) and binding_key[12] == "5" and binding_key[16] in "89ab"
+
+
 def _token_record_path(binding_key: str) -> Path:
-    if not isinstance(binding_key, str) or len(binding_key) != 32 or any(character not in "0123456789abcdef" for character in binding_key):
+    if not _is_token_binding_key(binding_key):
         raise ValueError(t(ERR_FILE_TOKEN_INVALID))
 
     try:
         token_dir_path = Path(FILE_TOKEN_DIR).resolve(strict=False)
         record_path = token_dir_path / f"{binding_key}.json"
-        if record_path.is_symlink():
-            raise ValueError(t(ERR_FILE_TOKEN_INVALID))
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (RuntimeError, ValueError) as exc:
         raise ValueError(t(ERR_FILE_TOKEN_INVALID)) from exc
+    if record_path.is_symlink():
+        raise ValueError(t(ERR_FILE_TOKEN_INVALID))
     return record_path
 
 
-def _read_token_record(binding_key: str) -> tuple[dict[str, str], str]:
-    record_path = _token_record_path(binding_key)
-    try:
-        with record_path.open("r", encoding="utf-8") as record_file:
-            record = json.load(record_file)
-    except FileNotFoundError as exc:
-        raise ValueError(t(ERR_FILE_TOKEN_INVALID)) from exc
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise _token_payload_error() from exc
-
+def _read_token_record_from_path(record_path: Path, binding_key: str) -> tuple[dict[str, str], str, os.stat_result]:
+    with record_path.open("r", encoding="utf-8") as record_file:
+        record_stat = os.fstat(record_file.fileno())
+        record = json.load(record_file)
     if not isinstance(record, dict) or set(record) != _TOKEN_RECORD_KEYS:
         raise _token_payload_error()
     stored_secret = record.get("secret")
-    if not isinstance(stored_secret, str) or not stored_secret.isascii() or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for character in stored_secret):
+    if not _is_token_secret(stored_secret):
         raise _token_payload_error()
 
-    data = _normalize_token_data(record.get("data"), require_id=True)
+    data = _validate_token_data(record.get("data"), require_id=True)
     if _binding_key(data) != binding_key:
         raise ValueError(t(ERR_FILE_TOKEN_INVALID))
-    return data, stored_secret
+    return data, stored_secret, record_stat
+
+
+def _read_token_record(binding_key: str) -> tuple[dict[str, str], str, os.stat_result]:
+    record_path = _token_record_path(binding_key)
+    try:
+        return _read_token_record_from_path(record_path, binding_key)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(t(ERR_FILE_NOT_FOUND)) from exc
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise _token_payload_error() from exc
+
+
+def _source_file_missing(path: Path) -> bool:
+    try:
+        path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    return False
+
+
+def _source_file_is_same(path: Path, initial_stat: os.stat_result) -> bool:
+    try:
+        current_stat = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return stat.S_ISREG(current_stat.st_mode) and os.path.samestat(initial_stat, current_stat)
+
+
+def _raise_if_source_file_invalid(path: Path, initial_stat: os.stat_result) -> None:
+    if not _source_file_is_same(path, initial_stat):
+        raise FileNotFoundError(t(ERR_FILE_NOT_FOUND))
+
+
+def _remove_new_token_if_source_invalid(
+    source_path: Path,
+    initial_source_stat: os.stat_result,
+    temp_path: Path,
+    record_path: Path,
+) -> None:
+    if _source_file_is_same(source_path, initial_source_stat):
+        return
+
+    try:
+        same_record = os.path.samestat(temp_path.lstat(), record_path.lstat())
+    except (FileNotFoundError, NotADirectoryError):
+        same_record = False
+
+    if same_record:
+        record_path.unlink(missing_ok=True)
+    raise FileNotFoundError(t(ERR_FILE_NOT_FOUND))
+
+
+def _record_snapshot_matches(record_path: Path, initial_stat: os.stat_result) -> bool:
+    current_stat = record_path.lstat()
+    return os.path.samestat(initial_stat, current_stat) and initial_stat.st_mtime_ns == current_stat.st_mtime_ns and initial_stat.st_size == current_stat.st_size
+
+
+def _should_delete_token(
+    data: dict[str, str],
+    modified_at_ns: int,
+    *,
+    uid: str | None,
+    existing_uids: Collection[str] | None,
+    removal_cutoffs: Mapping[Path, int] | None,
+    removed_under: Mapping[Path, int],
+    missing_under: Collection[Path],
+    records_before: float | None,
+) -> bool:
+    source_path = Path(data["path"])
+    path_cutoff = removal_cutoffs.get(source_path) if removal_cutoffs is not None else None
+    if path_cutoff is not None and modified_at_ns <= path_cutoff:
+        return True
+    for root, cutoff in removed_under.items():
+        if source_path.is_relative_to(root) and modified_at_ns <= cutoff:
+            return True
+    if records_before is not None and modified_at_ns / 1_000_000_000 >= records_before:
+        return False
+    if uid is not None and data["uid"] == uid:
+        return True
+    if existing_uids is not None and data["uid"] not in existing_uids:
+        return True
+    for root in missing_under:
+        if not source_path.is_relative_to(root):
+            continue
+        if _source_file_missing(source_path):
+            return True
+    return False
+
+
+def cleanup_file_download_tokens(
+    *,
+    uid: str | None = None,
+    replay_removals: bool = False,
+    missing_under: Collection[Path] = (),
+    existing_uids: Collection[str] | None = None,
+    records_before: float | None = None,
+) -> int:
+    journal = get_file_download_cleanup_journal()
+    pending_ids: list[int] = []
+    removal_cutoffs: dict[Path, int] = {}
+    tree_cutoffs: dict[Path, int] = {}
+    if replay_removals:
+        pending_ids, removal_cutoffs, tree_cutoffs = journal.snapshot_pending()
+
+    missing_under_paths = tuple(path for path in missing_under if path.is_absolute())
+    if uid is None and not pending_ids and not missing_under_paths and existing_uids is None:
+        return 0
+
+    token_dir = Path(FILE_TOKEN_DIR)
+    try:
+        token_dir_stat = token_dir.lstat()
+    except FileNotFoundError:
+        return 0
+    except NotADirectoryError as exc:
+        raise OSError(errno.EINVAL, t(ERR_FILE_TOKEN_INVALID), token_dir) from exc
+
+    if not stat.S_ISDIR(token_dir_stat.st_mode) or stat.S_ISLNK(token_dir_stat.st_mode) or getattr(token_dir_stat, "st_reparse_tag", 0):
+        raise OSError(errno.EINVAL, t(ERR_FILE_TOKEN_INVALID), token_dir)
+
+    deleted_count = 0
+    first_error: OSError | None = None
+    scan_succeeded = False
+    try:
+        with os.scandir(token_dir) as records:
+            for record in records:
+                try:
+                    record_name = record.name
+                    if len(record_name) != 37 or record_name[32:] != ".json" or not _is_token_binding_key(record_name[:32]):
+                        continue
+
+                    record_path = Path(record.path)
+                    initial_record_stat = record_path.lstat()
+                    if not stat.S_ISREG(initial_record_stat.st_mode) or getattr(initial_record_stat, "st_reparse_tag", 0):
+                        continue
+
+                    binding_key = record_name[:32]
+                    data, _, _ = _read_token_record_from_path(record_path, binding_key)
+
+                    if not _should_delete_token(
+                        data,
+                        initial_record_stat.st_mtime_ns,
+                        uid=uid,
+                        existing_uids=existing_uids,
+                        removal_cutoffs=removal_cutoffs,
+                        removed_under=tree_cutoffs,
+                        missing_under=missing_under_paths,
+                        records_before=records_before,
+                    ):
+                        continue
+
+                    if not _record_snapshot_matches(record_path, initial_record_stat):
+                        continue
+                    record_path.unlink()
+                    deleted_count += 1
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                except (UnicodeError, ValueError):
+                    continue
+                except OSError as exc:
+                    if first_error is None:
+                        first_error = exc
+        scan_succeeded = True
+
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        if first_error is None:
+            first_error = exc
+
+    if first_error is not None:
+        raise first_error
+    if scan_succeeded and pending_ids:
+        journal.acknowledge(pending_ids)
+    return deleted_count
 
 
 def _encode_token(data: dict[str, Any]) -> str:
-    normalized_data = _normalize_token_data(data, require_id=True)
+    normalized_data, source_stat = _normalize_token_data(data, require_id=True)
+    source_path = Path(normalized_data["path"])
     binding_key = _binding_key(normalized_data)
     record_path = _token_record_path(binding_key)
+    journal = get_file_download_cleanup_journal()
+    _raise_if_source_file_invalid(source_path, source_stat)
     token_dir = Path(FILE_TOKEN_DIR)
     token_dir.mkdir(parents=True, exist_ok=True)
     secret = secrets.token_urlsafe(32)
@@ -168,12 +370,20 @@ def _encode_token(data: dict[str, Any]) -> str:
             record_file.flush()
             os.fsync(record_file.fileno())
 
-        try:
-            os.link(temp_path, record_path)
-        except FileExistsError:
-            _, stored_secret = _read_token_record(binding_key)
-            return f"{TOKEN_VERSION}.{binding_key}.{stored_secret}"
-        return f"{TOKEN_VERSION}.{binding_key}.{secret}"
+        with journal.publication_guard(source_path, source_stat):
+            _raise_if_source_file_invalid(source_path, source_stat)
+            try:
+                os.link(temp_path, record_path)
+            except FileExistsError:
+                _, stored_secret, record_stat = _read_token_record(binding_key)
+                if journal.revokes(source_path, record_stat.st_mtime_ns, source_stat):
+                    raise FileNotFoundError(t(ERR_FILE_NOT_FOUND))
+                _raise_if_source_file_invalid(source_path, source_stat)
+                if not _record_snapshot_matches(record_path, record_stat):
+                    raise FileNotFoundError(t(ERR_FILE_NOT_FOUND))
+                return f"{TOKEN_VERSION}.{binding_key}.{stored_secret}"
+            _remove_new_token_if_source_invalid(source_path, source_stat, temp_path, record_path)
+            return f"{TOKEN_VERSION}.{binding_key}.{secret}"
     finally:
         try:
             temp_path.unlink()
@@ -205,18 +415,29 @@ def resolve_file_token(token: str, *, uid: str | None = None, is_admin: bool = F
             data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
         except Exception as exc:
             raise _token_payload_error() from exc
-        normalized_data = _normalize_token_data(data, require_id=False)
-        _check_token_owner(normalized_data, uid, is_admin)
+        data = _validate_token_data(data, require_id=False)
+        _check_token_owner(data, uid, is_admin)
+        normalized_data, _ = _normalize_token_data(data, require_id=False)
         return Path(normalized_data["path"])
 
     if version != TOKEN_VERSION:
         raise ValueError(t(ERR_FILE_TOKEN_INVALID))
 
-    data, expected_secret = _read_token_record(payload)
-    if not signature.isascii() or not secrets.compare_digest(signature, expected_secret):
+    if not _is_token_secret(signature):
+        raise ValueError(t(ERR_FILE_TOKEN_SIGNATURE_INVALID))
+    record_path = _token_record_path(payload)
+    data, expected_secret, record_stat = _read_token_record(payload)
+    if not secrets.compare_digest(signature, expected_secret):
         raise ValueError(t(ERR_FILE_TOKEN_SIGNATURE_INVALID))
     _check_token_owner(data, uid, is_admin)
-    return Path(data["path"])
+    normalized_data, source_stat = _normalize_token_data(data, require_id=True)
+    if normalized_data["path"] != data["path"]:
+        raise ValueError(t(ERR_FILE_TOKEN_INVALID))
+    normalized_path = Path(normalized_data["path"])
+    journal = get_file_download_cleanup_journal()
+    if journal.revokes(normalized_path, record_stat.st_mtime_ns, source_stat) or not _record_snapshot_matches(record_path, record_stat):
+        raise FileNotFoundError(t(ERR_FILE_NOT_FOUND))
+    return normalized_path
 
 
 def _is_sensitive_path(path: Path) -> bool:

@@ -166,7 +166,7 @@ class WeixinOpenClawMediaMixin:
 
     async def reply_file_item(self, user_id: str, file_item: dict[str, Any], *, context_token: str = "") -> bool:
         try:
-            media_path = self.resolve_outbound_file_path(file_item)
+            media_path = await asyncio.to_thread(self.resolve_outbound_file_path, file_item)
             if media_path is None:
                 logger.bind(user_id=user_id, file_id=file_item.get("id"), file_path=file_item.get("path"), file_name=file_item.get("name")).warning(t("LOG_WEIXIN_OPENCLAW_OUTBOUND_FILE_NOT_RESOLVABLE"))
                 return False
