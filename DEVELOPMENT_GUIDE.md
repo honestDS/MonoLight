@@ -86,7 +86,7 @@ Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发�
   - 每个新增的 API 路由必须在 `tests/integration` 中拥有对应的异步请求测试。
   - 使用 `conftest.py` 中定义的 `db_session` fixture 进行数据库隔离测试。
   - 测试中的 Mock 逻辑必须基于 `InternalResponse` 等标准对象，严禁使用旧版字典结构。
-- **前端目录结构**：前端单元测试统一存放在 `dashboard/tests`，测试文件使用 `*.test.js` 命名。
+- **前端目录结构**：单元测试存放在 `dashboard/tests/unit/<业务域>`，集成测试存放在 `dashboard/tests/integration/<业务域>`。纯逻辑或单模块状态测试归入单元测试；涉及多个真实模块协同或页面逻辑链路的测试归入集成测试。同域共用的准备代码放在对应业务域目录，跨层复用的测试辅助文件放在 `dashboard/tests/support/<业务域>`；辅助文件不得以 `.test.js` 结尾。测试文件使用 `*.test.js` 命名。
 - **前端测试框架**：使用 Node.js 内置的 `node:test` 与 `node:assert/strict`，测试代码使用 ES Module 导入方式；未经项目统一调整，不得自行引入其他前端测试框架。
 - **前端编写指南**：
   - 优先测试可脱离浏览器运行的纯 JavaScript 逻辑，例如消息状态流转、事件顺序、重复事件处理和清理逻辑。
@@ -96,7 +96,7 @@ Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发�
   - WebUI 最小支持 1366×768 桌面浏览器视口，该尺寸下页面、弹窗和主要操作必须正常显示、可通过正常滚动访问，不得被遮挡或溢出；无需考虑移动端适配。
   - Vue 单文件组件（`.vue`）不得直接编写 CSS/SCSS 样式规则，包括选择器、属性声明、嵌套规则、变量和混入等；样式必须提取到对应的 `.scss` 文件。
   - `.vue` 中允许保留仅用于引入外部样式文件的 `<style>` 块，例如 `@use` 或 `@import`，但不得包含具体 CSS/SCSS 规则。
-- **前端测试命令**：进入 `dashboard` 目录执行 `npm test`，该命令会运行 `tests/*.test.js`。
+- **前端测试命令**：进入 `dashboard` 目录执行 `npm test`，该命令递归运行 `tests/**/*.test.js`；按业务域运行集成测试可执行 `node --experimental-default-type=module --test "tests/integration/knowledge/*.test.js"`。
 - **前端开发服务器**：`npm run serve` 通过 `dashboard/vue.config.js` 读取项目根 `.env` 的 `APP_HOST`/`APP_PORT`，代理 `/api` 的 HTTP 和 WebSocket；修改端口后必须重启开发服务器。
 - **前端发布构建**：
   - Vue 源码位于 `dashboard/`，执行 `npm run build` 时固定输出到 `app/static/dashboard/`。

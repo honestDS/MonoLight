@@ -5,7 +5,7 @@
   "scripts": {
     "serve": "vue-cli-service serve",
     "build": "vue-cli-service build --dest ../app/static/dashboard",
-    "test": "node --experimental-default-type=module --test tests/*.test.js"
+    "test": "node --experimental-default-type=module --test \"tests/**/*.test.js\""
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
