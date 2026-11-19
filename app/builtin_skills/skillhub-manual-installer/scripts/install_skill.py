@@ -339,7 +339,25 @@ def parse_skill_package_metadata(content_root: Path) -> tuple[str, dict[str, Any
     return doc_path.name, metadata, scripts
 
 
-def normalize_skill_search_item(raw: dict[str, Any]) -> dict[str, Any]:
+def unpack_text_field(val: Any) -> str:
+    if not val:
+        return ""
+    if isinstance(val, str):
+        trimmed = val.strip()
+        if trimmed.startswith("{") and trimmed.endswith("}"):
+            try:
+                parsed = json.loads(trimmed)
+                if isinstance(parsed, dict):
+                    for k in ("answer", "description", "summary", "text", "content"):
+                        if parsed.get(k) and isinstance(parsed[k], str):
+                            return parsed[k].strip()
+            except Exception:
+                pass
+        return trimmed
+    return str(val).strip()
+
+
+def normalize_skill_search_item(raw: dict[str, Any], *, max_desc_chars: int = 160) -> dict[str, Any]:
     ns_obj = raw.get("namespace") if isinstance(raw.get("namespace"), dict) else {}
     ns_handle = ns_obj.get("handle") or ns_obj.get("displayName") or raw.get("ownerName") or ""
     slug = raw.get("slug") or ns_obj.get("publicSlug") or ""
@@ -354,15 +372,35 @@ def normalize_skill_search_item(raw: dict[str, Any]) -> dict[str, Any]:
     else:
         requires_api_key = None
 
-    display_name = raw.get("name") or raw.get("displayName") or slug
-    summary = raw.get("description_zh") or raw.get("description") or raw.get("summary_zh") or raw.get("summary") or ""
-    page_url = f"{WEB_BASE}/skills/{urllib.parse.quote(str(ns_handle))}/{urllib.parse.quote(str(slug))}" if ns_handle and slug else None
+    pricing_type = labels.get("pricing_type") or None
+    channel_pricing = raw.get("channelPricing") if isinstance(raw.get("channelPricing"), dict) else None
+    price_info = None
+    if channel_pricing:
+        p = channel_pricing.get("price")
+        curr = channel_pricing.get("currency") or "CNY"
+        if p is not None:
+            price_info = f"{p} {curr}"
+    elif pricing_type and pricing_type not in ("free", "none"):
+        price_info = str(pricing_type)
 
-    return {
+    display_name = raw.get("displayName") or raw.get("name") or slug
+    raw_desc = (
+        unpack_text_field(raw.get("description_zh"))
+        or unpack_text_field(raw.get("description"))
+        or unpack_text_field(raw.get("summary_zh"))
+        or unpack_text_field(raw.get("summary"))
+        or ""
+    )
+    # Collapse multiple whitespace
+    raw_desc = re.sub(r"\s+", " ", raw_desc).strip()
+    if max_desc_chars > 0 and len(raw_desc) > max_desc_chars:
+        desc = raw_desc[:max_desc_chars].rstrip() + "..."
+    else:
+        desc = raw_desc
+
+    item: dict[str, Any] = {
         "name": display_name,
-        "display_name": display_name,
         "slug": slug,
-        "namespace": ns_handle,
         "canonical_name": canonical,
         "version": raw.get("version"),
         "category": raw.get("category"),
@@ -370,11 +408,13 @@ def normalize_skill_search_item(raw: dict[str, Any]) -> dict[str, Any]:
         "downloads": raw.get("downloads"),
         "stars": raw.get("stars"),
         "score": raw.get("score"),
+        "verified": bool(raw.get("verified")),
         "requires_api_key": requires_api_key,
-        "summary": summary,
-        "description": summary,
-        "page_url": page_url,
+        "description": desc,
     }
+    if price_info:
+        item["pricing"] = price_info
+    return item
 
 
 def search_skillhub(
@@ -386,6 +426,7 @@ def search_skillhub(
     sort_by: str | None = None,
     order: str = "desc",
     source: str | None = None,
+    max_desc_chars: int = 160,
 ) -> dict[str, Any]:
     params: dict[str, str] = {
         "page": str(page),
@@ -408,7 +449,7 @@ def search_skillhub(
         raise RuntimeError(f"SkillHub search API error: {resp.get('message') or resp}")
     data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
     raw_skills = data.get("skills") or []
-    items = [normalize_skill_search_item(it) for it in raw_skills if isinstance(it, dict)]
+    items = [normalize_skill_search_item(it, max_desc_chars=max_desc_chars) for it in raw_skills if isinstance(it, dict)]
     return {
         "total": data.get("total", len(items)),
         "items": items,
@@ -629,6 +670,7 @@ def cmd_categories() -> int:
 
 
 def cmd_search(args: argparse.Namespace) -> int:
+    max_desc = -1 if args.full_desc else args.max_desc_chars
     res = search_skillhub(
         args.keyword,
         page=args.page,
@@ -637,6 +679,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         sort_by=args.sort_by,
         order=args.order,
         source=args.source,
+        max_desc_chars=max_desc,
     )
     print(
         json.dumps(
@@ -843,6 +886,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--source", help="Filter by source, e.g. all, official, community.")
     p_search.add_argument("--page", type=int, default=1)
     p_search.add_argument("--limit", type=int, default=10)
+    p_search.add_argument("--max-desc-chars", type=int, default=160, help="Max characters for description summary (default: 160).")
+    p_search.add_argument("--full-desc", action="store_true", help="Output full description without truncating.")
 
     sub.add_parser("categories", help="List SkillHub categories.")
 

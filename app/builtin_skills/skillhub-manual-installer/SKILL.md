@@ -30,6 +30,8 @@ python "<SKILL_DIR>/scripts/install_skill.py" search "<关键词>" --limit 10
 - `--sort <field>`：排序字段，常用 `downloads`（下载量）、`stars`（收藏数）、`score`（综合评分）、`newest`（最新）。
 - `--source <src>`：按来源筛选（如 `all`、`official`、`community`）。
 - `--page <n>` / `--limit <n>`：分页参数，默认第 1 页、每页 10 条。
+- `--max-desc-chars <n>`：简介最大字符数（默认 160 字截断），防止大段文本占用过多上下文。
+- `--full-desc`：输出完整简介原文（不截断）。
 
 查看所有可用分类：
 
