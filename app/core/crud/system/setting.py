@@ -18,6 +18,7 @@ from app.core.constants import (
     SETUP_STATUS_CONFIGURING,
     SETUP_STATUS_KEY,
     SETUP_STATUS_PENDING,
+    SKILL_MARKETPLACE_INITIALIZED_KEY,
     SYSTEM_LOG_MAX_ENTRIES_UPPER_BOUND,
     SYSTEM_LOG_RETENTION_DAYS_UPPER_BOUND,
 )
@@ -164,6 +165,11 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
 
     async def claim_setup(self, db: AsyncSession) -> bool:
         result = await db.execute(update(SystemSetting).where(SystemSetting.key == SETUP_STATUS_KEY, SystemSetting.value == SETUP_STATUS_PENDING).values(value=SETUP_STATUS_CONFIGURING).execution_options(synchronize_session=False))
+        return (result.rowcount or 0) == 1
+
+    async def claim_skill_marketplace_initialization(self, db: AsyncSession) -> bool:
+        await self._insert_if_missing(db, key=SKILL_MARKETPLACE_INITIALIZED_KEY, value="false")
+        result = await db.execute(update(SystemSetting).where(SystemSetting.key == SKILL_MARKETPLACE_INITIALIZED_KEY, SystemSetting.value == "false").values(value="true").execution_options(synchronize_session=False))
         return (result.rowcount or 0) == 1
 
     async def set_setup_admin_uid(self, db: AsyncSession, *, admin_uid: str) -> bool:

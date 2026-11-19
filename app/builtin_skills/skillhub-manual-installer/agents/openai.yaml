@@ -1,0 +1,6 @@
+interface:
+  display_name: "Monolight 技能商店助手"
+  short_description: "Monolight built-in SkillHub search, security inspection, and no-CLI cross-platform installer targeting data/skills."
+  default_prompt: "Use $skillhub-manual-installer to search SkillHub for a useful skill, inspect its security report, and install it into Monolight's data/skills directory."
+policy:
+  allow_implicit_invocation: true

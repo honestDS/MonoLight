@@ -1,5 +1,49 @@
 <template>
-  <div v-if="userPermissions.showAdminNavigation" class="view-container">
+  <div v-if="userPermissions.showAdminNavigation" class="view-container skills-view">
+    <section
+      class="skill-marketplace"
+      aria-labelledby="skill-marketplace-title"
+      :aria-busy="restoring"
+    >
+      <div class="skill-marketplace__icon" aria-hidden="true">
+        <el-icon :size="24"><Shop /></el-icon>
+      </div>
+      <div class="skill-marketplace__body">
+        <div class="skill-marketplace__heading">
+          <h2 id="skill-marketplace-title">{{ t('common.skills.marketplace_title') }}</h2>
+          <el-tag v-if="marketplaceInstalled !== null || loading">
+            <span role="status" aria-live="polite" aria-atomic="true">
+              <template v-if="marketplaceInstalled === true">
+                {{ t('common.skills.marketplace_installed') }}
+              </template>
+              <template v-else-if="marketplaceInstalled === false">
+                {{ t('common.skills.marketplace_available') }}
+              </template>
+              <template v-else>
+                {{ t('common.skills.marketplace_loading') }}
+              </template>
+            </span>
+          </el-tag>
+        </div>
+        <p id="skill-marketplace-description" class="skill-marketplace__description">
+          {{ t('common.skills.marketplace_description') }}
+        </p>
+        <p id="skill-marketplace-hint" class="skill-marketplace__hint">
+          {{ t('common.skills.marketplace_hint') }}
+        </p>
+      </div>
+      <el-button
+        class="skill-marketplace__restore"
+        type="primary"
+        :loading="restoring"
+        :disabled="loading || deletingId !== null || !userPermissions.isSuperuser || marketplaceInstalled !== false"
+        aria-describedby="skill-marketplace-description skill-marketplace-hint"
+        @click="handleRestoreMarketplace"
+      >
+        <el-icon v-if="!restoring" aria-hidden="true"><RefreshLeft /></el-icon>
+        {{ t(restoring ? 'common.skills.marketplace_restoring' : 'common.skills.marketplace_restore') }}
+      </el-button>
+    </section>
     <BaseDataTable
       :data="skills"
       :loading="loading || !userPermissions.isSuperuser"
@@ -46,7 +90,7 @@
             type="danger"
             size="small"
             :loading="deletingId === row.id && deletingId !== null"
-            :disabled="loading || deletingId !== null || !userPermissions.isSuperuser"
+            :disabled="loading || restoring || deletingId !== null || !userPermissions.isSuperuser"
             @click="handleDelete(row)"
           >
             {{ t('common.delete') }}
@@ -61,6 +105,7 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
+import { Shop, RefreshLeft } from '@element-plus/icons-vue'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import { systemApi } from '../api'
 import { useConfirmDialog } from '../composables/useConfirmDialog.js'
@@ -76,6 +121,8 @@ const total = ref(0)
 const currentPage = ref(1)
 const pageSize = ref(10)
 const deletingId = ref(null)
+const marketplaceInstalled = ref(null)
+const restoring = ref(false)
 let requestSequence = 0
 let isActive = false
 
@@ -98,6 +145,7 @@ async function loadSkills() {
 
     skills.value = result.items
     total.value = result.total
+    marketplaceInstalled.value = result.meta.marketplace_installed
   } catch (error) {
     if (isActive && sequence === requestSequence) {
       ElMessage.error(error?.message || t('common.skills.load_failed'))
@@ -123,16 +171,57 @@ function handleSizeChange(size) {
   loadSkills()
 }
 
+async function handleRestoreMarketplace() {
+  if (
+    !isActive ||
+    !userPermissions.isSuperuser ||
+    restoring.value ||
+    deletingId.value !== null ||
+    loading.value ||
+    marketplaceInstalled.value !== false
+  ) {
+    return false
+  }
+
+  restoring.value = true
+  const token = localStorage.getItem('token')
+  try {
+    await systemApi.restoreSkillMarketplace()
+    if (!isActive || !userPermissions.isSuperuser || localStorage.getItem('token') !== token) return false
+
+    marketplaceInstalled.value = true
+    ElMessage.success(t('common.skills.marketplace_restore_success'))
+    currentPage.value = 1
+    await loadSkills()
+    return true
+  } catch (error) {
+    if (isActive && userPermissions.isSuperuser && localStorage.getItem('token') === token) {
+      ElMessage.error(error?.message || t('common.skills.marketplace_restore_failed'))
+    }
+    return false
+  } finally {
+    restoring.value = false
+  }
+}
+
 async function handleDelete(row) {
-  if (!isActive || !userPermissions.isSuperuser || deletingId.value !== null || loading.value) return false
+  if (
+    !isActive ||
+    !userPermissions.isSuperuser ||
+    restoring.value ||
+    deletingId.value !== null ||
+    loading.value
+  ) return false
 
   deletingId.value = row.id
   const token = localStorage.getItem('token')
+  let confirmationKey = 'common.skills.delete_confirm'
+  if (row.id === 'skillhub-manual-installer') confirmationKey = 'common.skills.delete_marketplace_confirm'
   try {
     try {
       if (
         !(await confirm({
-          message: t('common.skills.delete_confirm', { name: row.name || row.id, id: row.id }),
+          message: t(confirmationKey, { name: row.name || row.id, id: row.id }),
           title: t('common.warning'),
           confirmButtonText: t('common.confirm'),
           cancelButtonText: t('common.cancel')
@@ -179,3 +268,7 @@ onUnmounted(() => {
   requestSequence += 1
 })
 </script>
+
+<style lang="scss" scoped>
+@import '../assets/css/SkillsView.scss';
+</style>

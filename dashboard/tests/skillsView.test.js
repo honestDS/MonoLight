@@ -34,7 +34,9 @@ const scriptSetup = source => {
   return match[1]
 }
 
-const apiResponse = (items, total) => ({ data: { data: { items, total } } })
+const apiResponse = (items, total, marketplaceInstalled = false) => ({
+  data: { data: { items, total, meta: { marketplace_installed: marketplaceInstalled } } }
+})
 
 const deferred = () => {
   let resolve
@@ -85,9 +87,10 @@ const createHarness = ({ permission, locale = 'zh', token = 'initial-token' } = 
     ))
   )
   const actualUseConfirmDialog = loadUseConfirmDialog({ t, ElMessageBox })
-  const apiCalls = { list: [], delete: [] }
+  const apiCalls = { list: [], delete: [], restore: [] }
   let listHandler = async () => apiResponse([], 0)
   let deleteHandler = async () => {}
+  let restoreHandler = async () => {}
   let currentToken = token
   const systemApi = {
     skills(params) {
@@ -97,6 +100,10 @@ const createHarness = ({ permission, locale = 'zh', token = 'initial-token' } = 
     deleteSkill(id) {
       apiCalls.delete.push(id)
       return deleteHandler(id)
+    },
+    restoreSkillMarketplace() {
+      apiCalls.restore.push(true)
+      return restoreHandler()
     }
   }
   const localStorage = {
@@ -123,7 +130,7 @@ const createHarness = ({ permission, locale = 'zh', token = 'initial-token' } = 
     'utf8'
   )))
   vm.runInContext(
-    `${source}\nglobalThis.__skillsView = { skills, loading, total, currentPage, pageSize, deletingId, handleRefresh, handlePageChange, handleSizeChange, handleDelete }`,
+    `${source}\nglobalThis.__skillsView = { skills, loading, total, currentPage, pageSize, deletingId, marketplaceInstalled, restoring, handleRefresh, handlePageChange, handleSizeChange, handleRestoreMarketplace, handleDelete }`,
     context,
     { filename: 'SkillsView.vue' }
   )
@@ -145,6 +152,7 @@ const createHarness = ({ permission, locale = 'zh', token = 'initial-token' } = 
     unmount: () => lifecycle.unmounted.forEach(callback => callback()),
     setListHandler: handler => { listHandler = handler },
     setDeleteHandler: handler => { deleteHandler = handler },
+    setRestoreHandler: handler => { restoreHandler = handler },
     setToken: value => { currentToken = value },
     approveConfirmation: () => takeConfirmation().resolve(),
     cancelConfirmation: () => takeConfirmation().reject('cancel'),
@@ -237,6 +245,36 @@ test('SkillsView paginates, ignores stale results, reports errors, and ignores r
 
   assert.equal(harness.view.skills.value, previousSkills)
   assert.equal(harness.view.total.value, previousTotal)
+})
+
+test('SkillsView derives marketplace state from list metadata and ignores stale metadata', async () => {
+  const harness = createHarness({ permission: true })
+  const firstPage = deferred()
+  const stalePage = deferred()
+  const latestPage = deferred()
+  let requestCount = 0
+  harness.setListHandler(params => {
+    requestCount += 1
+    if (requestCount === 1) return firstPage.promise
+    return params.page === 2 ? stalePage.promise : latestPage.promise
+  })
+  harness.mount()
+
+  firstPage.resolve(apiResponse([{ id: 'regular-first-page' }], 100, true))
+  await flushPromises()
+  assert.equal(harness.view.marketplaceInstalled.value, true)
+  assert.deepEqual(harness.view.skills.value, [{ id: 'regular-first-page' }])
+
+  harness.view.handlePageChange(2)
+  harness.view.handlePageChange(3)
+  latestPage.resolve(apiResponse([{ id: 'regular-latest-page' }], 100, false))
+  await flushPromises()
+  stalePage.resolve(apiResponse([{ id: 'stale-marketplace-row' }], 100, true))
+  await flushPromises()
+
+  assert.equal(harness.view.marketplaceInstalled.value, false)
+  assert.deepEqual(harness.view.skills.value, [{ id: 'regular-latest-page' }])
+  assert.equal(harness.view.total.value, 100)
 })
 
 test('SkillsView reloads the latest pagination choice when superuser permission returns', async () => {
@@ -355,6 +393,193 @@ test('SkillsView does not reload or replace data after unmount when permission r
   assert.equal(harness.view.total.value, previousTotal)
 })
 
+test('SkillsView restores the marketplace from a non-home page and refreshes localized state', async () => {
+  for (const locale of ['zh', 'en']) {
+    const harness = createHarness({ permission: true, locale })
+    const refreshedList = deferred()
+    let pageOneLoads = 0
+    harness.setListHandler(async ({ page }) => {
+      if (page === 1) {
+        pageOneLoads += 1
+        return pageOneLoads === 1
+          ? apiResponse([{ id: 'before-restore' }], 41, false)
+          : refreshedList.promise
+      }
+      return apiResponse([{ id: `page-${page}` }], 41, false)
+    })
+    harness.mount()
+    await flushPromises()
+    harness.view.handlePageChange(4)
+    await flushPromises()
+
+    const restoreRequest = deferred()
+    harness.setRestoreHandler(() => restoreRequest.promise)
+    const restoration = harness.view.handleRestoreMarketplace()
+
+    assert.equal(harness.view.marketplaceInstalled.value, false)
+    assert.equal(harness.view.restoring.value, true)
+    assert.deepEqual(harness.apiCalls.restore, [true])
+    assert.equal(await harness.view.handleRestoreMarketplace(), false)
+    assert.equal(await harness.view.handleDelete({ id: 'blocked-during-restore', name: 'blocked' }), false)
+    assert.deepEqual(harness.apiCalls.restore, [true])
+    assert.equal(harness.confirmCalls.length, 0)
+
+    restoreRequest.resolve()
+    await flushPromises()
+    assert.equal(harness.view.marketplaceInstalled.value, true)
+    assert.equal(harness.view.loading.value, true)
+    assert.equal(harness.view.restoring.value, true)
+    assert.equal(harness.view.currentPage.value, 1)
+    assert.equal(
+      harness.messageCalls.success.at(-1),
+      locale === 'zh' ? zhCommon.skills.marketplace_restore_success : enCommon.skills.marketplace_restore_success
+    )
+    assert.equal(await harness.view.handleRestoreMarketplace(), false)
+    assert.equal(await harness.view.handleDelete({ id: 'blocked-during-refresh', name: 'blocked' }), false)
+
+    refreshedList.resolve(apiResponse([{ id: 'after-restore' }], 7, true))
+    assert.equal(await restoration, true)
+    await flushPromises()
+
+    assert.deepEqual(harness.apiCalls.list, [
+      { page: 1, size: 10 },
+      { page: 4, size: 10 },
+      { page: 1, size: 10 }
+    ])
+    assert.deepEqual(harness.view.skills.value, [{ id: 'after-restore' }])
+    assert.equal(harness.view.total.value, 7)
+    assert.equal(harness.view.marketplaceInstalled.value, true)
+    assert.equal(harness.view.loading.value, false)
+    assert.equal(harness.view.restoring.value, false)
+    assert.deepEqual(harness.apiCalls.restore, [true])
+  }
+})
+
+test('SkillsView blocks marketplace restore while unavailable, unknown, installed, or deleting', async () => {
+  const loadingHarness = createHarness({ permission: true })
+  const pendingList = deferred()
+  loadingHarness.setListHandler(() => pendingList.promise)
+  loadingHarness.mount()
+  await flushPromises()
+  assert.equal(loadingHarness.view.loading.value, true)
+  assert.equal(loadingHarness.view.marketplaceInstalled.value, null)
+  assert.equal(await loadingHarness.view.handleRestoreMarketplace(), false)
+  assert.deepEqual(loadingHarness.apiCalls.restore, [])
+  pendingList.resolve(apiResponse([], 0, false))
+  await flushPromises()
+
+  const noPermissionHarness = createHarness({ permission: false })
+  noPermissionHarness.mount()
+  await flushPromises()
+  assert.equal(await noPermissionHarness.view.handleRestoreMarketplace(), false)
+  assert.deepEqual(noPermissionHarness.apiCalls.restore, [])
+
+  const notMountedHarness = createHarness({ permission: true })
+  assert.equal(await notMountedHarness.view.handleRestoreMarketplace(), false)
+  assert.deepEqual(notMountedHarness.apiCalls.restore, [])
+
+  const unmountedHarness = createHarness({ permission: true })
+  unmountedHarness.setListHandler(async () => apiResponse([], 0, false))
+  unmountedHarness.mount()
+  await flushPromises()
+  unmountedHarness.unmount()
+  assert.equal(await unmountedHarness.view.handleRestoreMarketplace(), false)
+  assert.deepEqual(unmountedHarness.apiCalls.restore, [])
+
+  const installedHarness = createHarness({ permission: true })
+  installedHarness.setListHandler(async () => apiResponse([{ id: 'marketplace' }], 1, true))
+  installedHarness.mount()
+  await flushPromises()
+  assert.equal(installedHarness.view.marketplaceInstalled.value, true)
+  assert.equal(await installedHarness.view.handleRestoreMarketplace(), false)
+  assert.deepEqual(installedHarness.apiCalls.restore, [])
+
+  const deletingHarness = createHarness({ permission: true })
+  deletingHarness.setListHandler(async () => apiResponse([{ id: 'ordinary-skill' }], 1, false))
+  deletingHarness.mount()
+  await flushPromises()
+  const deletion = deletingHarness.view.handleDelete({ id: 'ordinary-skill', name: 'Ordinary skill' })
+  assert.equal(deletingHarness.view.deletingId.value, 'ordinary-skill')
+  assert.equal(await deletingHarness.view.handleRestoreMarketplace(), false)
+  assert.deepEqual(deletingHarness.apiCalls.restore, [])
+  deletingHarness.cancelConfirmation()
+  assert.equal(await deletion, false)
+  assert.equal(deletingHarness.view.deletingId.value, null)
+
+  const restoreRequest = deferred()
+  deletingHarness.setRestoreHandler(() => restoreRequest.promise)
+  const restoration = deletingHarness.view.handleRestoreMarketplace()
+  assert.equal(deletingHarness.view.restoring.value, true)
+  assert.deepEqual(deletingHarness.apiCalls.restore, [true])
+  restoreRequest.resolve()
+  assert.equal(await restoration, true)
+  await flushPromises()
+})
+
+test('SkillsView keeps marketplace state false after restore errors and permits retry', async () => {
+  const scenarios = [
+    { error: new Error('restore backend failure'), expected: 'restore backend failure' },
+    { error: {}, expected: enCommon.skills.marketplace_restore_failed }
+  ]
+
+  for (const scenario of scenarios) {
+    const harness = createHarness({ permission: true, locale: 'en' })
+    let listLoads = 0
+    harness.setListHandler(async () => {
+      listLoads += 1
+      return apiResponse([{ id: listLoads === 1 ? 'before-retry' : 'after-retry' }], 1, listLoads > 1)
+    })
+    harness.setRestoreHandler(async () => { throw scenario.error })
+    harness.mount()
+    await flushPromises()
+
+    assert.equal(await harness.view.handleRestoreMarketplace(), false)
+    assert.equal(harness.view.marketplaceInstalled.value, false)
+    assert.equal(harness.view.restoring.value, false)
+    assert.equal(harness.messageCalls.error.at(-1), scenario.expected)
+    assert.equal(harness.messageCalls.success.length, 0)
+
+    harness.setRestoreHandler(async () => {})
+    assert.equal(await harness.view.handleRestoreMarketplace(), true)
+    await flushPromises()
+    assert.equal(harness.view.marketplaceInstalled.value, true)
+    assert.equal(harness.view.restoring.value, false)
+    assert.equal(harness.apiCalls.restore.length, 2)
+    assert.equal(harness.apiCalls.list.length, 2)
+  }
+})
+
+test('SkillsView ignores restore results after permission, token, or lifecycle changes', async () => {
+  for (const outcome of ['success', 'failure']) {
+    for (const guard of ['permission', 'token', 'unmount']) {
+      const harness = createHarness({ permission: true, token: 'before-restore' })
+      const restoreRequest = deferred()
+      harness.setListHandler(async () => apiResponse([{ id: 'existing' }], 1, false))
+      harness.setRestoreHandler(() => restoreRequest.promise)
+      harness.mount()
+      await flushPromises()
+
+      const restoration = harness.view.handleRestoreMarketplace()
+      assert.equal(harness.view.restoring.value, true)
+      if (guard === 'permission') harness.permissions.isSuperuser = false
+      if (guard === 'token') harness.setToken('after-restore')
+      if (guard === 'unmount') harness.unmount()
+
+      if (outcome === 'success') restoreRequest.resolve()
+      else restoreRequest.reject(new Error('stale restore failure'))
+
+      assert.equal(await restoration, false)
+      await flushPromises()
+      assert.equal(harness.view.marketplaceInstalled.value, false)
+      assert.equal(harness.view.restoring.value, false)
+      assert.equal(harness.messageCalls.success.length, 0)
+      assert.equal(harness.messageCalls.error.length, 0)
+      assert.equal(harness.apiCalls.list.length, 1)
+      assert.deepEqual(harness.apiCalls.restore, [true])
+    }
+  }
+})
+
 test('SkillsView confirms localized safe-text names and deduplicates pending deletion', async () => {
   for (const locale of ['zh', 'en']) {
     const harness = createHarness({ permission: true, locale })
@@ -395,6 +620,56 @@ test('SkillsView confirms localized safe-text names and deduplicates pending del
     assert.equal(await deletion, true)
     assert.equal(harness.apiCalls.list.length, 2)
     assert.equal(harness.messageCalls.success.length, 1)
+  }
+})
+
+test('SkillsView uses a localized marketplace deletion warning and follows deletion metadata', async () => {
+  for (const locale of ['zh', 'en']) {
+    const harness = createHarness({ permission: true, locale })
+    let listLoads = 0
+    const marketplaceRow = {
+      id: 'skillhub-manual-installer',
+      name: '<img src=x onerror=alert(1)>'
+    }
+    harness.setListHandler(async () => {
+      listLoads += 1
+      return listLoads === 1
+        ? apiResponse([marketplaceRow], 1, true)
+        : apiResponse([], 0, false)
+    })
+    harness.mount()
+    await flushPromises()
+
+    const deletion = harness.view.handleDelete(marketplaceRow)
+    const common = locale === 'zh' ? zhCommon : enCommon
+    const template = common.skills.delete_marketplace_confirm
+    const expectedMessage = template
+      .replace('{name}', marketplaceRow.name)
+      .replace('{id}', marketplaceRow.id)
+    const renderedMessage = await renderToString(harness.confirmCalls[0].message)
+    assert.ok(renderedMessage.includes(escapeHtml(expectedMessage)))
+    assert.doesNotMatch(renderedMessage, /<img\b/i)
+    assert.equal(harness.confirmCalls[0].title, common.warning)
+    assert.equal(harness.confirmCalls[0].options.dangerouslyUseHTMLString, false)
+
+    harness.approveConfirmation()
+    assert.equal(await deletion, true)
+    assert.equal(harness.view.marketplaceInstalled.value, false)
+    assert.equal(harness.apiCalls.list.length, 2)
+    assert.deepEqual(harness.apiCalls.restore, [])
+
+    const ordinaryRow = { id: 'ordinary-skill', name: 'Ordinary skill' }
+    const ordinaryDeletion = harness.view.handleDelete(ordinaryRow)
+    const ordinaryTemplate = common.skills.delete_confirm
+    const ordinaryExpectedMessage = ordinaryTemplate
+      .replace('{name}', ordinaryRow.name)
+      .replace('{id}', ordinaryRow.id)
+    const ordinaryRenderedMessage = await renderToString(harness.confirmCalls[1].message)
+    assert.ok(ordinaryRenderedMessage.includes(escapeHtml(ordinaryExpectedMessage)))
+    assert.notEqual(ordinaryExpectedMessage, expectedMessage)
+    harness.cancelConfirmation()
+    assert.equal(await ordinaryDeletion, false)
+    assert.deepEqual(harness.apiCalls.restore, [])
   }
 })
 

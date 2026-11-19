@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import SQLModel
 
 import app.models  # noqa
+from app.core.builtin_skills import initialize_skill_marketplace
 from app.core.constants import (
     ERR_DATABASE_TYPE_UNSUPPORTED,
     ERR_MIGRATION_FUNCTION_MISSING,
@@ -247,6 +248,7 @@ async def create_database_tables() -> None:
 async def init_database_schema(session: AsyncSession) -> None:
     await create_database_tables()
     await run_once_migration_scripts(session)
+    await initialize_skill_marketplace(session)
 
 
 async def init_system_data(session: AsyncSession):

@@ -5,6 +5,7 @@ import pytest_asyncio
 from sqlalchemy import text
 
 import app.providers.database.bootstrap as bootstrap
+from app.core import paths
 from app.models.user import User
 
 
@@ -16,6 +17,7 @@ async def isolated_database(
 ):
     migration_scripts_dir = tmp_path / "migrations"
     migration_scripts_dir.mkdir()
+    monkeypatch.setattr(paths, "SKILLS_DIR", tmp_path / "data" / "skills")
     async with database_factory(create_schema=False, name="database.db") as session_factory:
         monkeypatch.setattr(bootstrap, "engine", session_factory.kw["bind"])
         monkeypatch.setattr(bootstrap, "MIGRATION_SCRIPTS_DIR", migration_scripts_dir)

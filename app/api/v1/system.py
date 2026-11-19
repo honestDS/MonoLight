@@ -6,10 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import check_admin_privilege
 from app.core import paths
+from app.core.builtin_skills import restore_skill_marketplace, skill_marketplace_installed
 from app.core.constants import (
     ERR_SKILL_ACCESS_FAILED,
     MSG_LOG_LIST_SUCCESS,
     MSG_SKILL_DELETED,
+    MSG_SKILL_MARKETPLACE_RESTORED,
     SKILL_PAGE_MAX_LIMIT,
 )
 from app.core.crud.system.log import system_log_crud
@@ -66,6 +68,7 @@ async def get_skills(
             offset=(page - 1) * size,
             limit=size,
         )
+        marketplace_installed = await asyncio.to_thread(skill_marketplace_installed, paths.SKILLS_DIR)
     except (OSError, RuntimeError) as exc:
         raise ServerException(ERR_SKILL_ACCESS_FAILED, cause=str(exc)) from exc
 
@@ -74,8 +77,15 @@ async def get_skills(
         total=result["total"],
         page=page,
         size=size,
+        meta={"marketplace_installed": marketplace_installed},
     )
     return StandardResponse.success(data=page_data)
+
+
+@router.post("/skills/marketplace/restore", response_model=StandardResponse)
+async def restore_marketplace():
+    await asyncio.to_thread(restore_skill_marketplace)
+    return StandardResponse.success(message=MSG_SKILL_MARKETPLACE_RESTORED)
 
 
 @router.post("/skills/delete", response_model=StandardResponse)

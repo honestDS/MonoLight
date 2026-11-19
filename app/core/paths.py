@@ -13,6 +13,7 @@ FAVICON_PATH = DASHBOARD_PUBLIC_DIR / "favicon.ico"
 
 DATA_DIR = ROOT_DIR / "data"
 SKILLS_DIR = ROOT_DIR / SKILLS_DIRECTORY
+BUILTIN_SKILLS_DIR = ROOT_DIR / "app" / "builtin_skills"
 SYSTEM_SECRETS_PATH = DATA_DIR / "system_secrets.json"
 SYSTEM_SECRETS_LOCK_PATH = DATA_DIR / "system_secrets.lock"
 LOGS_DIR = DATA_DIR / "logs"
