@@ -6,12 +6,14 @@ import pytest
 
 from app.core import paths
 from app.core.constants import (
+    ERR_ONLY_ADMIN_ALLOWED,
     SKILL_DESCRIPTION_MAX_CHARS,
     SKILL_METADATA_MAX_BYTES,
     SKILL_NAME_MAX_CHARS,
     SKILL_PAGE_MAX_LIMIT,
     SKILLS_DIRECTORY,
 )
+from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.skills import browse_skill, list_skills
 from app.core.tools.skill import SkillExecutor
@@ -469,7 +471,7 @@ def test_browse_shows_safe_internal_directory_links_without_following_them(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_skill_executor_supports_list_and_browse_only(tmp_path):
+async def test_skill_executor_supports_list_and_browse(tmp_path):
     skills_root = tmp_path / SKILLS_DIRECTORY
     package = _write_skill(skills_root, "tool-package", "---\nname: Tool Package\n---\n")
     (package / "inside.txt").write_text("content", encoding="utf-8")
@@ -482,6 +484,29 @@ async def test_skill_executor_supports_list_and_browse_only(tmp_path):
     assert [skill["id"] for skill in listed["skills"]] == ["tool-package"]
     assert browsed["status"] == "success"
     assert {entry["relative_path"] for entry in browsed["entries"]} == {"SKILL.md", "inside.txt"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", ["zh", "en"], ids=["zh", "en"])
+async def test_skill_executor_rejects_uninstall_without_runtime_context(tmp_path, locale):
+    skills_root = tmp_path / SKILLS_DIRECTORY
+    document_contents = "---\nname: Protected Package\n---\noriginal document body\n"
+    package = _write_skill(skills_root, "protected-package", document_contents)
+    resource_contents = "original resource contents"
+    (package / "inside.txt").write_text(resource_contents, encoding="utf-8")
+
+    token = set_current_locale(locale)
+    try:
+        result = json.loads(await _executor(tmp_path).execute(operation="uninstall", skill_id="protected-package"))
+        expected_error = t(ERR_ONLY_ADMIN_ALLOWED)
+    finally:
+        reset_current_locale(token)
+
+    assert result["status"] == "failed"
+    assert result["operation"] == "uninstall"
+    assert result["error"] == expected_error
+    assert (package / "SKILL.md").read_text(encoding="utf-8") == document_contents
+    assert (package / "inside.txt").read_text(encoding="utf-8") == resource_contents
 
 
 @pytest.mark.asyncio

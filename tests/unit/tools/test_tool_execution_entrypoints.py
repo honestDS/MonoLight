@@ -20,7 +20,7 @@ from app.models.profile import Profile, ProfileConfig
 
 def test_registered_tools_explicitly_declare_audit_requirement():
     assert all(isinstance(executor_class.requires_audit, bool) for executor_class in TOOL_EXECUTOR_MAP.values())
-    audited_tools = {"execute_shell", "file_tool", "terminal_tool", "manage_scheduled_tasks"}
+    audited_tools = {"execute_shell", "file_tool", "terminal_tool", "manage_scheduled_tasks", "skill_tool"}
     assert {tool_name for tool_name in TOOL_EXECUTOR_MAP if tool_requires_audit(tool_name)} == audited_tools
     assert tool_requires_audit("terminal_tool") is True
     assert "read_multimodal_file" in TOOL_EXECUTOR_MAP
@@ -65,6 +65,26 @@ def test_terminal_tool_audit_requirement_depends_on_operation(arguments, expecte
 )
 def test_manage_scheduled_tasks_audit_requirement_depends_on_operation(arguments, expected_audit):
     assert tool_requires_audit("manage_scheduled_tasks", arguments) is expected_audit
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_audit"),
+    [
+        ({"operation": "list"}, False),
+        ({"operation": "browse"}, False),
+        ({"operation": "uninstall"}, True),
+        ({"operation": "read"}, True),
+        ({"operation": "resize"}, True),
+        ({"operation": "unknown"}, True),
+        (None, True),
+        ({}, True),
+        ({"operation": None}, True),
+        ({"operation": []}, True),
+        ({"operation": {}}, True),
+    ],
+)
+def test_skill_tool_audit_requirement_depends_on_operation(arguments, expected_audit):
+    assert tool_requires_audit("skill_tool", arguments) is expected_audit
 
 
 @pytest.mark.parametrize(

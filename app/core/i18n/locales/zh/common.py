@@ -401,7 +401,7 @@ MESSAGES = {
     "ERR_TOOL_TODO_REVISION_CONFLICT": "Todo 计划版本已变化，请先读取当前计划后重试",
     "ERR_TOOL_TODO_REPLACE_EXISTING_REQUIRED": "当前 Todo 计划仍有未完成项，如需整体替换必须设置 replace_existing=true",
     "MSG_TOOL_KNOWLEDGE_SOURCE_UNKNOWN": "未知来源",
-    "ERR_SKILL_OPERATION_INVALID": "技能操作无效，仅支持 list、browse",
+    "ERR_SKILL_OPERATION_INVALID": "技能操作无效，仅支持 list、browse、uninstall",
     "ERR_SKILL_ID_INVALID": "技能标识无效，必须使用列表返回的单个目录名",
     "ERR_SKILL_PATH_INVALID": "技能路径无效或超出当前技能目录",
     "ERR_SKILL_NOT_FOUND": "技能或文件不存在",

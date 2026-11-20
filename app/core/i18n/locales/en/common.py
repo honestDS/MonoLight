@@ -329,7 +329,7 @@ MESSAGES = {
     "MSG_BACKGROUND_TASK_QUEUED": "Tool {tool_name} has been queued as a background task. The system will automatically trigger a follow-up reply when it finishes; do not wait or query the background task list now, and do not proactively send the task result. Only query its status if the user explicitly asks later.",
     "ERR_TOOL_NOT_ENABLED": "Tool {tool_name} is not enabled in the selected profile",
     "ERR_TOOL_NOT_REGISTERED": "Tool {tool_name} is not registered",
-    "ERR_SKILL_OPERATION_INVALID": "Invalid skill operation; only list and browse are supported",
+    "ERR_SKILL_OPERATION_INVALID": "Invalid skill operation; only list, browse, and uninstall are supported",
     "ERR_SKILL_ID_INVALID": "Invalid skill identifier; use a single directory name returned by the list operation",
     "ERR_SKILL_PATH_INVALID": "Path is invalid or outside the current skill directory",
     "ERR_SKILL_NOT_FOUND": "Skill or file not found",

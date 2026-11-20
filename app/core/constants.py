@@ -742,7 +742,7 @@ AGENT_WORK_TOOL_NAME = "agent_work"
 TERMINAL_TOOL_NAME = "terminal_tool"
 TERMINAL_TOOL_OPERATIONS = ("read", "write", "resize", "close")
 # 仅精确匹配工具及操作的组合无需审计。
-TOOL_AUDIT_EXEMPT_OPERATIONS = frozenset({(TERMINAL_TOOL_NAME, "read"), (TERMINAL_TOOL_NAME, "resize"), (MANAGE_SCHEDULED_TASKS_TOOL_NAME, "list")})
+TOOL_AUDIT_EXEMPT_OPERATIONS = frozenset({(TERMINAL_TOOL_NAME, "read"), (TERMINAL_TOOL_NAME, "resize"), (MANAGE_SCHEDULED_TASKS_TOOL_NAME, "list"), (SKILL_TOOL_NAME, "list"), (SKILL_TOOL_NAME, "browse")})
 ERR_TERMINAL_TOOL_OPERATION_INVALID = "ERR_TERMINAL_TOOL_OPERATION_INVALID"
 TERMINAL_READ_MAX_BYTES = 16 * 1024
 TERMINAL_WATCH_TOOL_NAME = "terminal_watch"
@@ -755,7 +755,7 @@ TOOL_WORKFLOW_POLICIES = {
     TOOL_WORKFLOW_FOREGROUND: {
         MANAGE_TODO_TOOL_NAME: {"operation": ("read", "write")},
         END_SESSION_TOOL_NAME: {},
-        SKILL_TOOL_NAME: {"operation": ("list", "browse")},
+        SKILL_TOOL_NAME: {"operation": ("list", "browse", "uninstall")},
         SHELL_TOOL_NAME: {"execution_mode": ("non_interactive", "interactive")},
         FILE_TOOL_NAME: {"operation": ("read", "write", "edit", "patch", "grep")},
         WEB_TOOL_NAME: {"operation": ("search", "scrape")},
@@ -782,7 +782,7 @@ TOOL_WORKFLOW_POLICIES = {
     },
     TOOL_WORKFLOW_SCHEDULED_TASK: {
         END_SESSION_TOOL_NAME: {},
-        SKILL_TOOL_NAME: {"operation": ("list", "browse")},
+        SKILL_TOOL_NAME: {"operation": ("list", "browse", "uninstall")},
         SHELL_TOOL_NAME: {"execution_mode": ("non_interactive", "interactive")},
         FILE_TOOL_NAME: {"operation": ("read", "write", "edit", "patch", "grep")},
         WEB_TOOL_NAME: {"operation": ("search", "scrape")},
@@ -808,7 +808,7 @@ TOOL_WORKFLOW_POLICIES = {
     TOOL_WORKFLOW_SUBAGENT: {
         END_SESSION_TOOL_NAME: {},
         AGENT_WORK_TOOL_NAME: {"operation": ("board_post",)},
-        SKILL_TOOL_NAME: {"operation": ("list", "browse")},
+        SKILL_TOOL_NAME: {"operation": ("list", "browse", "uninstall")},
         SHELL_TOOL_NAME: {"execution_mode": ("non_interactive", "interactive")},
         FILE_TOOL_NAME: {"operation": ("read", "write", "edit", "patch", "grep")},
         WEB_TOOL_NAME: {"operation": ("search", "scrape")},
