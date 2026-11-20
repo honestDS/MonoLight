@@ -164,10 +164,23 @@ async def test_context_summary_reduction_splits_repeated_range_and_completes(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["success", "no-progress", "insufficient"], ids=["success", "no-progress", "insufficient"])
+@pytest.mark.parametrize(
+    ("covered_user_content", "near_limit_fact_count"),
+    [
+        ("recent question", 725),
+        (
+            "Produce the complete itemized procurement report. Preserve source records, verify each quantity and amount, and flag unresolved approvals before delivery.\n" * 10,
+            550,
+        ),
+    ],
+    ids=["short-request", "long-request"],
+)
 async def test_context_summary_checkpoint_refines_against_complete_request_budget(
     context_summary_database: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
+    covered_user_content: str,
+    near_limit_fact_count: int,
 ) -> None:
     await _seed_summary_history(context_summary_database)
     async with context_summary_database() as db:
@@ -176,7 +189,10 @@ async def test_context_summary_checkpoint_refines_against_complete_request_budge
         session.context_summary_message_id = 2
         session.context_summary_revision = 3
         session.context_content_revision = 7
-        history = list((await db.execute(select(Message).where(Message.session_id == "summary-session", Message.id.in_([3, 4])))).scalars())
+        covered_user_message = await db.get(Message, 3)
+        assert covered_user_message is not None
+        covered_user_message.content = covered_user_content
+        history = list((await db.execute(select(Message).where(Message.session_id == "summary-session", Message.id.in_([4])))).scalars())
         for message in history:
             message.content = "history evidence " * 2000
         db.add(
@@ -198,8 +214,8 @@ async def test_context_summary_checkpoint_refines_against_complete_request_budge
     )
     first_summary = ("fact " * 1_400).strip()
     summary_1_200 = ("fact " * 1_200).strip()
-    near_limit_summary = ("fact " * 725).strip()
-    slightly_smaller_summary = ("fact " * 721).strip()
+    near_limit_summary = ("fact " * near_limit_fact_count).strip()
+    slightly_smaller_summary = ("fact " * (near_limit_fact_count - 4)).strip()
     short_summary = "short summary"
     model_prompts: list[str] = []
     response_sequences = {
@@ -253,7 +269,11 @@ async def test_context_summary_checkpoint_refines_against_complete_request_budge
 
     def candidate_messages(summary: str) -> list[InternalMessage]:
         summary_message = ContextSummaryState(
-            content=StoredConversationSummary(conversation_summary=summary).model_dump_json(exclude_none=True),
+            content=StoredConversationSummary(
+                conversation_summary=summary,
+                user_message=covered_user_content,
+                covered_user_message_id=3,
+            ).model_dump_json(exclude_none=True),
             message_id=4,
         ).as_message()
         assert summary_message is not None
@@ -276,6 +296,10 @@ async def test_context_summary_checkpoint_refines_against_complete_request_budge
     assert 0 < near_limit_tokens - slightly_smaller_tokens < CONTEXT_SUMMARY_MIN_REFINEMENT_REDUCTION_TOKENS
     assert request_tokens(candidate_messages(near_limit_summary)) > target_tokens
     assert request_tokens(candidate_messages(slightly_smaller_summary)) > target_tokens
+    if covered_user_content != "recent question":
+        candidate_without_user_message = candidate_messages(near_limit_summary)
+        candidate_without_user_message[1].content = None
+        assert request_tokens(candidate_without_user_message) <= target_tokens
 
     checkpoint_kwargs = {
         "session_id": "summary-session",
@@ -308,8 +332,8 @@ async def test_context_summary_checkpoint_refines_against_complete_request_budge
         assert checkpointed_summary_meta is not None
         assert checkpointed_summary_meta.content == short_summary
         assert checkpointed_summary_meta.through_message_id == 4
-        assert checkpointed_summary_meta.covered_user_message_id is None
-        assert checkpointed[1].content is None
+        assert checkpointed_summary_meta.covered_user_message_id == 3
+        assert checkpointed[1].content == covered_user_content
         assert checkpointed[2].id == 5
         assert len(model_prompts) == 4
     else:
@@ -328,7 +352,10 @@ async def test_context_summary_checkpoint_refines_against_complete_request_budge
 
     if mode == "success":
         assert session.context_summary is not None
-        assert StoredConversationSummary.model_validate_json(session.context_summary).conversation_summary == short_summary
+        saved_summary = StoredConversationSummary.model_validate_json(session.context_summary)
+        assert saved_summary.conversation_summary == short_summary
+        assert saved_summary.covered_user_message_id == 3
+        assert saved_summary.user_message == covered_user_content
         assert session.context_summary_message_id == 4
         assert session.context_summary_revision == 4
     else:

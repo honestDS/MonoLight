@@ -466,7 +466,7 @@ async def test_context_summary_output_budget_failure_preserves_saved_summary_and
                 await db.execute(
                     select(Message).where(
                         Message.session_id == "summary-session",
-                        Message.id.in_([3, 4]),
+                        Message.id == 4,
                     )
                 )
             ).scalars()
@@ -569,7 +569,10 @@ async def test_context_summary_output_budget_failure_preserves_saved_summary_and
         async with context_summary_database() as db:
             generated_state = await context_summary_service.ensure_context_summary(db, **ensure_kwargs)
         assert generated_state.content is not None
-        assert StoredConversationSummary.model_validate_json(generated_state.content).conversation_summary == "complete fallback summary"
+        generated_summary = StoredConversationSummary.model_validate_json(generated_state.content)
+        assert generated_summary.conversation_summary == "complete fallback summary"
+        assert generated_summary.user_message == "recent question"
+        assert generated_summary.covered_user_message_id == 3
         assert generated_state.message_id == 4
         assert generated_state.revision == 4
         assert generated_state.content_revision == 7
@@ -608,11 +611,15 @@ async def test_context_summary_output_budget_failure_preserves_saved_summary_and
     stored_summary = StoredConversationSummary.model_validate_json(session.context_summary)
     if fallback_succeeds:
         assert stored_summary.conversation_summary == "complete fallback summary"
+        assert stored_summary.user_message == "recent question"
+        assert stored_summary.covered_user_message_id == 3
         assert session.context_summary_message_id == 4
         assert session.context_summary_revision == 4
         assert session.context_content_revision == 7
     else:
         assert stored_summary.conversation_summary == "stable saved summary"
+        assert stored_summary.user_message is None
+        assert stored_summary.covered_user_message_id is None
         assert session.context_summary_message_id == 2
         assert session.context_summary_revision == 3
         assert session.context_content_revision == 7

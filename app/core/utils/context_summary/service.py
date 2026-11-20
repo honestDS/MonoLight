@@ -407,7 +407,7 @@ async def _ensure_context_summary(
     covered_user_message_id = stored_summary.covered_user_message_id
     covered_user_message_content = stored_summary.user_message
     covered_user_request = state.covered_user_request
-    if boundary is not None and boundary.trigger_mode == ContextSummaryTriggerMode.TOOL_RESULT and boundary.covered_user_message_id is not None:
+    if boundary is not None and boundary.covered_user_message_id is not None:
         covered_user_message_id = boundary.covered_user_message_id
         covered_user_message_content = boundary.covered_user_message_content
         covered_user_request = _find_live_covered_user_request(
@@ -415,15 +415,15 @@ async def _ensure_context_summary(
             message_id=covered_user_message_id,
             previous_request=state.as_message(),
         )
-        if covered_user_request is not None:
-            covered_user_message_content = covered_user_request.content
-        else:
-            covered_user_request = await _load_covered_user_request(
-                db,
-                session_id=session_id,
-                uid=uid,
-                message_id=covered_user_message_id,
-            )
+    if covered_user_request is not None and isinstance(covered_user_request.content, str):
+        covered_user_message_content = covered_user_request.content
+    if covered_user_request is None and covered_user_message_id is not None:
+        covered_user_request = await _load_covered_user_request(
+            db,
+            session_id=session_id,
+            uid=uid,
+            message_id=covered_user_message_id,
+        )
     todo_snapshot = None
     watch_snapshot = None
     if isinstance(db, AsyncSession) and isinstance(profile.id, int) and not isinstance(profile.id, bool) and profile.id > 0:

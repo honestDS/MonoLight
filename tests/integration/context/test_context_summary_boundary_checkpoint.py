@@ -10,8 +10,10 @@ from app.core.context import ContextManager
 from app.core.utils.context_budget import calculate_context_summary_trigger_tokens
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.context_summary import cleanup as cleanup_module
+from app.core.utils.context_summary import merge as merge_module
 from app.core.utils.context_summary import reduction as reduction_module
 from app.core.utils.context_summary import service as service_module
+from app.core.utils.context_summary import stage as stage_module
 from app.core.utils.context_summary.boundary import (
     ContextSummaryTriggerMode,
     resolve_context_summary_boundary,
@@ -34,10 +36,12 @@ from app.core.utils.dispatcher.markdown_instruction import materialize_user_envi
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage
-from app.models.message import InternalMessage, Message, MessageContentFormat, MessageRole, MessageType, StoredConversationSummary
+from app.models.message import InternalMessage, InternalResponse, Message, MessageContentFormat, MessageRole, MessageType, StoredConversationSummary
+from app.models.profile import ProfileConfig
 from app.models.session import ChatSession
 from app.models.session_todo import SessionTodoPlan
-from app.providers.llm.client import estimate_request_context_tokens
+from app.providers.llm.client import LLMClient, estimate_request_context_tokens
+from tests.integration.context.context_summary_workflow_support import _summary_rejection_models
 
 
 def _message(
@@ -119,8 +123,8 @@ def _build_checkpoint_case(case_name: str, multimodal_kind: str | None = None) -
         expected_retained_result_ids: list[str],
         protected_tool_call_ids: set[str] | None = None,
         extra_messages: list[InternalMessage] | None = None,
-        expected_covered_user_message_id: int | None = None,
-        expected_covered_user_message_content: str | None = None,
+        expected_covered_user_message_id: int | None = 1,
+        expected_covered_user_message_content: str | None = "historical request " * 40,
     ) -> dict:
         return {
             "rows": rows,
@@ -419,10 +423,7 @@ async def test_user_checkpoint_uses_completed_tool_batch_boundary_and_preserves_
     assert materialized_payload["current_session_todo"] == expected_todo
     assert "through_message_id" not in materialized_payload
     assert "covered_user_message_id" not in materialized_payload
-    if test_case["expected_covered_user_message_id"] is None:
-        assert materialized_payload["user_message"] is None
-    else:
-        assert materialized_payload["user_message"] == test_case["expected_covered_user_message_content"]
+    assert materialized_payload["user_message"] == test_case["expected_covered_user_message_content"]
 
     original_messages_by_id = {message.id: message for message in parsed_messages if message.id is not None}
     for message in result[summary_index + 1 :]:
@@ -438,12 +439,8 @@ async def test_user_checkpoint_uses_completed_tool_batch_boundary_and_preserves_
     stored_summary = StoredConversationSummary.model_validate_json(session.context_summary)
     assert stored_summary.conversation_summary == "short model summary"
     assert stored_summary.current_session_todo == expected_todo
-    if test_case["expected_covered_user_message_id"] is None:
-        assert stored_summary.user_message is None
-        assert stored_summary.covered_user_message_id is None
-    else:
-        assert stored_summary.user_message == test_case["expected_covered_user_message_content"]
-        assert stored_summary.covered_user_message_id == test_case["expected_covered_user_message_id"]
+    assert stored_summary.user_message == test_case["expected_covered_user_message_content"]
+    assert stored_summary.covered_user_message_id == test_case["expected_covered_user_message_id"]
 
     if case_name in {"complete_reverse", "complete_after_background_result"}:
         summary_environment = json.loads(summary_message.environment_prompt or "{}")
@@ -1121,21 +1118,204 @@ def test_covered_user_message_round_trips_boundary_like_content_exactly():
     assert restored.user_message == content
 
 
-def test_appending_covered_user_message_replaces_old_block_instead_of_accumulating():
-    first = StoredConversationSummary(
-        conversation_summary="模型总结",
-        user_message="旧目标",
-        covered_user_message_id=10,
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trigger_mode", "message_6_type"),
+    [
+        pytest.param(ContextSummaryTriggerMode.USER_MESSAGE, MessageType.TEXT, id="user-message-text"),
+        pytest.param(ContextSummaryTriggerMode.USER_MESSAGE, MessageType.BACKGROUND_TASK_RESULT, id="user-message-background-result"),
+        pytest.param(ContextSummaryTriggerMode.TOOL_RESULT, MessageType.BACKGROUND_TASK_RESULT, id="tool-result-background-result"),
+    ],
+)
+@pytest.mark.parametrize(
+    "include_covered_user_message",
+    [pytest.param(False, id="restore-runtime-from-database"), pytest.param(True, id="use-live-summary-source")],
+)
+async def test_appending_covered_user_message_replaces_old_block_instead_of_accumulating(
+    db_session: AsyncSession,
+    monkeypatch,
+    trigger_mode: ContextSummaryTriggerMode,
+    message_6_type: MessageType,
+    include_covered_user_message: bool,
+):
+    old_user_content = "旧用户原话"
+    covered_user_content = '请处理这份清单：中文“引号”和 "双引号"。\n<request id="3">保留这些类似 XML 的文本</request>\n不要改写或拼接。'
+    background_notification = json.dumps(
+        {
+            "type": "background_tool_result",
+            "task_id": 44,
+            "task": {"result": "后台结果通知，不是用户原话"},
+        },
+        ensure_ascii=False,
     )
-    replaced = first.model_copy(
-        update={"user_message": "新目标", "covered_user_message_id": 20},
-    )
-    restored = StoredConversationSummary.model_validate_json(replaced.model_dump_json(exclude_none=True))
+    later_user_content = "第七条更晚用户消息，不应纳入这次总结"
 
-    assert restored.conversation_summary == "模型总结"
-    assert restored.covered_user_message_id == 20
-    assert restored.user_message == "新目标"
-    assert "旧目标" not in restored.user_message
+    old_user = _checkpoint_user_message(1, old_user_content)
+    old_user.environment_prompt = json.dumps(
+        {
+            "environment": {"runtime_context": "old runtime context"},
+            "platform_constraints": "old platform constraint",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    old_user.guidance_prompt = "old guidance prompt"
+    covered_user = _checkpoint_user_message(3, covered_user_content)
+    covered_user.environment_prompt = json.dumps(
+        {
+            "environment": {"runtime_context": "new runtime context"},
+            "platform_constraints": "new platform constraint",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    covered_user.guidance_prompt = "new guidance prompt"
+    tool_result = _tool_result(5, "call-1")
+    tool_result.content = json.dumps(
+        {
+            "role": MessageRole.TOOL,
+            "tool_call_id": "call-1",
+            "content": "真实工具结果 " * 1200,
+        },
+        ensure_ascii=False,
+    )
+    message_6_content = "第六条未总结的新用户消息"
+    if message_6_type == MessageType.BACKGROUND_TASK_RESULT:
+        message_6_content = background_notification
+    rows = [
+        old_user,
+        _message(2, MessageRole.ASSISTANT, content="旧回复"),
+        covered_user,
+        _tool_call(4, "call-1"),
+        tool_result,
+        _message(6, MessageRole.USER, message_type=message_6_type, content=message_6_content),
+        _message(7, MessageRole.USER, content=later_user_content),
+    ]
+    await _seed_checkpoint_case(db_session, rows, monkeypatch)
+
+    session = await db_session.get(ChatSession, "session-1")
+    assert session is not None
+    session.context_summary = StoredConversationSummary(
+        conversation_summary="旧总结",
+        user_message=old_user_content,
+        covered_user_message_id=1,
+    ).model_dump_json(exclude_none=True)
+    session.context_summary_message_id = 2
+    await db_session.commit()
+
+    raw_rows = await _load_checkpoint_rows(db_session)
+    raw_snapshot = _message_snapshot(raw_rows)
+    parsed_messages = parse_db_messages_to_internal(raw_rows)
+    original_messages_by_id = {message.id: message for message in parsed_messages if message.id is not None}
+
+    session_factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    for module in (stage_module, merge_module, reduction_module):
+        monkeypatch.setattr(module, "AsyncSessionLocal", session_factory)
+
+    summary_model = _summary_rejection_models()[1]
+
+    async def select_model(*_args, **_kwargs):
+        return summary_model
+
+    async def generate_model(**_kwargs):
+        return InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="新的简短总结"),
+            model=summary_model.model_id,
+            finish_reason="stop",
+        )
+
+    monkeypatch.setattr(stage_module, "select_context_summary_model", select_model)
+    monkeypatch.setattr(LLMClient, "generate", generate_model)
+
+    if include_covered_user_message:
+        summary_source_messages = parsed_messages
+    else:
+        summary_source_messages = [message for message in parsed_messages if message.id != 3]
+
+    if trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE:
+        fixed_upper_message_id = 6
+    else:
+        fixed_upper_message_id = 5
+
+    result = await checkpoint_module.apply_context_summary_checkpoint(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=1),
+        cfg=ProfileConfig.model_validate({}),
+        messages=[InternalMessage(role=MessageRole.SYSTEM, content="system prompt"), *summary_source_messages],
+        trigger_mode=trigger_mode,
+        fixed_upper_message_id=fixed_upper_message_id,
+        context_window_k=8,
+        max_tokens=128,
+        tools=None,
+        force=True,
+    )
+
+    summary_message = next(message for message in result if message.conversation_summary is not None)
+    summary_meta = summary_message.conversation_summary
+    assert summary_meta is not None
+    assert summary_meta.through_message_id == 5
+    assert summary_meta.covered_user_message_id == 3
+    assert summary_message.content == covered_user_content
+    assert summary_message.environment_prompt == covered_user.environment_prompt
+    assert summary_message.guidance_prompt == covered_user.guidance_prompt
+    assert [message.id for message in result if message.id is not None] == [6, 7]
+    retained_messages = [message for message in result if message.id is not None]
+    assert [message.content for message in retained_messages] == [
+        original_messages_by_id[6].content,
+        original_messages_by_id[7].content,
+    ]
+
+    materialized_summary = materialize_user_environment_prompts([summary_message])[0]
+    assert isinstance(materialized_summary.content, str)
+    materialized_payload = json.loads(materialized_summary.content)
+    assert materialized_payload["conversation_summary"] == "新的简短总结"
+    assert materialized_payload["user_message"] == covered_user_content
+    assert materialized_payload["environment"]["runtime_context"] == "new runtime context"
+    assert materialized_payload["platform_constraints"] == "new platform constraint"
+    assert materialized_payload["platform_guidance"] == "new guidance prompt"
+
+    db_session.expire_all()
+    restored_state = await service_module.get_context_summary_state(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+    )
+    restored_message = restored_state.as_message()
+    assert restored_message is not None
+    assert restored_state.message_id == 5
+    assert restored_message.content == covered_user_content
+    assert restored_message.environment_prompt == covered_user.environment_prompt
+    assert restored_message.guidance_prompt == covered_user.guidance_prompt
+    restored_meta = restored_message.conversation_summary
+    assert restored_meta is not None
+    assert restored_meta.through_message_id == 5
+    assert restored_meta.covered_user_message_id == 3
+
+    materialized_restored = materialize_user_environment_prompts([restored_message])[0]
+    assert isinstance(materialized_restored.content, str)
+    restored_payload = json.loads(materialized_restored.content)
+    assert restored_payload["user_message"] == covered_user_content
+    assert restored_payload["environment"]["runtime_context"] == "new runtime context"
+    assert restored_payload["platform_constraints"] == "new platform constraint"
+    assert restored_payload["platform_guidance"] == "new guidance prompt"
+
+    session = await db_session.get(ChatSession, "session-1")
+    assert session is not None
+    await db_session.refresh(session)
+    assert session.context_summary_message_id == 5
+    assert session.context_summary is not None
+    stored_summary = StoredConversationSummary.model_validate_json(session.context_summary)
+    assert stored_summary.conversation_summary == "新的简短总结"
+    assert stored_summary.user_message == covered_user_content
+    assert stored_summary.covered_user_message_id == 3
+    assert stored_summary.user_message != old_user_content
+    assert stored_summary.user_message != message_6_content
+    assert stored_summary.user_message != later_user_content
+
+    db_session.expire_all()
+    assert _message_snapshot(await _load_checkpoint_rows(db_session)) == raw_snapshot
 
 
 @pytest.mark.asyncio

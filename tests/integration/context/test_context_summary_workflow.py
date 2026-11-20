@@ -372,7 +372,7 @@ async def test_checkpoint_summary_threshold_uses_persisted_provider_usage_not_lo
     async with context_summary_database() as db:
         session = (await db.execute(select(ChatSession).where(ChatSession.session_id == "summary-session"))).scalar_one()
         history = list((await db.execute(select(Message).where(Message.session_id == "summary-session").order_by(Message.id))).scalars())
-        history[0].content = "very large historical question " * 2000
+        history[0].content = "historical question"
         history[1].content = "very large historical answer " * 2000
         session.llm_request_metadata = {
             "channel_id": 11,
@@ -473,14 +473,17 @@ async def test_checkpoint_summary_threshold_uses_persisted_provider_usage_not_lo
     assert compacted_summary_meta is not None
     assert compacted_summary_meta.content == "provider-triggered summary"
     assert compacted_summary_meta.through_message_id == 2
-    assert compacted_summary_meta.covered_user_message_id is None
-    assert compacted[1].content is None
+    assert compacted_summary_meta.covered_user_message_id == 1
+    assert compacted[1].content == "historical question"
     assert [message.id for message in compacted[2:]] == [3, 4]
 
     async with context_summary_database() as db:
         session = (await db.execute(select(ChatSession).where(ChatSession.session_id == "summary-session"))).scalar_one()
         assert session.context_summary is not None
-        assert StoredConversationSummary.model_validate_json(session.context_summary).conversation_summary == "provider-triggered summary"
+        stored_summary = StoredConversationSummary.model_validate_json(session.context_summary)
+        assert stored_summary.conversation_summary == "provider-triggered summary"
+        assert stored_summary.user_message == "historical question"
+        assert stored_summary.covered_user_message_id == 1
         assert session.context_summary_message_id == 2
 
 
