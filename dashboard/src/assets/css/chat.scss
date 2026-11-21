@@ -656,6 +656,8 @@
 
       .content {
         display: inline-block;
+        max-width: 100%;
+        box-sizing: border-box;
         padding: 11px 15px;
         line-height: 1.65;
         word-break: break-word;
