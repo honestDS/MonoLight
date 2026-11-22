@@ -74,6 +74,14 @@ DATABASE_URL=sqlite+aiosqlite:///./data/monolight.db
 APP_HOST=0.0.0.0
 APP_PORT=8001
 APP_WORKERS=1
+
+# 本机通知中心监听地址（支持 IPv4/IPv6，包括 0.0.0.0 和 ::）
+NOTIFICATION_HOST=127.0.0.1
+NOTIFICATION_PORT=8766
+# 留空时由 start.py 启动本机中心；远程节点填写共享中心 IP
+NOTIFICATION_SERVER_HOST=
+# 可选：64 个十六进制字符；留空时从现有系统密钥派生
+NOTIFICATION_TOKEN=
 ```
 
 3. **一键启动**：
@@ -110,11 +118,26 @@ python start.py
 <details>
 <summary>架构简述：MonoLight 是怎么跑起来的？</summary>
 
-运行 `python start.py` 后，启动器会自动检查前端资源、初始化系统密钥与数据库，并拉起 **1 个 Web 服务 + 3 个后台 Worker 进程**：
+运行 `python start.py` 后，启动器会自动检查前端资源并初始化系统密钥与数据库。`NOTIFICATION_SERVER_HOST` 留空时，启动器按 `NOTIFICATION_HOST` 和 `NOTIFICATION_PORT` 启动本机通知中心并确认就绪；填写共享中心 IP 时，则连接并验证该中心，不启动本机中心。随后启动 **1 个 Web 服务 + 3 个业务 Worker**：
+- **通知中心**：提供支持跨机器连接的 TCP 发布/订阅，仅传递唤醒提示和资源引用；任务保存与领取仍由数据库负责。
 - **Web 服务**：同时托管网页工作台、HTTP/WebSocket 接口与对话接入入口。
 - **`general` Worker**：负责消息平台收发、定时/后台任务执行和会话回复协调（三个角色通过数据库租约各自抢占）。
 - **`memory` Worker**：专门负责长期记忆与知识库的异步整理、向量化和发布。
 - **`terminal` Worker**：专门托管持久化的交互式终端会话，与主服务做故障隔离。
+
+多机部署时，可在主节点将 `NOTIFICATION_HOST` 设为 `0.0.0.0`（或适用的 IPv6 监听地址），并让 `NOTIFICATION_SERVER_HOST` 留空以启动中心；其他节点将 `NOTIFICATION_SERVER_HOST` 填为主节点 IP。所有节点使用相同的 `NOTIFICATION_PORT`。`NOTIFICATION_HOST` 与 `NOTIFICATION_SERVER_HOST` 仅接受 IP 地址，不支持域名、URL 或 `host:port`；`NOTIFICATION_HOST` 是本机中心的监听地址，只有启动本机中心时使用。通知仍通过原 TCP 协议传输，内置不提供 TLS；跨机器部署应限于可信内网，或使用 VPN/加密隧道，并通过防火墙限制可连接来源。
+
+general 的会话回复、后台任务、定时任务、消息平台配置与发件箱投递，现通过提交后通知、最近到期时间和定期补查唤醒；数据库继续负责任务持久化、领取与续租。Web、memory 和 terminal 共用通知发布器；memory 和 terminal 本次仅接入发布器，自身任务消费流程不变。
+
+通知协议使用 UTF-8 编码的单行 JSON，`version` 是公共字段，`type` 标识帧类型；`request_id` 用于请求/响应帧，`EventFrame` 本身不含 `request_id`。发布帧 `type` 为 `publish`，`notification` 字段包含 `notification_id`、`topic`、`event`、`source`、`occurred_at`、`available_at`、`scope`、`resource`、`correlation_id` 和 `data`；其中 `topic`、`event`、`source` 必填，其他有默认值的字段可省略：
+
+```json
+{"version":1,"type":"publish","request_id":"req-1","notification":{"notification_id":"n-1","topic":"task.background","event":"task.created","source":"web","resource":{"type":"task","id":"123"}}}
+```
+
+`resource.id` 统一使用字符串，以兼容整型任务 ID 和终端 ID。通知主题覆盖 `session.reply`、`task.background`、`task.scheduled`、`message_platform.outbox`、`memory.job`、`knowledge.job`、`terminal.session`、`terminal.command` 等，也允许自定义。中心按 `topic` 广播；`scope` 可用 `uid`、`session_id`、`profile_id`、`worker_id` 等字段提示业务定位，不作为授权依据；`source` 以认证连接的 `client_id` 为准。发布确认回执表示中心已接收；`recipient_count` 表示成功排入当前匹配订阅连接的数量。若为 `0`，中心不会保存通知等待后来订阅；发布确认也不代表业务已完成。订阅首次连接或重连时都会收到 `ReadyFrame`，接入通知的消费者据此补查数据库。任务提交成功后才发布通知；`available_at` 仅作提示，定时处理仍由消费者负责。
+
+通知认证 token 可通过 `NOTIFICATION_TOKEN` 覆盖：配置值会先去除首尾空白并转为小写，必须是 64 个十六进制字符，且所有连接同一中心的节点必须配置相同值。留空时仍从现有系统密钥经 HMAC 派生；只有各节点系统密钥一致时，跨机派生的 token 才会一致。跨机器部署建议使用专用随机通知凭证，并通过安全配置渠道分发；不要将实际系统密钥或通知凭证写入 README 或提交到版本库。
 
 任一后台进程异常退出时，启动器会自动清理其余进程；多台机器连接同一个数据库时，各 Worker 会自动竞争租约并在节点下线后自动接管。
 
@@ -152,8 +175,11 @@ npm run serve
 
 如需单独调试各进程，先执行一次初始化，再分别启动：
 
+`NOTIFICATION_SERVER_HOST` 留空的本机中心节点可运行通知中心进程；已配置共享中心的远程节点只需连接该中心，应跳过 `python -m app.workers.notification`。
+
 ```bash
 python -c "import asyncio; from start import initialize_system; asyncio.run(initialize_system())"
+python -m app.workers.notification
 python main.py
 python -m app.workers.general
 python -m app.workers.memory

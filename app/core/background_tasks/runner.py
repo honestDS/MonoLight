@@ -8,7 +8,7 @@ from typing import Any
 from app.core.background_tasks.external_work import resume_external_work_for_task
 from app.core.background_tasks.terminal_watch_coordinator import complete_terminal_watch_round
 from app.core.confirmation import update_confirmation_message_status
-from app.core.constants import BACKGROUND_TASK_CONTROL_POLL_INTERVAL_SECONDS, ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_TOOL_EXECUTION_TIMEOUT, ERR_TOOL_NOT_REGISTERED, TERMINAL_WATCH_TOOL_NAME
+from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_TOOL_EXECUTION_TIMEOUT, ERR_TOOL_NOT_REGISTERED, NOTIFICATION_RECONCILE_INTERVAL_SECONDS, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.task.background import background_task_crud
@@ -16,6 +16,7 @@ from app.core.dispatchers.context import build_background_dispatch_context
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.notifications.inbox import NotificationInbox
 from app.core.tools import TOOL_EXECUTOR_MAP
 from app.core.tools.timeout import resolve_tool_execution_timeout
 from app.core.utils.background_task_result import build_background_task_failure_result, build_background_task_success_result, serialize_execution_summary
@@ -145,9 +146,10 @@ async def _resume_external_task_if_bound(task: BackgroundTask) -> None:
         )
 
 
-async def _watch_task_control(task_id: int, worker_id: str, log: Any) -> bool:
+async def _watch_task_control(task_id: int, worker_id: str, log: Any, *, inbox: NotificationInbox | None = None) -> bool:
+    control_inbox = inbox if inbox is not None else NotificationInbox()
     while True:
-        await asyncio.sleep(BACKGROUND_TASK_CONTROL_POLL_INTERVAL_SECONDS)
+        control_inbox.take()
         try:
             async with AsyncSessionLocal() as db:
                 task = await background_task_crud.get(db, task_id)
@@ -155,6 +157,7 @@ async def _watch_task_control(task_id: int, worker_id: str, log: Any) -> bool:
             raise
         except Exception as exc:
             log.error(f"Failed to inspect background task control: {exc}", exc_info=True)
+            await control_inbox.wait(NOTIFICATION_RECONCILE_INTERVAL_SECONDS)
             continue
 
         if task is None:
@@ -166,6 +169,7 @@ async def _watch_task_control(task_id: int, worker_id: str, log: Any) -> bool:
         if task.status == BackgroundTaskStatus.RUNNING and task.locked_by != worker_id:
             log.warning(t("LOG_BACKGROUND_TASK_LEASE_LOST"))
             return False
+        await control_inbox.wait(NOTIFICATION_RECONCILE_INTERVAL_SECONDS)
 
 
 async def _renew_task_lease(task_id: int, worker_id: str, log: Any) -> bool:
@@ -227,7 +231,12 @@ async def _release_task_claim(task_id: int, worker_id: str, log: Any, expected_l
         )
 
 
-async def run_background_task(task_id: int, *, worker_id: str | None = None) -> None:
+async def run_background_task(
+    task_id: int,
+    *,
+    worker_id: str | None = None,
+    control_inbox: NotificationInbox | None = None,
+) -> None:
     worker = worker_id or str(uuid.uuid4())
     log = logger.bind(task_id=task_id, worker_id=worker)
 
@@ -246,7 +255,7 @@ async def run_background_task(task_id: int, *, worker_id: str | None = None) -> 
 
     execution_task = asyncio.create_task(_execute_claimed_background_task(task_id, worker, log))
     lease_task = asyncio.create_task(_renew_task_lease(task_id, worker, log))
-    control_task = asyncio.create_task(_watch_task_control(task_id, worker, log))
+    control_task = asyncio.create_task(_watch_task_control(task_id, worker, log, inbox=control_inbox))
     try:
         done, _pending = await asyncio.wait(
             {execution_task, lease_task, control_task},

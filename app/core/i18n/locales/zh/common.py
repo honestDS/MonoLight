@@ -1,6 +1,11 @@
 from app.core.constants import SEND_FILE_TO_USER_TOOL_NAME
 
 MESSAGES = {
+    "ERR_NOTIFICATION_HOST_INVALID": "NOTIFICATION_HOST 必须为有效的 IPv4 或 IPv6 监听地址",
+    "ERR_NOTIFICATION_PORT_INVALID": "NOTIFICATION_PORT 必须为 1 到 65535 之间的整数",
+    "ERR_NOTIFICATION_SERVER_HOST_INVALID": "NOTIFICATION_SERVER_HOST 必须为可连接的 IPv4 或 IPv6 地址",
+    "ERR_NOTIFICATION_TOKEN_INVALID": "NOTIFICATION_TOKEN 必须为 64 位十六进制字符串",
+    "ERR_NOTIFICATION_READY_REPORT_REQUIRED": "启动本机通知中心时需要指定就绪报告路径",
     "MSG_LOG_LIST_SUCCESS": "日志获取成功",
     "ERR_LOG_CLEANER_FAILED": "清理历史日志失败: {message}",
     "MSG_TEMP_CLEANER_CLEARED": "已清理 {deleted_count} 个临时文件，当前最大单个临时目录大小 {current_size} 字节，单目录上限 {max_size_bytes} 字节",

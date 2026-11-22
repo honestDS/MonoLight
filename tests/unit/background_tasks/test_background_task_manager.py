@@ -210,12 +210,13 @@ async def test_run_loop_periodically_recovers_expired_running_tasks(monkeypatch)
         nonlocal reconcile_calls
         reconcile_calls += 1
 
-    async def dispatch_tasks():
+    async def dispatch_tasks(profile_ids=None):
         nonlocal dispatch_calls
         dispatch_calls += 1
 
-    async def dispatch_replies():
+    async def dispatch_replies(profile_ids=None):
         manager._stop_event.set()
+        manager._inbox.wake()
 
     monkeypatch.setattr(manager_module, "BACKGROUND_TASK_RECOVERY_INTERVAL_SECONDS", 30)
     monkeypatch.setattr(manager_module, "monotonic", lambda: next(monotonic_values))
@@ -225,7 +226,7 @@ async def test_run_loop_periodically_recovers_expired_running_tasks(monkeypatch)
     monkeypatch.setattr(manager, "dispatch_pending_tasks", dispatch_tasks)
     monkeypatch.setattr(manager, "dispatch_pending_replies", dispatch_replies)
 
-    await manager._run_loop()
+    await asyncio.wait_for(manager._run_loop(), timeout=2)
 
     assert recover_calls == 1
     assert recover_reply_calls == 1
@@ -246,7 +247,7 @@ async def test_dispatch_pending_replies_does_not_wait_for_reply_completion(monke
         async def __aexit__(self, exc_type, exc_value, traceback):
             return None
 
-    async def list_pending_replies(db, *, limit):
+    async def list_pending_replies(db, *, limit, profile_ids=None):
         assert limit == manager_module.BACKGROUND_TASK_REPLY_MAX_CONCURRENCY
         return [SimpleNamespace(id=11)]
 
@@ -260,7 +261,7 @@ async def test_dispatch_pending_replies_does_not_wait_for_reply_completion(monke
     monkeypatch.setattr(manager, "_run_reply", run_reply)
 
     await manager.dispatch_pending_replies()
-    await reply_started.wait()
+    await asyncio.wait_for(reply_started.wait(), timeout=2)
 
     assert len(manager._running_replies) == 1
 
@@ -317,7 +318,7 @@ async def test_dispatch_deduplicates_running_ids_and_allows_reschedule(monkeypat
         async def __aexit__(self, exc_type, exc_value, traceback):
             return None
 
-    async def external_runner(received_task_id):
+    async def external_runner(received_task_id, *, control_inbox=None):
         assert received_task_id == task_id
         calls.append(received_task_id)
         started.set()
@@ -328,7 +329,7 @@ async def test_dispatch_deduplicates_running_ids_and_allows_reschedule(monkeypat
         list_calls.append(observer)
         return [pending] if observer == (dispatch_kind == "observer") else []
 
-    async def list_pending_replies(db, *, limit):
+    async def list_pending_replies(db, *, limit, profile_ids=None):
         list_calls.append(limit)
         return [pending]
 
@@ -371,7 +372,7 @@ async def test_dispatch_deduplicates_running_ids_and_allows_reschedule(monkeypat
         running_ids = manager._running_execution_task_ids
 
     await dispatch()
-    await started.wait()
+    await asyncio.wait_for(started.wait(), timeout=2)
     first_task = next(iter(active_tasks()))
 
     await dispatch()
@@ -392,7 +393,7 @@ async def test_dispatch_deduplicates_running_ids_and_allows_reschedule(monkeypat
     started.clear()
     release.clear()
     await dispatch()
-    await started.wait()
+    await asyncio.wait_for(started.wait(), timeout=2)
     assert calls == [task_id, task_id]
     second_task = next(iter(active_tasks()))
 
@@ -424,7 +425,7 @@ async def test_dispatch_reclaims_ids_after_external_failure(monkeypatch, dispatc
         async def __aexit__(self, exc_type, exc_value, traceback):
             return None
 
-    async def external_runner(received_task_id):
+    async def external_runner(received_task_id, *, control_inbox=None):
         assert received_task_id == task_id
         calls.append(received_task_id)
         if len(calls) == 1:
@@ -433,7 +434,7 @@ async def test_dispatch_reclaims_ids_after_external_failure(monkeypatch, dispatc
     async def list_pending(db, *, profile_id, limit, observer):
         return [pending] if observer == (dispatch_kind == "observer") else []
 
-    async def list_pending_replies(db, *, limit):
+    async def list_pending_replies(db, *, limit, profile_ids=None):
         return [pending]
 
     monkeypatch.setattr(manager_module, "AsyncSessionLocal", SessionContext)
@@ -517,7 +518,7 @@ async def test_dispatch_propagates_cancellation_and_reclaims_ids(monkeypatch, di
         async def __aexit__(self, exc_type, exc_value, traceback):
             return None
 
-    async def external_runner(received_task_id):
+    async def external_runner(received_task_id, *, control_inbox=None):
         assert received_task_id == task_id
         calls.append(received_task_id)
         started.set()
@@ -526,7 +527,7 @@ async def test_dispatch_propagates_cancellation_and_reclaims_ids(monkeypatch, di
     async def list_pending(db, *, profile_id, limit, observer):
         return [pending] if observer == (dispatch_kind == "observer") else []
 
-    async def list_pending_replies(db, *, limit):
+    async def list_pending_replies(db, *, limit, profile_ids=None):
         return [pending]
 
     monkeypatch.setattr(manager_module, "AsyncSessionLocal", SessionContext)
@@ -568,7 +569,7 @@ async def test_dispatch_propagates_cancellation_and_reclaims_ids(monkeypatch, di
         running_ids = manager._running_execution_task_ids
 
     await dispatch()
-    await started.wait()
+    await asyncio.wait_for(started.wait(), timeout=2)
     first_task = next(iter(active_tasks()))
     first_task.cancel()
 
@@ -580,7 +581,7 @@ async def test_dispatch_propagates_cancellation_and_reclaims_ids(monkeypatch, di
 
     started.clear()
     await dispatch()
-    await started.wait()
+    await asyncio.wait_for(started.wait(), timeout=2)
     assert calls == [task_id, task_id]
     second_task = next(iter(active_tasks()))
 

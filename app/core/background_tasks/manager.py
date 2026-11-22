@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.background_tasks.external_work import reconcile_external_work
+from app.core.background_tasks.external_work import reconcile_external_work, resume_external_work_for_task
 from app.core.background_tasks.recovery import recover_pending_background_task_replies, recover_pending_background_tasks
 from app.core.background_tasks.reply_trigger import trigger_background_task_reply
 from app.core.background_tasks.runner import run_background_task
@@ -15,6 +15,7 @@ from app.core.constants import (
     ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN,
     ERR_TERMINAL_ACTION_NOT_ALLOWED,
     ERR_TERMINAL_READ_OFFSET_AHEAD,
+    NOTIFICATION_ERROR_RETRY_SECONDS,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,
     TERMINAL_WATCH_MAX_CONCURRENCY,
     TERMINAL_WATCH_TOOL_NAME,
@@ -27,12 +28,14 @@ from app.core.crud.task.background import background_task_crud
 from app.core.exceptions import ForbiddenException, ParameterException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.notifications.inbox import NotificationBatch, NotificationInbox
+from app.core.notifications.protocol import Notification, NotificationTopic
 from app.core.terminal.manager import terminal_session_manager
 from app.core.terminal.schemas import TerminalAction
 from app.core.terminal.watch_schema import TerminalWatchRequest
 from app.core.utils.dispatcher.frozen_context import serialize_frozen_context_messages
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode, BackgroundTaskStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.session_reply_work_item import SessionReplyWorkStatus
@@ -40,7 +43,6 @@ from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
 
-BACKGROUND_TASK_POLL_INTERVAL_SECONDS = 0.5
 BACKGROUND_TASK_RECOVERY_INTERVAL_SECONDS = 30
 BACKGROUND_TASK_PROFILE_FETCH_LIMIT = 100
 BACKGROUND_TASK_REPLY_MAX_CONCURRENCY = 4
@@ -51,17 +53,20 @@ def _serialize_request_message(message: InternalMessage) -> dict[str, Any]:
     return {key: serialized[key] for key in ("id", "role", "content", "attachments") if key in serialized}
 
 
-class BackgroundTaskManager:
-    def __init__(self) -> None:
-        self._running_by_profile: dict[int, set[asyncio.Task]] = defaultdict(set)
-        self._running_observers: set[asyncio.Task] = set()
-        self._running_replies: set[asyncio.Task] = set()
-        self._running_execution_task_ids: set[int] = set()
-        self._running_reply_task_ids: set[int] = set()
-        self._lock = asyncio.Lock()
-        self._task: asyncio.Task | None = None
-        self._stop_event = asyncio.Event()
+def _notification_resource_id(notification: Notification, resource_type: str) -> int | None:
+    resource = notification.resource
+    if resource is None or resource.type != resource_type:
+        return None
+    try:
+        resource_id = int(resource.id)
+    except ValueError:
+        return None
+    if resource_id <= 0:
+        return None
+    return resource_id
 
+
+class BackgroundTaskSubmission:
     async def submit(
         self,
         db: AsyncSession,
@@ -230,10 +235,26 @@ class BackgroundTaskManager:
         ).info(t("LOG_BACKGROUND_TASK_QUEUED"))
         return task
 
-    def start(self) -> asyncio.Task:
+
+class BackgroundTaskManager(BackgroundTaskSubmission):
+    def __init__(self) -> None:
+        self._running_by_profile: dict[int, set[asyncio.Task]] = defaultdict(set)
+        self._running_observers: set[asyncio.Task] = set()
+        self._running_replies: set[asyncio.Task] = set()
+        self._running_execution_task_ids: set[int] = set()
+        self._running_reply_task_ids: set[int] = set()
+        self._lock = asyncio.Lock()
+        self._task: asyncio.Task | None = None
+        self._stop_event = asyncio.Event()
+        self._inbox = NotificationInbox()
+        self._control_inboxes: dict[int, NotificationInbox] = {}
+
+    def start(self, *, inbox: NotificationInbox | None = None) -> asyncio.Task:
         if self._task and not self._task.done():
             return self._task
         self._stop_event.clear()
+        self._inbox = inbox if inbox is not None else NotificationInbox()
+        self._inbox.wake()
         self._task = asyncio.create_task(self._run_loop())
         return self._task
 
@@ -261,8 +282,18 @@ class BackgroundTaskManager:
             task.cancel()
         if active_tasks:
             await asyncio.gather(*active_tasks, return_exceptions=True)
+        self._control_inboxes.clear()
 
-    async def dispatch_pending_tasks(self) -> None:
+    async def dispatch_pending_tasks(self, profile_ids: set[int] | None = None) -> None:
+        if profile_ids is not None and not profile_ids:
+            return
+        if profile_ids is not None:
+            async with AsyncSessionLocal() as db:
+                profiles = await profile_crud.get_by_ids(db, profile_ids)
+            for profile in profiles:
+                await self.schedule(profile)
+            return
+
         offset = 0
         while not self._stop_event.is_set():
             async with AsyncSessionLocal() as db:
@@ -342,7 +373,9 @@ class BackgroundTaskManager:
                     raise
                 self._running_observers.add(task)
 
-    async def dispatch_pending_replies(self) -> None:
+    async def dispatch_pending_replies(self, profile_ids: set[int] | None = None) -> None:
+        if profile_ids is not None and not profile_ids:
+            return
         async with self._lock:
             self._running_replies.difference_update({task for task in self._running_replies if task.done()})
             free_slots = max(0, BACKGROUND_TASK_REPLY_MAX_CONCURRENCY - len(self._running_replies))
@@ -350,7 +383,11 @@ class BackgroundTaskManager:
                 return
 
             async with AsyncSessionLocal() as db:
-                pending_replies = await background_task_crud.list_pending_replies(db, limit=free_slots)
+                pending_replies = await background_task_crud.list_pending_replies(
+                    db,
+                    limit=free_slots,
+                    profile_ids=profile_ids,
+                )
 
             for pending_reply in pending_replies:
                 if pending_reply.id is None:
@@ -366,26 +403,103 @@ class BackgroundTaskManager:
                     raise
                 self._running_replies.add(task)
 
+    async def _notification_profiles(self, batch: NotificationBatch) -> set[int] | None:
+        if batch.full_scan:
+            return None
+        full_scan = False
+        profile_ids: set[int] = set()
+        task_ids: set[int] = set()
+        for notification in batch.notifications:
+            is_profile_config = notification.topic == NotificationTopic.PROFILE_CONFIG
+            profile_id = notification.scope.profile_id
+            if is_profile_config and profile_id is None:
+                profile_id = _notification_resource_id(notification, "profile")
+            if is_profile_config and profile_id is not None:
+                profile_ids.add(profile_id)
+            if is_profile_config and profile_id is None:
+                full_scan = True
+            if is_profile_config:
+                continue
+            if notification.topic != NotificationTopic.BACKGROUND_TASK:
+                full_scan = True
+                continue
+            profile_id = notification.scope.profile_id
+            task_id = _notification_resource_id(notification, "background_task")
+            if profile_id is not None:
+                profile_ids.add(profile_id)
+            if task_id is not None:
+                task_ids.add(task_id)
+            if profile_id is None and task_id is None:
+                full_scan = True
+                continue
+
+        if task_ids:
+            async with AsyncSessionLocal() as db:
+                tasks = await background_task_crud.get_by_ids(db, task_ids)
+            for task in tasks:
+                if task.profile_id is not None:
+                    profile_ids.add(task.profile_id)
+                if task.id is not None and task.status in {
+                    BackgroundTaskStatus.SUCCEEDED,
+                    BackgroundTaskStatus.FAILED,
+                    BackgroundTaskStatus.CANCELLED,
+                }:
+                    await resume_external_work_for_task(task.id)
+        if full_scan:
+            return None
+        return profile_ids
+
+    def _wake_task_controls(self, batch: NotificationBatch) -> None:
+        if batch.full_scan:
+            for inbox in self._control_inboxes.values():
+                inbox.wake()
+            return
+        for notification in batch.notifications:
+            if notification.topic != NotificationTopic.BACKGROUND_TASK:
+                continue
+            task_id = _notification_resource_id(notification, "background_task")
+            inbox = self._control_inboxes.get(task_id) if task_id is not None else None
+            if inbox is not None:
+                inbox.wake(notification)
+            if task_id is not None or notification.event == "capacity":
+                continue
+            for inbox in self._control_inboxes.values():
+                inbox.wake()
+
+    def _wake_capacity(self) -> None:
+        self._inbox.wake(
+            Notification(
+                topic=NotificationTopic.BACKGROUND_TASK,
+                event="capacity",
+                source="background_manager",
+            )
+        )
+
     async def _run_loop(self) -> None:
-        next_recovery_at = monotonic() + BACKGROUND_TASK_RECOVERY_INTERVAL_SECONDS
+        next_recovery_at = 0.0
         while not self._stop_event.is_set():
             try:
-                if monotonic() >= next_recovery_at:
+                batch = self._inbox.take()
+                self._wake_task_controls(batch)
+                recovery_due = monotonic() >= next_recovery_at
+                if batch.full_scan or recovery_due:
                     await recover_pending_background_tasks()
                     await recover_pending_background_task_replies()
                     await reconcile_external_work()
                     next_recovery_at = monotonic() + BACKGROUND_TASK_RECOVERY_INTERVAL_SECONDS
-                await self.dispatch_pending_tasks()
-                await self.dispatch_pending_replies()
+                    profile_ids = None
+                else:
+                    profile_ids = await self._notification_profiles(batch)
+                if profile_ids is None or profile_ids:
+                    await self.dispatch_pending_tasks(profile_ids)
+                    await self.dispatch_pending_replies(profile_ids)
+                await self._inbox.wait(max(0.0, next_recovery_at - monotonic()))
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.bind(component="background_task_manager").exception(t("LOG_BACKGROUND_TASK_SCHEDULE_FAILED"))
-            try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(),
-                    timeout=BACKGROUND_TASK_POLL_INTERVAL_SECONDS,
-                )
-            except TimeoutError:
-                continue
+                self._inbox.wake()
+                await asyncio.sleep(NOTIFICATION_ERROR_RETRY_SECONDS)
 
     async def _run_reply(self, task_id: int) -> None:
         try:
@@ -398,10 +512,13 @@ class BackgroundTaskManager:
                 if current_task is not None:
                     self._running_replies.discard(current_task)
                 self._running_reply_task_ids.discard(task_id)
+            self._wake_capacity()
 
     async def _run_task(self, task_id: int, profile_id: int) -> None:
+        control_inbox = NotificationInbox()
+        self._control_inboxes[task_id] = control_inbox
         try:
-            await run_background_task(task_id)
+            await run_background_task(task_id, control_inbox=control_inbox)
         except Exception:
             logger.bind(task_id=task_id, profile_id=profile_id).exception("Background task execution failed")
         finally:
@@ -413,10 +530,14 @@ class BackgroundTaskManager:
                     if not running:
                         self._running_by_profile.pop(profile_id, None)
                 self._running_execution_task_ids.discard(task_id)
+            self._control_inboxes.pop(task_id, None)
+            self._wake_capacity()
 
     async def _run_observer(self, task_id: int) -> None:
+        control_inbox = NotificationInbox()
+        self._control_inboxes[task_id] = control_inbox
         try:
-            await run_background_task(task_id)
+            await run_background_task(task_id, control_inbox=control_inbox)
         except Exception:
             logger.bind(task_id=task_id).exception("Background task observer failed")
         finally:
@@ -425,6 +546,8 @@ class BackgroundTaskManager:
                 if current_task is not None:
                     self._running_observers.discard(current_task)
                 self._running_execution_task_ids.discard(task_id)
+            self._control_inboxes.pop(task_id, None)
+            self._wake_capacity()
 
 
-background_task_manager = BackgroundTaskManager()
+background_task_manager = BackgroundTaskSubmission()

@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import json
 import os
+import secrets
 import shlex
 import subprocess
 import sys
@@ -18,6 +19,11 @@ from app.core.background_tasks.terminal_watch_reply import route_terminal_auto_w
 from app.core.constants import AGENT_WORK_TOOL_NAME, ERR_SUBAGENT_CANCELLED, ERR_TERMINAL_COMMAND_FAILED, ERR_TOOL_COMMAND_TIMEOUT, SHELL_TOOL_NAME, TERMINAL_TOOL_NAME, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
+from app.core.notifications.client import NotificationClient
+from app.core.notifications.config import NotificationConfig
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.runtime import NotificationRuntime
+from app.core.notifications.server import NotificationServer
 from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
 from app.core.tools.shell import ShellExecutor
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus
@@ -70,6 +76,22 @@ async def _wait_for_process_exit(pid: int, create_time: float | None, timeout: f
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(f"timed out waiting for process {pid} to exit")
         await asyncio.sleep(0.05)
+
+
+@contextlib.asynccontextmanager
+async def _background_control_notifications(factory):
+    server_config = NotificationConfig(host="127.0.0.1", port=0, token=secrets.token_hex(32))
+    async with NotificationServer(server_config) as server:
+        host, port = server.address
+        client_config = NotificationConfig(host=host, port=port, token=server_config.token)
+        runtime = NotificationRuntime(
+            NotificationClient(client_config, "subagent-shell-cancel-test"),
+            bind=factory.kw["bind"].sync_engine,
+        )
+        inbox = runtime.subscribe((NotificationTopic.BACKGROUND_TASK,))
+        async with runtime:
+            await asyncio.wait_for(runtime.wait_ready(), 3)
+            yield inbox
 
 
 def _python_command(*arguments: Path) -> str:
@@ -579,7 +601,7 @@ async def test_subagent_shell_cancel_cleans_only_current_round_resources(
     runner_task: asyncio.Task | None = None
     process_identities: dict[str, tuple[int, float]] | None = None
 
-    async with image_chat_runtime("OPENAI_RESPONSES", goal_mode=False) as runtime:
+    async with image_chat_runtime("OPENAI_RESPONSES", goal_mode=False) as runtime, _background_control_notifications(runtime.factory) as control_inbox:
         try:
             (
                 parent_work_id,
@@ -625,7 +647,7 @@ async def test_subagent_shell_cancel_cleans_only_current_round_resources(
                     assert target_terminal.command == command
 
             if running:
-                runner_task = asyncio.create_task(runner_module.run_background_task(target_task_id, worker_id=f"cancel-shell-{case}"))
+                runner_task = asyncio.create_task(runner_module.run_background_task(target_task_id, worker_id=f"cancel-shell-{case}", control_inbox=control_inbox))
                 await _wait_for_path(identity_path)
                 process_identities = _read_process_identities(identity_path)
                 for process_pid, process_create_time in process_identities.values():

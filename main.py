@@ -23,11 +23,12 @@ from app.api.v1.users import router as user_router
 from app.core.event_loop import get_uvicorn_loop
 from app.core.log import LogManager, get_logger
 from app.core.log.broadcaster import log_broadcaster
+from app.core.notifications.runtime import create_notification_runtime
 from app.core.paths import DASHBOARD_STATIC_DIR, DATA_DIR, DEFAULT_LOG_FILE_PATH, TEMP_DIR
 from app.core.session.notifier import session_notifier
 from app.core.utils.time import get_local_time
 from app.handler import register_handlers, register_middlewares
-from app.providers.database import AsyncSessionLocal
+from app.providers.database import AsyncSessionLocal, engine
 from app.providers.database.bootstrap import init_database_schema
 
 
@@ -36,23 +37,29 @@ async def lifespan(app: FastAPI):
     # 兼容直接运行 main.py 或 uvicorn main:app，不能依赖父启动器预先建表或迁移。
     async with AsyncSessionLocal() as session:
         await init_database_schema(session)
-    await session_notifier.start()
 
-    # 记录启动时的信息，确保此时异步环境已就绪，日志能够入库
-    now_aware = get_local_time()
-    log_file_path = os.getenv("LOG_FILE_PATH", str(DEFAULT_LOG_FILE_PATH))
-    LogManager.setup(
-        log_path=log_file_path,
-        level=os.getenv("LOG_LEVEL", "INFO"),
-    )
-    await log_broadcaster.start()
+    notifications = await create_notification_runtime("web", bind=engine.sync_engine)
+    async with notifications:
+        await session_notifier.start()
 
-    get_logger("app.core.log").info(f"Log system initialized. Path: {log_file_path} | Time: {now_aware.isoformat()}")
+        # 记录启动时的信息，确保此时异步环境已就绪，日志能够入库
+        now_aware = get_local_time()
+        log_file_path = os.getenv("LOG_FILE_PATH", str(DEFAULT_LOG_FILE_PATH))
+        LogManager.setup(
+            log_path=log_file_path,
+            level=os.getenv("LOG_LEVEL", "INFO"),
+        )
+        await log_broadcaster.start()
 
-    yield
+        get_logger("app.core.log").info(f"Log system initialized. Path: {log_file_path} | Time: {now_aware.isoformat()}")
 
-    await log_broadcaster.stop()
-    await session_notifier.stop()
+        try:
+            yield
+        finally:
+            try:
+                await log_broadcaster.stop()
+            finally:
+                await session_notifier.stop()
 
 
 def register_routers(app: FastAPI) -> None:

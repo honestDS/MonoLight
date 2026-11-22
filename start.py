@@ -7,10 +7,22 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from dotenv import load_dotenv
 
+from app.core.constants import (
+    ERR_NOTIFICATION_READY_REPORT_REQUIRED,
+    NOTIFICATION_IO_TIMEOUT_SECONDS,
+    NOTIFICATION_READY_FILE_ENV,
+    NOTIFICATION_START_TIMEOUT_SECONDS,
+)
 from app.core.event_loop import get_uvicorn_loop
+from app.core.i18n import t
+from app.core.notifications.client import NotificationClient
+from app.core.notifications.config import NotificationConfig, load_notification_config
+from app.core.notifications.protocol import NotificationProtocolError
 from app.core.paths import DASHBOARD_INDEX_PATH
 from app.core.system_secrets import initialize_system_secrets
 
@@ -135,6 +147,10 @@ def build_session_reply_command() -> list[str]:
     return [sys.executable, "-m", "app.workers.session_reply"]
 
 
+def build_notification_command() -> list[str]:
+    return [sys.executable, "-m", "app.workers.notification"]
+
+
 def report_process_started(process_name: str, process: subprocess.Popen) -> None:
     print(f"{process_name} process started [PID {process.pid}]", flush=True)
 
@@ -194,6 +210,70 @@ def wait_for_web_service(process: subprocess.Popen, config: StartConfig) -> None
         finally:
             connection.close()
     raise TimeoutError(f"Web service did not listen on {connect_host}:{config.port} within {WEB_START_TIMEOUT_SECONDS:g} seconds")
+
+
+def _raise_if_notification_process_exited(process: subprocess.Popen | None) -> None:
+    if process is None:
+        return
+
+    return_code = process.poll()
+    if return_code is None:
+        return
+
+    raise RuntimeError(f"Notification service exited during startup with code {return_code}")
+
+
+async def _wait_for_notification_service(
+    process: subprocess.Popen | None,
+    notification_config: NotificationConfig | None = None,
+    *,
+    ready_path: Path | None = None,
+) -> None:
+    if process is not None and ready_path is None:
+        raise ValueError(t(ERR_NOTIFICATION_READY_REPORT_REQUIRED))
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + NOTIFICATION_START_TIMEOUT_SECONDS
+    if notification_config is None:
+        notification_config = await asyncio.to_thread(load_notification_config)
+    client = NotificationClient(notification_config, "launcher")
+    listening_reported = process is None
+
+    while True:
+        _raise_if_notification_process_exited(process)
+
+        if not listening_reported:
+            assert ready_path is not None
+            listening_reported = await asyncio.to_thread(ready_path.is_file)
+
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError(f"Notification service did not become ready on {notification_config.connect_host}:{notification_config.port} within {NOTIFICATION_START_TIMEOUT_SECONDS:g} seconds")
+
+        if not listening_reported:
+            await asyncio.sleep(min(0.1, remaining))
+            continue
+
+        try:
+            await asyncio.wait_for(
+                client.ping(),
+                timeout=min(NOTIFICATION_IO_TIMEOUT_SECONDS, remaining),
+            )
+        except (OSError, EOFError, TimeoutError, NotificationProtocolError):
+            await asyncio.sleep(0.1)
+            continue
+
+        _raise_if_notification_process_exited(process)
+        return
+
+
+def wait_for_notification_service(
+    process: subprocess.Popen | None,
+    notification_config: NotificationConfig | None = None,
+    *,
+    ready_path: Path | None = None,
+) -> None:
+    asyncio.run(_wait_for_notification_service(process, notification_config, ready_path=ready_path))
 
 
 def _request_process_stop(process: subprocess.Popen) -> None:
@@ -273,11 +353,26 @@ def run() -> int:
     validate_dashboard_assets()
     child_environment = os.environ.copy()
     run_system_initialization(child_environment)
+    notification_config = load_notification_config()
     process_options = _subprocess_options()
     processes: list[subprocess.Popen] = []
     previous_handlers = _install_shutdown_signal_handlers()
+    ready_directory = None
 
     try:
+        notification_process = None
+        if notification_config.server_host is None:
+            ready_directory = TemporaryDirectory(prefix="monolight-notification-start-")
+            ready_path = Path(ready_directory.name) / "ready"
+            notification_environment = child_environment.copy()
+            notification_environment[NOTIFICATION_READY_FILE_ENV] = str(ready_path)
+            notification_process = subprocess.Popen(build_notification_command(), env=notification_environment, **process_options)
+            processes.append(notification_process)
+            report_process_started("Notification center", notification_process)
+            wait_for_notification_service(notification_process, notification_config, ready_path=ready_path)
+        else:
+            wait_for_notification_service(None, notification_config)
+
         web_process = subprocess.Popen(build_web_command(config), env=child_environment, **process_options)
         processes.append(web_process)
         report_process_started("Web", web_process)
@@ -303,8 +398,14 @@ def run() -> int:
     except KeyboardInterrupt:
         return 0
     finally:
-        stop_processes(processes)
-        _restore_signal_handlers(previous_handlers)
+        try:
+            stop_processes(processes)
+        finally:
+            try:
+                if ready_directory is not None:
+                    ready_directory.cleanup()
+            finally:
+                _restore_signal_handlers(previous_handlers)
 
 
 def main() -> None:

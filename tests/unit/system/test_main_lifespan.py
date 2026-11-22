@@ -40,6 +40,15 @@ async def test_lifespan_creates_tables_before_starting_database_pollers(monkeypa
     events = []
     session = object()
 
+    class _FakeNotificationRuntime:
+        async def __aenter__(self):
+            events.append("start_notifications")
+            return self
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            events.append("stop_notifications")
+            return False
+
     class SessionContext:
         async def __aenter__(self):
             events.append("enter_database_session")
@@ -65,8 +74,15 @@ async def test_lifespan_creates_tables_before_starting_database_pollers(monkeypa
     async def stop_log_broadcaster():
         events.append("stop_log_broadcaster")
 
+    fake_notification_runtime = _FakeNotificationRuntime()
+
+    async def _create_notification_runtime(process_name, *, bind):
+        assert process_name == "web"
+        return fake_notification_runtime
+
     monkeypatch.setattr(main, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(main, "init_database_schema", init_database_schema)
+    monkeypatch.setattr(main, "create_notification_runtime", _create_notification_runtime)
     monkeypatch.setattr(main.session_notifier, "start", start_session_notifier)
     monkeypatch.setattr(main.session_notifier, "stop", stop_session_notifier)
     monkeypatch.setattr(main.log_broadcaster, "start", start_log_broadcaster)
@@ -81,9 +97,11 @@ async def test_lifespan_creates_tables_before_starting_database_pollers(monkeypa
         "enter_database_session",
         "init_database_schema",
         "exit_database_session",
+        "start_notifications",
         "start_session_notifier",
         "start_log_broadcaster",
         "running",
         "stop_log_broadcaster",
         "stop_session_notifier",
+        "stop_notifications",
     ]

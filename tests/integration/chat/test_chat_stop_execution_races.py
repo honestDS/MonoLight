@@ -1,14 +1,21 @@
 import asyncio
+import secrets
 from types import SimpleNamespace
 
 import httpx
 import pytest
+import pytest_asyncio
 from sqlmodel import select
 
 from app.core.background_tasks import runner as runner_module
 from app.core.constants import TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.task.background import background_task_crud
 from app.core.dispatchers.dispatcher import ChatDispatcher
+from app.core.notifications.client import NotificationClient
+from app.core.notifications.config import NotificationConfig
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.runtime import NotificationRuntime
+from app.core.notifications.server import NotificationServer
 from app.core.session.cleanup import delete_session_data
 from app.core.session_reply_queue import consumer as consumer_module
 from app.core.session_reply_queue import executor_interactive as executor_interactive_module
@@ -30,6 +37,27 @@ from tests.integration.chat.test_chat_stop_workflow import (
 )
 
 db_session = _db_session
+
+
+@pytest_asyncio.fixture
+async def notification_inboxes(db_session):
+    server_config = NotificationConfig(
+        host="127.0.0.1",
+        port=0,
+        token=secrets.token_hex(32),
+    )
+    async with NotificationServer(server_config) as server:
+        host, port = server.address
+        client_config = NotificationConfig(host=host, port=port, token=server_config.token)
+        runtime = NotificationRuntime(
+            NotificationClient(client_config, "reply-stop-test"),
+            bind=db_session.kw["bind"].sync_engine,
+        )
+        reply_inbox = runtime.subscribe((NotificationTopic.SESSION_REPLY,))
+        background_inbox = runtime.subscribe((NotificationTopic.BACKGROUND_TASK,))
+        async with runtime:
+            await asyncio.wait_for(runtime.wait_ready(), 3)
+            yield SimpleNamespace(reply=reply_inbox, background=background_inbox)
 
 
 @pytest.mark.asyncio
@@ -158,6 +186,7 @@ async def test_cancelled_stream_is_terminal_and_late_content_is_not_persisted(
 @pytest.mark.parametrize("stream_requested", [False, True])
 async def test_consumer_cancels_http_stopped_claim_without_retry(
     db_session,
+    notification_inboxes,
     monkeypatch: pytest.MonkeyPatch,
     stream_requested: bool,
 ) -> None:
@@ -208,7 +237,7 @@ async def test_consumer_cancels_http_stopped_claim_without_retry(
     else:
         monkeypatch.setattr(ChatDispatcher, "dispatch", controlled_dispatch)
     consumer = consumer_module.SessionReplyConsumer()
-    consumer_task = consumer.start()
+    consumer_task = consumer.start(inbox=notification_inboxes.reply)
     try:
         await asyncio.wait_for(dispatch_started.wait(), timeout=2)
         app = _build_app(db_session, {"uid": "owner", "is_superuser": False})
@@ -256,6 +285,7 @@ async def test_consumer_cancels_http_stopped_claim_without_retry(
 )
 async def test_http_stop_cancels_running_background_runner(
     db_session,
+    notification_inboxes,
     monkeypatch: pytest.MonkeyPatch,
     tool_name: str,
 ) -> None:
@@ -319,7 +349,13 @@ async def test_http_stop_cancels_running_background_runner(
 
     monkeypatch.setattr(runner_module, "AsyncSessionLocal", db_session)
     monkeypatch.setitem(runner_module.TOOL_EXECUTOR_MAP, tool_name, BlockingExecutor)
-    runner_task = asyncio.create_task(runner_module.run_background_task(task_id, worker_id="background-worker"))
+    runner_task = asyncio.create_task(
+        runner_module.run_background_task(
+            task_id,
+            worker_id="background-worker",
+            control_inbox=notification_inboxes.background,
+        )
+    )
     try:
         await asyncio.wait_for(execution_started.wait(), timeout=5)
         app = _build_app(db_session, {"uid": "owner", "is_superuser": False})
@@ -369,6 +405,7 @@ async def test_http_stop_cancels_running_background_runner(
 @pytest.mark.asyncio
 async def test_delete_session_cancels_running_background_runner(
     db_session,
+    notification_inboxes,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _work_id, _message_id, session_id = await _seed_reply_work(
@@ -421,7 +458,13 @@ async def test_delete_session_cancels_running_background_runner(
 
     monkeypatch.setattr(runner_module, "AsyncSessionLocal", db_session)
     monkeypatch.setitem(runner_module.TOOL_EXECUTOR_MAP, "ordinary_background_tool", BlockingExecutor)
-    runner_task = asyncio.create_task(runner_module.run_background_task(task_id, worker_id="background-worker"))
+    runner_task = asyncio.create_task(
+        runner_module.run_background_task(
+            task_id,
+            worker_id="background-worker",
+            control_inbox=notification_inboxes.background,
+        )
+    )
     try:
         await asyncio.wait_for(execution_started.wait(), timeout=5)
         async with db_session() as db:

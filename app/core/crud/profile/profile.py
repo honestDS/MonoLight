@@ -2,6 +2,8 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.base import CRUDBase
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.transactions import notify_after_commit
 from app.models.profile import (
     Profile,
     ProfileConfig,
@@ -76,6 +78,15 @@ class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
             data = {key: value for key, value in data.items() if key not in _PROFILE_NON_PERSISTED_FIELDS}
         else:
             data = obj_in.model_dump(exclude=_PROFILE_NON_PERSISTED_FIELDS, exclude_unset=True)
+        if "configs" in data:
+            notify_after_commit(
+                db,
+                NotificationTopic.PROFILE_CONFIG,
+                resource_type="profile",
+                resource_id=db_obj.id,
+                uid=db_obj.uid,
+                profile_id=db_obj.id,
+            )
         return await super().update(db, db_obj=db_obj, obj_in=data, commit=commit)
 
     async def get_by_uid(self, db: AsyncSession, uid: str | None) -> Profile | None:

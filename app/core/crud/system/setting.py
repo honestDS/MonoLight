@@ -25,6 +25,8 @@ from app.core.constants import (
 from app.core.crud.base import CRUDBase
 from app.core.i18n import t
 from app.core.i18n.locale import DEFAULT_LOCALE, normalize_locale
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.transactions import notify_after_commit
 from app.models.system_setting import SystemRuntimeSettings, SystemSetting
 
 DEFAULT_SYSTEM_SETTINGS = {
@@ -235,6 +237,7 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
                 db.add(db_obj)
             else:
                 db.add(SystemSetting(key=key, value=value))
+        notify_after_commit(db, NotificationTopic.SYSTEM_SETTINGS)
         await db.commit()
         return await self.get_runtime_settings(db)
 

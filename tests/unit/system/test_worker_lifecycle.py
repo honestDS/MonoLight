@@ -1,16 +1,103 @@
 import asyncio
+import secrets
 from types import SimpleNamespace
 
 import pytest
 
+from app.core.constants import NOTIFICATION_READY_FILE_ENV
+from app.core.notifications.inbox import NotificationInbox
+from app.core.notifications.protocol import NotificationTopic
 from app.core.terminal.manager import TerminalWorkerCoordinator
 from app.workers import background_task as background_task_worker
 from app.workers import general as general_worker
 from app.workers import memory as memory_worker
 from app.workers import message_platform as message_platform_worker
+from app.workers import notification as notification_worker
 from app.workers import session_reply as session_reply_worker
 from app.workers import signals
 from app.workers import terminal as terminal_worker
+
+
+class FakeNotificationRuntime:
+    def __init__(self, process_name, *, bind):
+        self.process_name = process_name
+        self.bind = bind
+        self.subscriptions = []
+        self.active = False
+        self.started = False
+        self.stopped = False
+
+    def subscribe(self, topics):
+        inbox = NotificationInbox()
+        self.subscriptions.append((inbox, tuple(topics)))
+        return inbox
+
+    async def __aenter__(self):
+        self.active = True
+        self.started = True
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        self.active = False
+        self.stopped = True
+
+
+@pytest.fixture(autouse=True)
+def notification_runtimes(monkeypatch):
+    runtimes = []
+
+    async def create_runtime(process_name, *, bind):
+        runtime = FakeNotificationRuntime(process_name, bind=bind)
+        runtimes.append(runtime)
+        return runtime
+
+    for worker in (
+        general_worker,
+        session_reply_worker,
+        background_task_worker,
+        message_platform_worker,
+        memory_worker,
+        terminal_worker,
+    ):
+        monkeypatch.setattr(worker, "create_notification_runtime", create_runtime)
+
+    yield runtimes
+
+    assert all(runtime.stopped and not runtime.active for runtime in runtimes if runtime.started)
+
+
+def _assert_general_notification_runtime(notification_runtimes):
+    assert len(notification_runtimes) == 1
+    runtime = notification_runtimes[0]
+    assert runtime.process_name == "general"
+    assert runtime.started
+    assert runtime.stopped
+    assert not runtime.active
+
+    subscriptions = runtime.subscriptions
+    inboxes = [inbox for inbox, _ in subscriptions]
+    assert len(inboxes) == 5
+    assert all(isinstance(inbox, NotificationInbox) for inbox in inboxes)
+    assert len({id(inbox) for inbox in inboxes}) == 5
+    assert {frozenset(topics) for _, topics in subscriptions} == {
+        frozenset(
+            (
+                NotificationTopic.BACKGROUND_TASK,
+                NotificationTopic.PROFILE_CONFIG,
+                NotificationTopic.SYSTEM_SETTINGS,
+            )
+        ),
+        frozenset(
+            (
+                NotificationTopic.SESSION_REPLY,
+                NotificationTopic.PROFILE_CONFIG,
+                NotificationTopic.SYSTEM_SETTINGS,
+            )
+        ),
+        frozenset((NotificationTopic.MESSAGE_PLATFORM,)),
+        frozenset((NotificationTopic.OUTBOX,)),
+        frozenset((NotificationTopic.SCHEDULED_TASK,)),
+    }
 
 
 @pytest.mark.asyncio
@@ -27,7 +114,8 @@ async def test_background_task_worker_starts_and_stops_manager_and_cleaners(monk
     async def run_startup_cleanup(stop_event, *, worker_name: str, other_worker_name, cleanup):
         await cleanup()
 
-    def start_manager():
+    def start_manager(*, inbox):
+        assert isinstance(inbox, NotificationInbox)
         events.append("manager-start")
 
     async def stop_manager():
@@ -51,8 +139,11 @@ async def test_background_task_worker_starts_and_stops_manager_and_cleaners(monk
     monkeypatch.setattr(background_task_worker, "clear_background_tasks_on_startup", clear_background_tasks_on_startup)
     monkeypatch.setattr(background_task_worker, "run_startup_cleanup", run_startup_cleanup)
     monkeypatch.setattr(background_task_worker, "run_with_worker_lease", run_with_lease)
-    monkeypatch.setattr(background_task_worker.background_task_manager, "start", start_manager)
-    monkeypatch.setattr(background_task_worker.background_task_manager, "stop", stop_manager)
+    monkeypatch.setattr(
+        background_task_worker,
+        "BackgroundTaskManager",
+        lambda: SimpleNamespace(start=start_manager, stop=stop_manager),
+    )
     monkeypatch.setattr(background_task_worker, "background_log_cleaner", lambda: cleaner("log-cleaner"))
     monkeypatch.setattr(background_task_worker, "background_log_file_cleaner", lambda: cleaner("log-file-cleaner"))
     monkeypatch.setattr(background_task_worker, "background_temp_cleaner", lambda: cleaner("temp-cleaner"))
@@ -103,13 +194,16 @@ async def test_worker_starts_and_stops_scheduler_and_message_platform_manager(mo
     async def create_tables():
         events.append("tables")
 
-    def start_manager():
+    def start_manager(*, config_inbox, outbox_inbox):
+        assert isinstance(config_inbox, NotificationInbox)
+        assert isinstance(outbox_inbox, NotificationInbox)
         events.append("manager-start")
 
     async def stop_manager():
         events.append("manager-stop")
 
-    def start_scheduler():
+    def start_scheduler(*, inbox):
+        assert isinstance(inbox, NotificationInbox)
         events.append("scheduler-start")
 
     async def stop_scheduler():
@@ -122,10 +216,16 @@ async def test_worker_starts_and_stops_scheduler_and_message_platform_manager(mo
     monkeypatch.setattr(message_platform_worker, "install_shutdown_signal_handlers", lambda stop_event: None)
     monkeypatch.setattr(message_platform_worker, "create_database_tables", create_tables)
     monkeypatch.setattr(message_platform_worker, "run_with_worker_lease", run_with_lease)
-    monkeypatch.setattr(message_platform_worker.message_platform_polling_manager, "start", start_manager)
-    monkeypatch.setattr(message_platform_worker.message_platform_polling_manager, "stop", stop_manager)
-    monkeypatch.setattr(message_platform_worker.scheduled_task_scheduler, "start", start_scheduler)
-    monkeypatch.setattr(message_platform_worker.scheduled_task_scheduler, "stop", stop_scheduler)
+    monkeypatch.setattr(
+        message_platform_worker,
+        "MessagePlatformPollingManager",
+        lambda: SimpleNamespace(start=start_manager, stop=stop_manager),
+    )
+    monkeypatch.setattr(
+        message_platform_worker,
+        "ScheduledTaskScheduler",
+        lambda: SimpleNamespace(start=start_scheduler, stop=stop_scheduler),
+    )
 
     task = asyncio.create_task(message_platform_worker.run_message_platform_worker())
     await asyncio.sleep(0)
@@ -144,7 +244,10 @@ async def test_worker_starts_and_stops_scheduler_and_message_platform_manager(mo
 
 
 @pytest.mark.asyncio
-async def test_terminal_worker_starts_and_stops_coordinator_inside_worker_lease(monkeypatch):
+async def test_terminal_worker_starts_and_stops_coordinator_inside_worker_lease(
+    monkeypatch,
+    notification_runtimes,
+):
     events = []
 
     async def create_tables():
@@ -178,10 +281,16 @@ async def test_terminal_worker_starts_and_stops_coordinator_inside_worker_lease(
         "coordinator-start",
         "coordinator-stop",
     ]
+    assert len(notification_runtimes) == 1
+    assert notification_runtimes[0].subscriptions == []
+    assert notification_runtimes[0].stopped
 
 
 @pytest.mark.asyncio
-async def test_memory_worker_starts_and_stops_memory_and_knowledge_job_consumers(monkeypatch):
+async def test_memory_worker_starts_and_stops_memory_and_knowledge_job_consumers(
+    monkeypatch,
+    notification_runtimes,
+):
     events = []
     captured_stop_event = None
 
@@ -231,6 +340,9 @@ async def test_memory_worker_starts_and_stops_memory_and_knowledge_job_consumers
         "knowledge-stop",
         "memory-stop",
     ]
+    assert len(notification_runtimes) == 1
+    assert notification_runtimes[0].subscriptions == []
+    assert notification_runtimes[0].stopped
 
 
 @pytest.mark.asyncio
@@ -253,7 +365,8 @@ async def test_session_reply_worker_starts_and_stops_consumer_inside_worker_leas
         captured_stop_event = stop_event
 
     class FakeConsumer:
-        def start(self):
+        def start(self, *, inbox):
+            assert isinstance(inbox, NotificationInbox)
             events.append("consumer-start")
             consumer_started.set()
 
@@ -269,7 +382,7 @@ async def test_session_reply_worker_starts_and_stops_consumer_inside_worker_leas
     monkeypatch.setattr(session_reply_worker, "clear_background_tasks_on_startup", clear_background_tasks_on_startup)
     monkeypatch.setattr(session_reply_worker, "run_startup_cleanup", run_startup_cleanup)
     monkeypatch.setattr(session_reply_worker, "run_with_worker_lease", run_with_lease)
-    monkeypatch.setattr(session_reply_worker, "session_reply_consumer", FakeConsumer())
+    monkeypatch.setattr(session_reply_worker, "SessionReplyConsumer", FakeConsumer)
 
     task = asyncio.create_task(session_reply_worker.run_session_reply_worker())
     await asyncio.wait_for(consumer_started.wait(), timeout=1)
@@ -286,7 +399,10 @@ async def test_session_reply_worker_starts_and_stops_consumer_inside_worker_leas
 
 
 @pytest.mark.asyncio
-async def test_general_worker_runs_all_owned_workers_with_shared_stop_event(monkeypatch):
+async def test_general_worker_runs_all_owned_workers_with_shared_stop_event(
+    monkeypatch,
+    notification_runtimes,
+):
     create_tables_calls = 0
     signal_events = []
     lease_calls = []
@@ -307,18 +423,29 @@ async def test_general_worker_runs_all_owned_workers_with_shared_stop_event(monk
         if len(started_roles) == 3:
             all_roles_started.set()
 
-    async def run_owned_background_task_worker(owned_stop_event, *, startup_ready):
+    async def run_owned_background_task_worker(owned_stop_event, *, inbox, startup_ready):
+        assert isinstance(inbox, NotificationInbox)
         record_started_role("background_task")
         startup_ready.set()
         background_ready.set()
         await owned_stop_event.wait()
 
-    async def run_owned_message_platform_worker(owned_stop_event):
+    async def run_owned_message_platform_worker(
+        owned_stop_event,
+        *,
+        config_inbox,
+        outbox_inbox,
+        scheduled_inbox,
+    ):
+        assert isinstance(config_inbox, NotificationInbox)
+        assert isinstance(outbox_inbox, NotificationInbox)
+        assert isinstance(scheduled_inbox, NotificationInbox)
         assert background_ready.is_set()
         record_started_role("message_platform")
         await owned_stop_event.wait()
 
-    async def run_owned_session_reply_worker(owned_stop_event, *, startup_cleaned):
+    async def run_owned_session_reply_worker(owned_stop_event, *, inbox, startup_cleaned):
+        assert isinstance(inbox, NotificationInbox)
         assert startup_cleaned is True
         assert background_ready.is_set()
         record_started_role("session_reply")
@@ -357,10 +484,14 @@ async def test_general_worker_runs_all_owned_workers_with_shared_stop_event(monk
 
     shared_stop_event.set()
     await asyncio.wait_for(task, timeout=1)
+    _assert_general_notification_runtime(notification_runtimes)
 
 
 @pytest.mark.asyncio
-async def test_general_worker_stops_other_roles_when_one_lease_returns(monkeypatch):
+async def test_general_worker_stops_other_roles_when_one_lease_returns(
+    monkeypatch,
+    notification_runtimes,
+):
     entered_roles = []
     started_roles = []
     stopped_roles = []
@@ -381,18 +512,29 @@ async def test_general_worker_stops_other_roles_when_one_lease_returns(monkeypat
         if len(started_roles) == 3:
             all_roles_started.set()
 
-    async def run_owned_background_task_worker(owned_stop_event, *, startup_ready):
+    async def run_owned_background_task_worker(owned_stop_event, *, inbox, startup_ready):
+        assert isinstance(inbox, NotificationInbox)
         record_started_role("background_task")
         startup_ready.set()
         background_ready.set()
         await owned_stop_event.wait()
 
-    async def run_owned_message_platform_worker(owned_stop_event):
+    async def run_owned_message_platform_worker(
+        owned_stop_event,
+        *,
+        config_inbox,
+        outbox_inbox,
+        scheduled_inbox,
+    ):
+        assert isinstance(config_inbox, NotificationInbox)
+        assert isinstance(outbox_inbox, NotificationInbox)
+        assert isinstance(scheduled_inbox, NotificationInbox)
         assert background_ready.is_set()
         record_started_role("message_platform")
         await all_roles_started.wait()
 
-    async def run_owned_session_reply_worker(owned_stop_event, *, startup_cleaned):
+    async def run_owned_session_reply_worker(owned_stop_event, *, inbox, startup_cleaned):
+        assert isinstance(inbox, NotificationInbox)
         assert startup_cleaned is True
         assert background_ready.is_set()
         record_started_role("session_reply")
@@ -432,6 +574,7 @@ async def test_general_worker_stops_other_roles_when_one_lease_returns(monkeypat
     assert len(signal_events) == 1
     assert signal_events[0].is_set()
     assert set(stopped_roles) == {"background_task", "session_reply"}
+    _assert_general_notification_runtime(notification_runtimes)
 
 
 @pytest.mark.asyncio
@@ -486,3 +629,116 @@ def test_install_shutdown_signal_handlers_falls_back_to_signal_module(monkeypatc
 
     assert registered_handlers[0][0] is shutdown_signal
     assert stop_event.is_set()
+
+
+def _patch_notification_worker(monkeypatch, server):
+    config = SimpleNamespace(host="127.0.0.1", port=0, token=secrets.token_urlsafe(32))
+    captured_stop_events = []
+
+    monkeypatch.delenv(NOTIFICATION_READY_FILE_ENV, raising=False)
+    monkeypatch.setattr(notification_worker, "install_shutdown_signal_handlers", captured_stop_events.append)
+    monkeypatch.setattr(notification_worker, "load_notification_config", lambda: config)
+    monkeypatch.setattr(notification_worker, "NotificationServer", lambda _: server)
+
+    return captured_stop_events
+
+
+@pytest.mark.asyncio
+async def test_notification_worker_starts_and_stops_server_after_signal(monkeypatch, tmp_path):
+    start_entered = asyncio.Event()
+    allow_listen = asyncio.Event()
+    stopped = asyncio.Event()
+    ready_file = tmp_path / "ready"
+
+    class FakeServer:
+        async def start(self):
+            start_entered.set()
+            await allow_listen.wait()
+
+        async def stop(self):
+            stopped.set()
+
+    captured_stop_events = _patch_notification_worker(monkeypatch, FakeServer())
+    monkeypatch.setenv(NOTIFICATION_READY_FILE_ENV, str(ready_file))
+
+    task = asyncio.create_task(notification_worker.run_notification_worker())
+    try:
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+        assert not ready_file.exists()
+
+        allow_listen.set()
+
+        async def _wait_for_report():
+            while not ready_file.exists():
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(_wait_for_report(), timeout=1)
+        assert len(captured_stop_events) == 1
+        captured_stop_events[0].set()
+        await asyncio.wait_for(task, timeout=1)
+    finally:
+        allow_listen.set()
+        if captured_stop_events:
+            captured_stop_events[0].set()
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    assert stopped.is_set()
+    assert ready_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_notification_worker_stops_server_and_propagates_cancellation(monkeypatch):
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    class FakeServer:
+        async def start(self):
+            started.set()
+
+        async def stop(self):
+            stopped.set()
+
+    _patch_notification_worker(monkeypatch, FakeServer())
+
+    task = asyncio.create_task(notification_worker.run_notification_worker())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert stopped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_notification_worker_stops_partially_started_server_after_start_error(monkeypatch, tmp_path):
+    stopped = asyncio.Event()
+    partial_resource_open = False
+    start_error = OSError("notification bind failed")
+    ready_file = tmp_path / "ready"
+
+    class FakeServer:
+        async def start(self):
+            nonlocal partial_resource_open
+            partial_resource_open = True
+            raise start_error
+
+        async def stop(self):
+            nonlocal partial_resource_open
+            partial_resource_open = False
+            stopped.set()
+
+    _patch_notification_worker(monkeypatch, FakeServer())
+    monkeypatch.setenv(NOTIFICATION_READY_FILE_ENV, str(ready_file))
+
+    with pytest.raises(OSError) as raised:
+        await notification_worker.run_notification_worker()
+
+    assert raised.value is start_error
+    assert stopped.is_set()
+    assert not partial_resource_open
+    assert not ready_file.exists()

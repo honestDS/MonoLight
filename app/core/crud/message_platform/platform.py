@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.crud.base import CRUDBase
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.transactions import notify_after_commit
 from app.models.message_platform import (
     MessagePlatform,
     MessagePlatformCreate,
@@ -25,6 +27,58 @@ def _parse_weixin_openclaw_session_user_id(session_id: str) -> str:
 
 
 class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, MessagePlatformUpdate]):
+    def _notify_platform(self, db: AsyncSession, platform: MessagePlatform) -> None:
+        notify_after_commit(
+            db,
+            NotificationTopic.MESSAGE_PLATFORM,
+            resource_type="message_platform",
+            resource_id=platform.id,
+            uid=platform.uid,
+        )
+
+    async def create(
+        self,
+        db: AsyncSession,
+        *,
+        obj_in: MessagePlatformCreate | dict[str, Any],
+        update_dict: dict[str, Any] = None,
+        commit: bool = True,
+    ) -> MessagePlatform:
+        platform = await super().create(db, obj_in=obj_in, update_dict=update_dict, commit=False)
+        self._notify_platform(db, platform)
+        if commit:
+            await db.commit()
+        return platform
+
+    async def update(
+        self,
+        db: AsyncSession,
+        *,
+        db_obj: MessagePlatform,
+        obj_in: MessagePlatformUpdate | dict[str, Any],
+        commit: bool = True,
+    ) -> MessagePlatform:
+        platform = await super().update(db, db_obj=db_obj, obj_in=obj_in, commit=False)
+        self._notify_platform(db, platform)
+        if commit:
+            await db.commit()
+        return platform
+
+    async def remove(self, db: AsyncSession, *, id: Any) -> MessagePlatform | None:
+        platform = await self.get(db, id)
+        if platform is None:
+            return None
+        self._notify_platform(db, platform)
+        await db.delete(platform)
+        await db.commit()
+        return platform
+
+    async def delete_by_uid(self, db: AsyncSession, *, uid: str) -> int:
+        count = await super().delete_by_uid(db, uid=uid)
+        if count > 0:
+            notify_after_commit(db, NotificationTopic.MESSAGE_PLATFORM, uid=uid)
+        return count
+
     async def list_by_profile_assignment(
         self,
         db: AsyncSession,
@@ -44,11 +98,14 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         commit: bool = False,
     ) -> int:
         result = await db.execute(update(MessagePlatform).where(MessagePlatform.uid == uid, MessagePlatform.profile_id == profile_id).values(profile_id=None).execution_options(synchronize_session=False))
+        count = result.rowcount or 0
+        if count > 0:
+            notify_after_commit(db, NotificationTopic.MESSAGE_PLATFORM, uid=uid)
         if commit:
             await db.commit()
         else:
             await db.flush()
-        return result.rowcount or 0
+        return count
 
     async def unlink_profile_references(
         self,
@@ -68,8 +125,11 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
             .values(profile_id=None)
             .execution_options(synchronize_session=False)
         )
+        count = result.rowcount or 0
+        if count > 0:
+            notify_after_commit(db, NotificationTopic.MESSAGE_PLATFORM)
         await db.flush()
-        return result.rowcount or 0
+        return count
 
     async def get_by_name(self, db: AsyncSession, name: str, *, uid: str | None) -> MessagePlatform | None:
         result = await db.execute(select(MessagePlatform).where(MessagePlatform.name == name, MessagePlatform.uid == uid))
@@ -115,8 +175,13 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         result = await db.execute(query)
         return result.scalar() or 0
 
-    async def list_enabled(self, db: AsyncSession) -> list[MessagePlatform]:
-        result = await db.execute(select(MessagePlatform).where(MessagePlatform.is_enabled.is_(True)).order_by(MessagePlatform.id.asc()))
+    async def list_enabled(self, db: AsyncSession, *, platform_ids: set[int] | None = None) -> list[MessagePlatform]:
+        if platform_ids is not None and not platform_ids:
+            return []
+        query = select(MessagePlatform).where(MessagePlatform.is_enabled.is_(True))
+        if platform_ids is not None:
+            query = query.where(MessagePlatform.id.in_(platform_ids))
+        result = await db.execute(query.order_by(MessagePlatform.id.asc()))
         return result.scalars().all()
 
     async def list_enabled_by_type(self, db: AsyncSession, platform_type: MessagePlatformType) -> list[MessagePlatform]:
@@ -219,6 +284,7 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         last_error: str | None = None,
         commit: bool = True,
     ) -> MessagePlatform:
+        configuration_changed = (status is not None and status != platform.status) or (config is not None) or (account_id is not None and account_id != platform.account_id)
         if status is not None:
             platform.status = status
         if config is not None:
@@ -234,6 +300,8 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         if last_error is not None:
             platform.last_error = last_error
         db.add(platform)
+        if configuration_changed:
+            self._notify_platform(db, platform)
         await db.flush()
         await db.refresh(platform)
         if commit:

@@ -2,7 +2,11 @@ import asyncio
 
 from sqlalchemy import update
 
-from app.core.constants import END_SESSION_SCOPE_TASK
+from app.core.constants import (
+    END_SESSION_SCOPE_TASK,
+    NOTIFICATION_ERROR_RETRY_SECONDS,
+    NOTIFICATION_RECONCILE_INTERVAL_SECONDS,
+)
 from app.core.crud.account.user import user_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.message import message_crud
@@ -10,6 +14,8 @@ from app.core.crud.session.session import session_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.notifications.inbox import NotificationInbox
+from app.core.notifications.protocol import NotificationTopic
 from app.core.profile.selection import resolve_profile_for_session
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.scheduled_time import get_next_run_times
@@ -22,7 +28,6 @@ from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
 
-SCHEDULED_TASK_POLL_INTERVAL_SECONDS = 1
 SCHEDULED_TASK_FETCH_LIMIT = 100
 
 
@@ -32,11 +37,14 @@ class ScheduledTaskScheduler:
         self._stop_event = asyncio.Event()
         self._active_dispatch_tasks: set[asyncio.Task] = set()
         self._inflight_task_ids: set[int] = set()
+        self._inbox = NotificationInbox()
 
-    def start(self) -> asyncio.Task:
+    def start(self, *, inbox: NotificationInbox | None = None) -> asyncio.Task:
         if self._task and not self._task.done():
             return self._task
         self._stop_event.clear()
+        self._inbox = inbox if inbox is not None else NotificationInbox()
+        self._inbox.wake()
         self._task = asyncio.create_task(self._run_loop())
         return self._task
 
@@ -51,27 +59,60 @@ class ScheduledTaskScheduler:
             await asyncio.gather(*self._active_dispatch_tasks, return_exceptions=True)
 
     async def _run_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        next_reconcile_at = 0.0
+        next_due_at = 0.0
         while not self._stop_event.is_set():
             try:
-                await self.dispatch_due_tasks()
+                now = loop.time()
+                batch = self._inbox.take()
+                full_scan = batch.full_scan or now >= next_reconcile_at or now >= next_due_at
+                task_ids = None
+                if full_scan:
+                    next_reconcile_at = now + NOTIFICATION_RECONCILE_INTERVAL_SECONDS
+                if not full_scan:
+                    task_ids = batch.resource_ids(NotificationTopic.SCHEDULED_TASK, "scheduled_task")
+                if task_ids is None or task_ids:
+                    await self.dispatch_due_tasks(task_ids=task_ids)
+
+                async with AsyncSessionLocal() as db:
+                    next_run_at = await scheduled_task_crud.get_next_run_at(
+                        db,
+                        exclude_ids=set(self._inflight_task_ids),
+                    )
+                local_now = get_local_time()
+                if next_run_at is not None and next_run_at.tzinfo is None:
+                    next_run_at = next_run_at.replace(tzinfo=local_now.tzinfo)
+                next_due_at = float("inf")
+                if next_run_at is not None:
+                    next_due_at = loop.time() + max(0.0, (next_run_at - local_now).total_seconds())
+
+                await self._inbox.wait(max(0.0, min(next_reconcile_at, next_due_at) - loop.time()))
             except Exception:
                 logger.bind(component="scheduled_task_scheduler").exception(t("LOG_SCHEDULED_TASK_DISPATCH_FAILED"))
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=SCHEDULED_TASK_POLL_INTERVAL_SECONDS)
-            except TimeoutError:
-                continue
+                self._inbox.wake()
+                await asyncio.sleep(NOTIFICATION_ERROR_RETRY_SECONDS)
 
-    async def dispatch_due_tasks(self) -> None:
+    async def dispatch_due_tasks(self, *, task_ids: set[int] | None = None) -> None:
         async with AsyncSessionLocal() as db:
-            scheduled_tasks = await scheduled_task_crud.list_due(db, limit=SCHEDULED_TASK_FETCH_LIMIT)
+            scheduled_tasks = await scheduled_task_crud.list_due(
+                db,
+                limit=SCHEDULED_TASK_FETCH_LIMIT,
+                task_ids=task_ids,
+                exclude_ids=set(self._inflight_task_ids),
+            )
         for scheduled_task in scheduled_tasks:
             if scheduled_task.id is None or scheduled_task.id in self._inflight_task_ids:
                 continue
             self._inflight_task_ids.add(scheduled_task.id)
-            task = asyncio.create_task(self._dispatch_one(scheduled_task.id))
+            task = asyncio.create_task(self._run_dispatch(scheduled_task.id))
             self._active_dispatch_tasks.add(task)
-            task.add_done_callback(self._active_dispatch_tasks.discard)
-            task.add_done_callback(lambda _task, task_id=scheduled_task.id: self._inflight_task_ids.discard(task_id))
+            task.add_done_callback(lambda completed_task, task_id=scheduled_task.id: self._dispatch_finished(task_id, completed_task))
+
+    def _dispatch_finished(self, task_id: int, task: asyncio.Task) -> None:
+        self._active_dispatch_tasks.discard(task)
+        self._inflight_task_ids.discard(task_id)
+        self._inbox.wake()
 
     async def _dispatch_one(self, scheduled_task_id: int) -> None:
         async with AsyncSessionLocal() as db:
@@ -79,6 +120,13 @@ class ScheduledTaskScheduler:
             if scheduled_task is None:
                 return
             await self._dispatch_one_with_db(db, scheduled_task)
+
+    async def _run_dispatch(self, scheduled_task_id: int) -> None:
+        try:
+            await self._dispatch_one(scheduled_task_id)
+        except Exception:
+            logger.bind(component="scheduled_task_scheduler", scheduled_task_id=scheduled_task_id).exception(t("LOG_SCHEDULED_TASK_DISPATCH_FAILED"))
+            await asyncio.sleep(NOTIFICATION_ERROR_RETRY_SECONDS)
 
     async def _dispatch_one_with_db(self, db, scheduled_task: ScheduledTask) -> None:
         log = logger.bind(
@@ -186,6 +234,3 @@ class ScheduledTaskScheduler:
         await db.flush()
         await db.commit()
         log.bind(message_id=trigger_message.id, profile_id=profile.id).info(t("LOG_SCHEDULED_TASK_MESSAGE_QUEUED"))
-
-
-scheduled_task_scheduler = ScheduledTaskScheduler()

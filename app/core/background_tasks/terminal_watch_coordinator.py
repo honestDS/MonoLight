@@ -9,6 +9,8 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.terminal_watch import get_terminal_watch_deliveries, terminal_watch_reply_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.log import get_logger
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.transactions import notify_after_commit
 from app.core.terminal.schemas import TERMINAL_SESSION_FINAL_STATUSES
 from app.core.utils.background_task_result import build_background_task_success_result
 from app.core.utils.dispatcher.frozen_context import capture_frozen_context_messages, serialize_frozen_context_messages
@@ -708,6 +710,15 @@ async def persist_terminal_completion(
     active_task.extra = task_extra
     db.add(active_task)
     await db.flush()
+    notify_after_commit(
+        db,
+        NotificationTopic.BACKGROUND_TASK,
+        resource_type="background_task",
+        resource_id=active_task.id,
+        uid=active_task.uid,
+        session_id=active_task.session_id,
+        profile_id=active_task.profile_id,
+    )
 
     subscriptions = await background_task_crud.list_terminal_watch_subscriptions(
         db,

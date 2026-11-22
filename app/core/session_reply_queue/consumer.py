@@ -1,4 +1,5 @@
 import asyncio
+import time
 import uuid
 from contextlib import ExitStack
 
@@ -6,13 +7,13 @@ from app.core.constants import (
     ERR_CONTEXT_SUMMARY_COMPRESSION_FAILED,
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
     ERR_SUBAGENT_CONTEXT_INVALID,
+    NOTIFICATION_ERROR_RETRY_SECONDS,
     SESSION_REPLY_CLAIM_BATCH_SIZE,
     SESSION_REPLY_CLEANUP_BATCH_SIZE,
     SESSION_REPLY_CLEANUP_INTERVAL_SECONDS,
     SESSION_REPLY_CLEANUP_MAX_ITEMS_PER_RUN,
     SESSION_REPLY_LEASE_RENEW_INTERVAL_SECONDS,
     SESSION_REPLY_LEASE_SECONDS,
-    SESSION_REPLY_POLL_INTERVAL_SECONDS,
     SESSION_REPLY_RECOVERY_INTERVAL_SECONDS,
     SUBAGENT_CLEANUP_BATCH_SIZE,
     SUBAGENT_CLEANUP_MAX_ITEMS_PER_RUN,
@@ -29,6 +30,8 @@ from app.core.exceptions import BaseBusinessException, LLMContextLengthException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.log import agent_log_context, get_logger
+from app.core.notifications.inbox import NotificationBatch, NotificationInbox
+from app.core.notifications.protocol import Notification, NotificationTopic
 from app.core.session_reply_queue.child_recovery import reconcile_child_work
 from app.core.session_reply_queue.executor import (
     execute_session_reply_work,
@@ -45,6 +48,19 @@ from app.providers.database import AsyncSessionLocal
 logger = get_logger(__name__)
 
 
+def _resource_id(notification: Notification, resource_type: str) -> int | None:
+    resource = notification.resource
+    if resource is None or resource.type != resource_type:
+        return None
+    try:
+        resource_id = int(resource.id)
+    except ValueError:
+        return None
+    if resource_id <= 0:
+        return None
+    return resource_id
+
+
 class SessionReplyConsumer:
     def __init__(self) -> None:
         self._stop_event = asyncio.Event()
@@ -54,11 +70,16 @@ class SessionReplyConsumer:
         self._last_lease_renewal_at = 0.0
         self._next_cleanup_at = 0.0
         self._notification_cleanup_after_id = 0
+        self._inbox = NotificationInbox()
 
-    def start(self) -> asyncio.Task:
+    def start(self, *, inbox: NotificationInbox | None = None) -> asyncio.Task:
         if self._task and not self._task.done():
             return self._task
         self._stop_event.clear()
+        self._inbox = inbox if inbox is not None else NotificationInbox()
+        self._inbox.wake()
+        self._last_recovery_at = 0.0
+        self._last_lease_renewal_at = 0.0
         self._next_cleanup_at = 0.0
         self._notification_cleanup_after_id = 0
         self._task = asyncio.create_task(self._run())
@@ -81,102 +102,218 @@ class SessionReplyConsumer:
         task_entry = self._running.get(work_id)
         if task_entry is not None and task_entry[0] is finished_task:
             self._running.pop(work_id, None)
+            self._inbox.wake()
+
+    async def _dispatch_pending(
+        self,
+        *,
+        session_ids: set[str] | None = None,
+        profile_ids: set[int] | None = None,
+    ) -> int:
+        if session_ids == set() and profile_ids == set():
+            return 0
+
+        async with AsyncSessionLocal() as db:
+            settings = await system_setting_crud.get_runtime_settings(db)
+            agent_profile_ids = await session_reply_work_item_crud.list_ready_agent_profile_ids(
+                db,
+                session_ids=session_ids,
+                profile_ids=profile_ids,
+            )
+            profiles = await profile_crud.get_by_ids(db, agent_profile_ids)
+        scheduled_profile_limits: dict[int, int] = {}
+        subagent_profile_limits: dict[int, int] = {}
+        for profile in profiles:
+            if profile.id is None:
+                continue
+            profile_config = ProfileConfig.model_validate(profile.configs)
+            scheduled_profile_limits[profile.id] = profile_config.tool.scheduled_task_max_concurrency
+            subagent_profile_limits[profile.id] = profile_config.tool.subagent_max_concurrency
+
+        claimed_count = 0
+        for independent_only, batch_size in (
+            (False, SESSION_REPLY_CLAIM_BATCH_SIZE),
+            (True, min(SESSION_REPLY_CLAIM_BATCH_SIZE, settings.agent_work_max_concurrency)),
+        ):
+            for _ in range(batch_size):
+                if self._stop_event.is_set():
+                    break
+                worker_id = uuid.uuid4().hex
+                async with AsyncSessionLocal() as db:
+                    work = await session_reply_work_item_crud.claim_next(
+                        db,
+                        worker_id=worker_id,
+                        lease_seconds=SESSION_REPLY_LEASE_SECONDS,
+                        scheduled_profile_limits=scheduled_profile_limits,
+                        independent_only=independent_only,
+                        agent_work_max_concurrency=settings.agent_work_max_concurrency,
+                        subagent_profile_limits=subagent_profile_limits,
+                        exclude_work_ids=set(self._running),
+                        session_ids=session_ids,
+                        profile_ids=profile_ids,
+                    )
+                if work is None or work.id is None:
+                    break
+                language = str((work.execution_state or {}).get("language") or "zh")
+                task = asyncio.create_task(self._run_claimed(work.id, worker_id, work.attempt_count, work.max_attempts, language))
+                self._running[work.id] = (task, worker_id)
+                task.add_done_callback(lambda finished_task, work_id=work.id: self._discard_completed(work_id, finished_task))
+                claimed_count += 1
+        return claimed_count
+
+    async def _check_running_claims(self, claims: dict[int, str], *, now: float, renew: bool) -> None:
+        if not claims:
+            return
+
+        claims_to_cancel: list[tuple[int, str]] = []
+        async with AsyncSessionLocal() as db:
+            if renew:
+                active_claims = await session_reply_work_item_crud.renew_active_claims(
+                    db,
+                    claims=claims,
+                    lease_seconds=SESSION_REPLY_LEASE_SECONDS,
+                )
+                self._last_lease_renewal_at = now
+            else:
+                active_claims = await session_reply_work_item_crud.get_active_claims(db, claims)
+            for work_id, worker_id in claims.items():
+                if (work_id, worker_id) in active_claims:
+                    continue
+                work = await session_reply_work_item_crud.get(db, work_id)
+                if (
+                    work is not None
+                    and work.locked_by is None
+                    and work.status
+                    in {
+                        SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+                        SessionReplyWorkStatus.READY_FOR_LLM,
+                        SessionReplyWorkStatus.SUCCEEDED,
+                    }
+                ):
+                    continue
+                claims_to_cancel.append((work_id, worker_id))
+        for work_id, _worker_id in claims_to_cancel:
+            task_entry = self._running.get(work_id)
+            if task_entry is not None and not task_entry[0].done():
+                task_entry[0].cancel()
+
+    async def _dispatch_scope(self, batch: NotificationBatch) -> tuple[set[str] | None, set[int] | None]:
+        if batch.full_scan:
+            return None, None
+        if not batch.notifications:
+            return set(), set()
+
+        session_ids: set[str] = set()
+        profile_ids: set[int] = set()
+        work_ids: set[int] = set()
+        for notification in batch.notifications:
+            if notification.topic == NotificationTopic.SYSTEM_SETTINGS:
+                return None, None
+            if notification.topic == NotificationTopic.SESSION_REPLY and notification.event == "capacity":
+                return None, None
+            session_id = notification.scope.session_id
+            if notification.topic == NotificationTopic.SESSION_REPLY and session_id:
+                session_ids.add(session_id)
+                continue
+            work_id = _resource_id(notification, "session_reply_work")
+            if notification.topic == NotificationTopic.SESSION_REPLY and work_id is not None:
+                work_ids.add(work_id)
+                continue
+            profile_id = notification.scope.profile_id
+            if notification.topic in {NotificationTopic.SESSION_REPLY, NotificationTopic.PROFILE_CONFIG} and profile_id is not None:
+                profile_ids.add(profile_id)
+                continue
+            profile_id = _resource_id(notification, "profile")
+            if notification.topic == NotificationTopic.PROFILE_CONFIG and profile_id is not None:
+                profile_ids.add(profile_id)
+                continue
+            return None, None
+
+        if work_ids:
+            async with AsyncSessionLocal() as db:
+                works = await session_reply_work_item_crud.get_by_ids(db, work_ids)
+            for work in works:
+                session_ids.add(work.session_id)
+        return session_ids, profile_ids
 
     async def _run(self) -> None:
         loop = asyncio.get_running_loop()
+        next_available_at = float("inf")
         while not self._stop_event.is_set():
             try:
                 now = loop.time()
-                claims = {work_id: worker_id for work_id, (_task, worker_id) in self._running.items()}
-                if claims:
-                    claims_to_cancel: list[tuple[int, str]] = []
-                    async with AsyncSessionLocal() as db:
-                        if now - self._last_lease_renewal_at >= SESSION_REPLY_LEASE_RENEW_INTERVAL_SECONDS:
-                            active_claims = await session_reply_work_item_crud.renew_active_claims(
-                                db,
-                                claims=claims,
-                                lease_seconds=SESSION_REPLY_LEASE_SECONDS,
-                            )
-                            self._last_lease_renewal_at = now
-                        else:
-                            active_claims = await session_reply_work_item_crud.get_active_claims(db, claims)
-                        for work_id, worker_id in claims.items():
-                            if (work_id, worker_id) in active_claims:
-                                continue
-                            work = await session_reply_work_item_crud.get(db, work_id)
-                            if (
-                                work is not None
-                                and work.locked_by is None
-                                and work.status
-                                in {
-                                    SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
-                                    SessionReplyWorkStatus.READY_FOR_LLM,
-                                    SessionReplyWorkStatus.SUCCEEDED,
-                                }
-                            ):
-                                continue
-                            claims_to_cancel.append((work_id, worker_id))
-                    for work_id, _worker_id in claims_to_cancel:
-                        task_entry = self._running.get(work_id)
-                        if task_entry is not None and not task_entry[0].done():
-                            task_entry[0].cancel()
+                batch = self._inbox.take()
+                recovery_due = now - self._last_recovery_at >= SESSION_REPLY_RECOVERY_INTERVAL_SECONDS
+                full_scan = batch.full_scan or recovery_due or now >= next_available_at
+                if full_scan:
+                    session_ids, profile_ids = None, None
+                else:
+                    session_ids, profile_ids = await self._dispatch_scope(batch)
+                    full_scan = session_ids is None and profile_ids is None
 
-                if now - self._last_recovery_at >= SESSION_REPLY_RECOVERY_INTERVAL_SECONDS:
+                claims = {work_id: worker_id for work_id, (_task, worker_id) in self._running.items()}
+                renew_due = bool(claims) and now - self._last_lease_renewal_at >= SESSION_REPLY_LEASE_RENEW_INTERVAL_SECONDS
+                resource_work_ids: set[int] = set()
+                for notification in batch.notifications:
+                    if notification.topic != NotificationTopic.SESSION_REPLY:
+                        continue
+                    work_id = _resource_id(notification, "session_reply_work")
+                    if work_id is not None:
+                        resource_work_ids.add(work_id)
+                scoped_claims: dict[int, str] = {}
+                for work_id, worker_id in claims.items():
+                    if work_id in resource_work_ids:
+                        scoped_claims[work_id] = worker_id
+                if renew_due or full_scan:
+                    await self._check_running_claims(claims, now=now, renew=renew_due)
+                elif claims and resource_work_ids:
+                    await self._check_running_claims(
+                        scoped_claims,
+                        now=now,
+                        renew=False,
+                    )
+
+                if recovery_due:
                     await self._recover_expired()
                     self._last_recovery_at = now
 
                 await self._cleanup_terminal_items_if_due(now)
 
-                async with AsyncSessionLocal() as db:
-                    settings = await system_setting_crud.get_runtime_settings(db)
-                    agent_profile_ids = await session_reply_work_item_crud.list_ready_agent_profile_ids(db)
-                    profiles = await profile_crud.get_by_ids(db, agent_profile_ids)
-                scheduled_profile_limits: dict[int, int] = {}
-                subagent_profile_limits: dict[int, int] = {}
-                for profile in profiles:
-                    if profile.id is None:
-                        continue
-                    profile_config = ProfileConfig.model_validate(profile.configs)
-                    scheduled_profile_limits[profile.id] = profile_config.tool.scheduled_task_max_concurrency
-                    subagent_profile_limits[profile.id] = profile_config.tool.subagent_max_concurrency
-
+                dispatch_triggered = bool(batch.notifications) or full_scan
                 claimed_count = 0
-                for independent_only, batch_size in (
-                    (False, SESSION_REPLY_CLAIM_BATCH_SIZE),
-                    (True, min(SESSION_REPLY_CLAIM_BATCH_SIZE, settings.agent_work_max_concurrency)),
-                ):
-                    for _ in range(batch_size):
-                        if self._stop_event.is_set():
-                            break
-                        worker_id = uuid.uuid4().hex
-                        async with AsyncSessionLocal() as db:
-                            work = await session_reply_work_item_crud.claim_next(
-                                db,
-                                worker_id=worker_id,
-                                lease_seconds=SESSION_REPLY_LEASE_SECONDS,
-                                scheduled_profile_limits=scheduled_profile_limits,
-                                independent_only=independent_only,
-                                agent_work_max_concurrency=settings.agent_work_max_concurrency,
-                                subagent_profile_limits=subagent_profile_limits,
-                                exclude_work_ids=set(self._running),
-                            )
-                        if work is None or work.id is None:
-                            break
-                        language = str((work.execution_state or {}).get("language") or "zh")
-                        task = asyncio.create_task(self._run_claimed(work.id, worker_id, work.attempt_count, work.max_attempts, language))
-                        self._running[work.id] = (task, worker_id)
-                        task.add_done_callback(lambda finished_task, work_id=work.id: self._discard_completed(work_id, finished_task))
-                        claimed_count += 1
+                available_deadline = float("inf")
+                next_available = None
+                if dispatch_triggered:
+                    claimed_count = await self._dispatch_pending(session_ids=session_ids, profile_ids=profile_ids)
+                    async with AsyncSessionLocal() as db:
+                        next_available = await session_reply_work_item_crud.get_next_available_at(
+                            db,
+                            session_ids=session_ids,
+                            profile_ids=profile_ids,
+                        )
+                if next_available is not None:
+                    available_deadline = loop.time() + max(0.0, next_available - time.time())
+                if dispatch_triggered and full_scan:
+                    next_available_at = available_deadline
+                if dispatch_triggered and not full_scan:
+                    next_available_at = min(next_available_at, available_deadline)
+                if claimed_count >= SESSION_REPLY_CLAIM_BATCH_SIZE:
+                    self._inbox.wake()
 
-                if claimed_count == 0:
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=SESSION_REPLY_POLL_INTERVAL_SECONDS)
-            except TimeoutError:
-                continue
+                deadlines = [
+                    self._last_recovery_at + SESSION_REPLY_RECOVERY_INTERVAL_SECONDS,
+                    next_available_at,
+                    self._next_cleanup_at,
+                ]
+                if self._running:
+                    deadlines.append(self._last_lease_renewal_at + SESSION_REPLY_LEASE_RENEW_INTERVAL_SECONDS)
+                await self._inbox.wait(max(0.0, min(deadlines) - loop.time()))
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Session reply consumer loop failed")
-                await asyncio.sleep(SESSION_REPLY_POLL_INTERVAL_SECONDS)
+                self._inbox.wake()
+                await asyncio.sleep(NOTIFICATION_ERROR_RETRY_SECONDS)
 
     async def _run_claimed(self, work_id: int, worker_id: str, attempt_count: int, max_attempts: int, language: str = "zh") -> None:
         """执行已领取回复工作并根据活动审计状态决定失败处理方式。"""
@@ -358,6 +495,3 @@ class SessionReplyConsumer:
 
         if deleted_count > 0:
             logger.bind(subagent_notification_count=deleted_count).info("Subagent notifications cleaned")
-
-
-session_reply_consumer = SessionReplyConsumer()

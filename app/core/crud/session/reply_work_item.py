@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import JSON, String, and_, case, cast, delete, exists, func, literal, or_, type_coerce, update
+from sqlalchemy import JSON, String, and_, case, cast, delete, exists, false, func, literal, or_, type_coerce, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -24,6 +24,8 @@ from app.core.constants import (
 from app.core.crud.session.reply_checkpoint_message import session_reply_checkpoint_message_crud
 from app.core.crud.session.subagent_revision import bump_subagent_board_revisions
 from app.core.i18n import t
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.transactions import notify_after_commit
 from app.core.utils.time import get_local_time
 from app.models.audit import AUDIT_TERMINAL_STATUSES, AuditRecord
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
@@ -211,6 +213,23 @@ def _work_category_expression(table: Any) -> Any:
     )
 
 
+def _dispatch_scope_conditions(
+    *,
+    session_ids: set[str] | None,
+    profile_ids: set[int] | None,
+) -> list[Any]:
+    if session_ids is None and profile_ids is None:
+        return []
+    conditions: list[Any] = []
+    if session_ids:
+        conditions.append(SessionReplyWorkItem.session_id.in_(session_ids))
+    if profile_ids:
+        conditions.append(SessionReplyWorkItem.profile_id.in_(profile_ids))
+    if not conditions:
+        return [false()]
+    return [or_(*conditions)]
+
+
 def _is_subagent_board_review() -> Any:
     return SessionReplyWorkItem.execution_state["subagent_board_review_pending"].as_boolean().is_(True)
 
@@ -226,6 +245,32 @@ async def _bump_subagent_board_revision_for_work(db: AsyncSession, work_id: int)
     if session_id is None:
         return
     await bump_subagent_board_revisions(db, [session_id])
+
+
+def _notify_work_change(
+    db: AsyncSession,
+    *,
+    work_id: int | None = None,
+    uid: str | None = None,
+    session_id: str | None = None,
+    profile_id: int | None = None,
+    event: str = "capacity",
+) -> None:
+    resource_type: str | None = None
+    resource_id: int | None = None
+    if work_id is not None:
+        resource_type = "session_reply_work"
+        resource_id = work_id
+    notify_after_commit(
+        db,
+        NotificationTopic.SESSION_REPLY,
+        event=event,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        uid=uid,
+        session_id=session_id,
+        profile_id=profile_id,
+    )
 
 
 @dataclass(frozen=True)
@@ -405,6 +450,12 @@ class CRUDSessionReplyWorkItem:
     async def get_by_dedupe_key(self, db: AsyncSession, dedupe_key: str) -> SessionReplyWorkItem | None:
         result = await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.dedupe_key == dedupe_key))
         return result.scalars().first()
+
+    async def get_by_ids(self, db: AsyncSession, work_ids: set[int]) -> list[SessionReplyWorkItem]:
+        if not work_ids:
+            return []
+        result = await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id.in_(work_ids)))
+        return list(result.scalars().all())
 
     async def get_by_input_message(
         self,
@@ -669,6 +720,7 @@ class CRUDSessionReplyWorkItem:
         _, session_id = yielded
         sequence_no = await self.allocate_sequence_no(db, session_id)
         await db.execute(update(SessionReplyWorkItem).where(SessionReplyWorkItem.id == work_id).values(sequence_no=sequence_no, updated_at=get_local_time()))
+        _notify_work_change(db, work_id=work_id, session_id=session_id, event="capacity")
         if commit:
             await db.commit()
         return True
@@ -736,6 +788,14 @@ class CRUDSessionReplyWorkItem:
             if commit:
                 await db.commit()
             return work, False
+        _notify_work_change(
+            db,
+            work_id=work.id,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            event="ready",
+        )
         if commit:
             await db.commit()
         return work, True
@@ -773,6 +833,8 @@ class CRUDSessionReplyWorkItem:
         agent_work_max_concurrency: int = 4,
         subagent_profile_limits: dict[int, int] | None = None,
         exclude_work_ids: set[int] | None = None,
+        session_ids: set[str] | None = None,
+        profile_ids: set[int] | None = None,
     ) -> SessionReplyWorkItem | None:
         now = int(time.time())
         earlier_work = SessionReplyWorkItem.__table__.alias("earlier_session_reply_work")
@@ -848,6 +910,7 @@ class CRUDSessionReplyWorkItem:
             scheduled_profile_capacity_available,
             subagent_profile_capacity_available,
         ]
+        candidate_conditions.extend(_dispatch_scope_conditions(session_ids=session_ids, profile_ids=profile_ids))
         if independent_only is False:
             candidate_conditions.append(work_category == SessionReplyWorkCategory.FOREGROUND.value)
         elif independent_only is True:
@@ -972,16 +1035,39 @@ class CRUDSessionReplyWorkItem:
         await db.commit()
         return active_claims
 
-    async def list_ready_agent_profile_ids(self, db: AsyncSession) -> set[int]:
+    async def list_ready_agent_profile_ids(
+        self,
+        db: AsyncSession,
+        *,
+        session_ids: set[str] | None = None,
+        profile_ids: set[int] | None = None,
+    ) -> set[int]:
         result = await db.execute(
             select(SessionReplyWorkItem.profile_id)
             .where(
                 SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
                 _work_category_expression(SessionReplyWorkItem.__table__) != SessionReplyWorkCategory.FOREGROUND.value,
+                *_dispatch_scope_conditions(session_ids=session_ids, profile_ids=profile_ids),
             )
             .distinct()
         )
         return set(result.scalars().all())
+
+    async def get_next_available_at(
+        self,
+        db: AsyncSession,
+        *,
+        session_ids: set[str] | None = None,
+        profile_ids: set[int] | None = None,
+    ) -> int | None:
+        result = await db.execute(
+            select(func.min(SessionReplyWorkItem.available_at)).where(
+                SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
+                SessionReplyWorkItem.available_at > int(time.time()),
+                *_dispatch_scope_conditions(session_ids=session_ids, profile_ids=profile_ids),
+            )
+        )
+        return result.scalar_one_or_none()
 
     async def renew_lease(
         self,
@@ -1031,6 +1117,7 @@ class CRUDSessionReplyWorkItem:
         released = (result.rowcount or 0) == 1
         if released:
             await _bump_subagent_board_revision_for_work(db, work_id)
+            _notify_work_change(db, work_id=work_id, event="capacity")
         await db.commit()
         return released
 
@@ -1051,9 +1138,15 @@ class CRUDSessionReplyWorkItem:
         await db.execute(delete(SessionReplyStreamEvent).where(SessionReplyStreamEvent.work_id.in_(work_ids)).execution_options(synchronize_session=False))
         result = await db.execute(delete(SessionReplyWorkItem).where(*work_conditions).execution_options(synchronize_session=False))
         await db.execute(delete(SessionReplySequence).where(SessionReplySequence.session_id == session_id).execution_options(synchronize_session=False))
+        deleted_count = result.rowcount or 0
+        notification_uid = uid
+        if is_admin:
+            notification_uid = None
+        if deleted_count > 0:
+            _notify_work_change(db, uid=notification_uid, session_id=session_id, event="capacity")
         if commit:
             await db.commit()
-        return result.rowcount or 0
+        return deleted_count
 
     async def _cleanup_excess_work(
         self,
@@ -1353,6 +1446,11 @@ class CRUDSessionReplyWorkItem:
         cancelled_count = (non_subagent_result.rowcount or 0) + (subagent_result.rowcount or 0)
         if (subagent_result.rowcount or 0) > 0:
             await bump_subagent_board_revisions(db, [session_id])
+        notification_uid = uid
+        if is_admin:
+            notification_uid = None
+        if cancelled_count > 0:
+            _notify_work_change(db, uid=notification_uid, session_id=session_id, event="capacity")
         if commit:
             await db.commit()
         return cancelled_count
@@ -1380,11 +1478,14 @@ class CRUDSessionReplyWorkItem:
                 updated_at=get_local_time(),
             )
         )
+        cancelled_count = result.rowcount or 0
+        if cancelled_count > 0:
+            _notify_work_change(db, uid=uid, profile_id=profile_id, event="capacity")
         if commit:
             await db.commit()
         else:
             await db.flush()
-        return result.rowcount or 0
+        return cancelled_count
 
     async def cancel_background_tool_summaries(
         self,
@@ -1420,6 +1521,8 @@ class CRUDSessionReplyWorkItem:
                 )
             )
             cancelled_count = result.rowcount or 0
+        if cancelled_count > 0:
+            _notify_work_change(db, event="capacity")
         if commit:
             await db.commit()
         return cancelled_count
@@ -1556,6 +1659,7 @@ class CRUDSessionReplyWorkItem:
         status = values.get("status")
         if claimed and status is not None and status != SessionReplyWorkStatus.RUNNING:
             await _bump_subagent_board_revision_for_work(db, work_id)
+            _notify_work_change(db, work_id=work_id, event="capacity")
         if commit:
             await db.commit()
         return claimed
@@ -1585,7 +1689,10 @@ class CRUDSessionReplyWorkItem:
             )
             .returning(SessionReplyWorkItem.id)
         )
-        return [work_id for work_id in result.scalars().all() if work_id is not None]
+        merged_ids = [work_id for work_id in result.scalars().all() if work_id is not None]
+        for work_id in merged_ids:
+            _notify_work_change(db, work_id=work_id, event="capacity")
+        return merged_ids
 
     async def mark_terminal(
         self,

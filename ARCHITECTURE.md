@@ -24,7 +24,7 @@ Monolight/
 ├── README_ZH.md            # 中文项目说明
 ├── logo.jpg                # 项目 Logo
 ├── main.py                 # Web 应用入口
-├── start.py                # 多进程启动协调
+├── start.py                # Web、通知中心与后台进程启动协调
 ├── pytest.ini              # Pytest 配置
 ├── requirements.txt        # 后端依赖
 └── ruff.toml               # Ruff 配置
@@ -57,11 +57,12 @@ app/
 ```text
 app/workers/
 ├── __init__.py             # Worker 包标识
-├── general.py              # 消息平台、通用后台任务和会话回复三个独立租约角色的合并进程入口
+├── general.py              # 共用通知接入下消息平台、通用后台任务和会话回复三个独立租约角色的合并进程入口
 ├── background_task.py      # 通用后台任务角色（含日志清理，默认由 general 合并运行，保留独立调试入口）
 ├── lease.py                # Worker 协调支持
 ├── memory.py               # 长期记忆与知识作业 Worker
 ├── message_platform.py     # 消息平台与定时任务角色实现与独立调试入口（默认由 general 合并运行）
+├── notification.py         # 支持本机或共享部署的 TCP 通知中心入口
 ├── session_reply.py        # 会话回复角色实现与独立调试入口（默认由 general 合并运行）
 ├── terminal.py             # 交互终端 Worker
 └── signals.py              # Worker 进程信号支持
@@ -135,6 +136,7 @@ app/core/
 ├── memory/                 # 长期记忆领域与管理服务
 ├── memory_jobs/            # 长期记忆作业组件
 ├── message_platforms/      # 消息平台应用服务
+├── notifications/          # 通知协议、主题分发、客户端与进程接入；内存管理连接/订阅，不负责任务持久化、业务执行或数据库轮询
 ├── profile/                # Profile 配置与生命周期服务
 ├── rerank/                 # 知识库重排能力
 ├── retrieval/              # 知识库检索能力
@@ -186,6 +188,16 @@ app/core/session/
 ├── source.py               # 会话来源信息
 ├── subagent_board.py       # 会话子代理看板列表与详情查询
 └── tool_cancellation.py    # 停止会话回复、回复失败与启动恢复时补齐工具回执
+
+app/core/notifications/
+├── __init__.py             # 通知中心包标识
+├── config.py               # 通知中心监听/连接地址与认证配置
+├── protocol.py             # 通知协议与主题定义
+├── server.py               # 通知中心服务端与内存连接、订阅管理
+├── client.py               # 通知中心客户端与主题订阅能力
+├── inbox.py                # 合并唤醒与资源批次
+├── transactions.py         # 事务提交后通知发布与有界队列
+└── runtime.py              # 进程局部发布/订阅生命周期
 
 app/core/setup/
 ├── __init__.py             # 系统初始化包标识
@@ -1078,6 +1090,7 @@ providers / transformers → external services
 - Web 进程同时承载 FastAPI 接口、WebSocket 接口、对话适配入口和预构建 Dashboard 静态资源。
 - 默认长期后台进程为 `general`、`memory` 和 `terminal` 三个；`general` 合并承载消息平台、通用后台任务和会话回复三个角色，三个角色仍分别使用原数据库租约，因此多实例互斥语义不变。
 - `memory` 与 `terminal` 继续作为独立长期进程运行，以保持资源和故障隔离。
+- 通知中心既可作为本机独立进程运行，也可由多机器共享；其内存仅管理连接与订阅，任务持久化和领取仍由数据库负责。
 - Web 进程与 Worker 进程通过核心服务及持久化资源共享应用数据，不直接形成前端依赖。
 - 数据库、向量存储、日志、审计文件和临时文件构成运行期资源边界。
 - 非交互 Shell、图像生成和终端观察由后台任务执行，结果通过回复队列交付。

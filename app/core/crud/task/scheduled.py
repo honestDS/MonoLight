@@ -1,11 +1,26 @@
+from datetime import datetime
+
 from sqlalchemy import delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.crud.base import CRUDBase
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.transactions import notify_after_commit
 from app.core.utils.scheduled_time import get_next_run_times, validate_schedule
 from app.core.utils.time import get_local_time
 from app.models.scheduled_task import ScheduledTask, ScheduledTaskCreate, ScheduledTaskStatus
+
+
+def _notify_scheduled_task(db: AsyncSession, task: ScheduledTask) -> None:
+    notify_after_commit(
+        db,
+        NotificationTopic.SCHEDULED_TASK,
+        resource_type="scheduled_task",
+        resource_id=task.id,
+        uid=task.uid,
+        session_id=task.session_id,
+    )
 
 
 class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTaskCreate]):
@@ -60,6 +75,8 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
             )[0],
         )
         db.add(scheduled_task)
+        await db.flush()
+        _notify_scheduled_task(db, scheduled_task)
         await db.commit()
         await db.refresh(scheduled_task)
         return scheduled_task
@@ -104,17 +121,44 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         result = await db.execute(stmt)
         return result.scalar() or 0
 
-    async def list_due(self, db: AsyncSession, *, limit: int = 100) -> list[ScheduledTask]:
+    async def list_due(
+        self,
+        db: AsyncSession,
+        *,
+        limit: int = 100,
+        task_ids: set[int] | None = None,
+        exclude_ids: set[int] | None = None,
+    ) -> list[ScheduledTask]:
+        if task_ids is not None and not task_ids:
+            return []
         now = get_local_time()
-        stmt = select(ScheduledTask).where(ScheduledTask.status == ScheduledTaskStatus.ENABLED).where(ScheduledTask.next_run_at <= now).order_by(ScheduledTask.next_run_at.asc()).limit(limit)
+        stmt = select(ScheduledTask).where(ScheduledTask.status == ScheduledTaskStatus.ENABLED).where(ScheduledTask.next_run_at <= now)
+        if task_ids is not None:
+            stmt = stmt.where(ScheduledTask.id.in_(task_ids))
+        if exclude_ids:
+            stmt = stmt.where(ScheduledTask.id.not_in(exclude_ids))
+        stmt = stmt.order_by(ScheduledTask.next_run_at.asc()).limit(limit)
         result = await db.execute(stmt)
         return list(result.scalars().all())
+
+    async def get_next_run_at(
+        self,
+        db: AsyncSession,
+        *,
+        exclude_ids: set[int] | None = None,
+    ) -> datetime | None:
+        stmt = select(func.min(ScheduledTask.next_run_at)).where(ScheduledTask.status == ScheduledTaskStatus.ENABLED)
+        if exclude_ids:
+            stmt = stmt.where(ScheduledTask.id.not_in(exclude_ids))
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def update_scheduled_task(self, db: AsyncSession, *, scheduled_task: ScheduledTask, obj_in: dict) -> ScheduledTask:
         for field, value in obj_in.items():
             setattr(scheduled_task, field, value)
         scheduled_task.updated_at = get_local_time()
         db.add(scheduled_task)
+        _notify_scheduled_task(db, scheduled_task)
         await db.commit()
         await db.refresh(scheduled_task)
         return scheduled_task
@@ -136,6 +180,7 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
             )[0]
         scheduled_task.updated_at = now
         db.add(scheduled_task)
+        _notify_scheduled_task(db, scheduled_task)
         await db.commit()
         await db.refresh(scheduled_task)
         return scheduled_task
@@ -154,6 +199,7 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
             )[0]
         scheduled_task.updated_at = now
         db.add(scheduled_task)
+        _notify_scheduled_task(db, scheduled_task)
         await db.commit()
         await db.refresh(scheduled_task)
         return scheduled_task
@@ -162,6 +208,7 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         scheduled_task.status = ScheduledTaskStatus.DISABLED
         scheduled_task.updated_at = get_local_time()
         db.add(scheduled_task)
+        _notify_scheduled_task(db, scheduled_task)
         await db.commit()
         await db.refresh(scheduled_task)
         return scheduled_task
@@ -175,6 +222,7 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
             scheduled_task.status = ScheduledTaskStatus.DISABLED
             scheduled_task.updated_at = now
             db.add(scheduled_task)
+            _notify_scheduled_task(db, scheduled_task)
         if scheduled_tasks:
             await db.commit()
         return len(scheduled_tasks)
@@ -192,11 +240,19 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         if not is_admin:
             conditions.append(ScheduledTask.uid == uid)
         result = await db.execute(delete(ScheduledTask).where(*conditions).execution_options(synchronize_session=False))
+        if result.rowcount:
+            notify_after_commit(
+                db,
+                NotificationTopic.SCHEDULED_TASK,
+                uid=uid if not is_admin else None,
+                session_id=session_id,
+            )
         if commit:
             await db.commit()
         return result.rowcount or 0
 
     async def delete_task(self, db: AsyncSession, *, scheduled_task: ScheduledTask) -> None:
+        _notify_scheduled_task(db, scheduled_task)
         await db.delete(scheduled_task)
         await db.commit()
 
@@ -210,6 +266,15 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
             )
             .execution_options(synchronize_session=False)
         )
+        if result.rowcount:
+            notify_after_commit(
+                db,
+                NotificationTopic.SCHEDULED_TASK,
+                resource_type="scheduled_task",
+                resource_id=task_id,
+                uid=uid,
+                session_id=session_id,
+            )
         await db.commit()
         return result.rowcount == 1
 

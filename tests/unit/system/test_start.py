@@ -1,11 +1,34 @@
 import asyncio
+import secrets
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 import start
 from app.models.system_setting import SystemRuntimeSettings
+
+
+@pytest.fixture(autouse=True)
+def isolate_notification_config(monkeypatch):
+    from app.core.notifications.config import NotificationConfig
+
+    config = NotificationConfig(
+        host="127.0.0.1",
+        port=8766,
+        token=secrets.token_hex(32),
+        server_host=None,
+    )
+    monkeypatch.setattr(start, "load_notification_config", lambda: config)
+    return config
+
+
+@pytest.fixture
+def notification_ready_path(tmp_path):
+    ready_path = tmp_path / "notification-ready"
+    ready_path.write_text("", encoding="utf-8")
+    return ready_path
 
 
 class ExitedProcess:
@@ -15,6 +38,14 @@ class ExitedProcess:
 
     def poll(self) -> int | None:
         return self.return_code
+
+
+def _stub_notification_client(monkeypatch, ping):
+    from app.core.notifications.config import NotificationConfig
+
+    config = NotificationConfig(host="127.0.0.1", port=8766, token=secrets.token_hex(32))
+    monkeypatch.setattr(start, "load_notification_config", lambda: config)
+    monkeypatch.setattr(start.NotificationClient, "ping", ping)
 
 
 def test_system_runtime_settings_default_audit_retention_is_ninety_days():
@@ -182,6 +213,7 @@ def test_windows_selector_event_loop_factory_returns_closable_selector_loop():
 @pytest.mark.parametrize(
     ("command_builder", "module_name"),
     [
+        (start.build_notification_command, "app.workers.notification"),
         (start.build_general_command, "app.workers.general"),
         (start.build_message_platform_command, "app.workers.message_platform"),
         (start.build_background_task_command, "app.workers.background_task"),
@@ -282,27 +314,127 @@ def test_validate_dashboard_assets_rejects_missing_index(tmp_path, monkeypatch):
 
 def test_run_initializes_system_before_starting_processes(monkeypatch):
     events = []
-    process = ExitedProcess(return_code=1)
+    processes = []
+    popen_environments = []
+    ready_paths = []
+    stop_directory_exists = []
+
+    monkeypatch.delenv(start.NOTIFICATION_READY_FILE_ENV, raising=False)
 
     def run_system_initialization(environment):
         events.append("initialize")
 
-    def start_process(*args, **kwargs):
-        events.append("process")
+    def start_process(command, *args, **kwargs):
+        events.append(("process", command[2]))
+        popen_environments.append(kwargs["env"])
+        process = ExitedProcess(return_code=1)
+        processes.append(process)
         return process
+
+    def notification_ready(process, notification_config, *, ready_path=None):
+        ready_paths.append(ready_path)
+        assert ready_path.parent.is_dir()
+        assert not ready_path.exists()
+        events.append(("notification-ready", process))
+
+    def stop_processes(running_processes):
+        stop_directory_exists.append(ready_paths[0].parent.is_dir())
 
     monkeypatch.setattr(start, "load_start_config", lambda: start.StartConfig(host="127.0.0.1", port=8000, web_workers=2))
     monkeypatch.setattr(start, "validate_dashboard_assets", lambda: events.append("dashboard"))
     monkeypatch.setattr(start, "run_system_initialization", run_system_initialization)
     monkeypatch.setattr(start.subprocess, "Popen", start_process)
-    monkeypatch.setattr(start, "wait_for_web_service", lambda process, config: None)
+    monkeypatch.setattr(start, "wait_for_notification_service", notification_ready)
+    monkeypatch.setattr(start, "wait_for_web_service", lambda process, config: events.append(("web-ready", process)))
     monkeypatch.setattr(start, "report_access_url", lambda config: events.append("access_url"))
-    monkeypatch.setattr(start, "stop_processes", lambda processes: None)
+    monkeypatch.setattr(start, "stop_processes", stop_processes)
 
     return_code = start.run()
 
     assert return_code == 1
-    assert events == ["dashboard", "initialize", "process", "process", "process", "process", "access_url"]
+    assert len(processes) == 5
+    assert events == [
+        "dashboard",
+        "initialize",
+        ("process", "app.workers.notification"),
+        ("notification-ready", processes[0]),
+        ("process", "uvicorn"),
+        ("web-ready", processes[1]),
+        ("process", "app.workers.general"),
+        ("process", "app.workers.memory"),
+        ("process", "app.workers.terminal"),
+        "access_url",
+    ]
+    assert len(popen_environments) == 5
+    assert start.NOTIFICATION_READY_FILE_ENV in popen_environments[0]
+    assert [start.NOTIFICATION_READY_FILE_ENV in environment for environment in popen_environments[1:]] == [False] * 4
+    assert popen_environments[0][start.NOTIFICATION_READY_FILE_ENV] == str(ready_paths[0])
+    assert stop_directory_exists == [True]
+    assert not ready_paths[0].parent.exists()
+
+
+def test_run_cleans_up_notification_process_when_notification_startup_fails(monkeypatch):
+    notification_process = ExitedProcess(return_code=None)
+    previous_handlers = {start.signal.SIGTERM: object()}
+    started_commands = []
+    stopped_processes = []
+    restored_handlers = []
+
+    def start_process(command, **kwargs):
+        started_commands.append(command)
+        return notification_process
+
+    ready_paths = []
+
+    def fail_notification_start(process, notification_config, *, ready_path=None):
+        ready_paths.append(ready_path)
+        raise RuntimeError("notification startup failed")
+
+    monkeypatch.setattr(start, "load_start_config", lambda: start.StartConfig(host="127.0.0.1", port=8000, web_workers=1))
+    monkeypatch.setattr(start, "validate_dashboard_assets", lambda: None)
+    monkeypatch.setattr(start, "run_system_initialization", lambda environment: None)
+    monkeypatch.setattr(start.subprocess, "Popen", start_process)
+    monkeypatch.setattr(start, "_install_shutdown_signal_handlers", lambda: previous_handlers)
+    monkeypatch.setattr(start, "_restore_signal_handlers", restored_handlers.append)
+    monkeypatch.setattr(start, "stop_processes", lambda processes: stopped_processes.append(list(processes)))
+    monkeypatch.setattr(start, "wait_for_notification_service", fail_notification_start)
+
+    with pytest.raises(RuntimeError, match="notification startup failed"):
+        start.run()
+
+    assert started_commands == [start.build_notification_command()]
+    assert stopped_processes == [[notification_process]]
+    assert restored_handlers == [previous_handlers]
+    assert len(ready_paths) == 1
+    assert not ready_paths[0].parent.exists()
+
+
+def test_run_monitors_and_cleans_up_notification_process(monkeypatch):
+    processes = []
+    stopped_processes = []
+
+    def start_process(command, **kwargs):
+        process = ExitedProcess(return_code=None)
+        processes.append(process)
+        return process
+
+    def notification_becomes_ready(process, notification_config, *, ready_path=None):
+        process.return_code = 17
+
+    monkeypatch.setattr(start, "load_start_config", lambda: start.StartConfig(host="127.0.0.1", port=8000, web_workers=1))
+    monkeypatch.setattr(start, "validate_dashboard_assets", lambda: None)
+    monkeypatch.setattr(start, "run_system_initialization", lambda environment: None)
+    monkeypatch.setattr(start.subprocess, "Popen", start_process)
+    monkeypatch.setattr(start, "wait_for_notification_service", notification_becomes_ready)
+    monkeypatch.setattr(start, "wait_for_web_service", lambda process, config: None)
+    monkeypatch.setattr(start, "report_access_url", lambda config: None)
+    monkeypatch.setattr(start, "stop_processes", lambda running_processes: stopped_processes.append(list(running_processes)))
+
+    return_code = start.run()
+
+    assert return_code == 17
+    assert len(processes) == 5
+    assert stopped_processes == [processes]
 
 
 def test_run_rejects_missing_dashboard_before_initializing_or_starting_processes(tmp_path, monkeypatch):
@@ -332,6 +464,113 @@ def test_run_rejects_missing_dashboard_before_initializing_or_starting_processes
 
     assert str(index_path) in str(exc_info.value)
     assert events == ["dashboard"]
+
+
+def test_run_with_shared_notification_center_starts_only_local_services(monkeypatch):
+    from app.core.notifications.config import NotificationConfig
+
+    notification_config = NotificationConfig(
+        host="127.0.0.1",
+        port=8766,
+        token=secrets.token_hex(32),
+        server_host="192.0.2.20",
+    )
+    web_config = start.StartConfig(host="127.0.0.1", port=8000, web_workers=1)
+    processes = []
+    commands = []
+    events = []
+    stopped_processes = []
+
+    def start_process(command, **kwargs):
+        commands.append(command)
+        process = ExitedProcess(return_code=19 if command == start.build_terminal_command() else None)
+        processes.append(process)
+        events.append(("spawn", command))
+        return process
+
+    def wait_for_notification(process, config, *, ready_path=None):
+        events.append(("notification-ready", process, config))
+
+    def wait_for_web(process, config):
+        events.append(("web-ready", process, config))
+
+    monkeypatch.setattr(start, "load_start_config", lambda: web_config)
+    monkeypatch.setattr(start, "load_notification_config", lambda: notification_config)
+    monkeypatch.setattr(start, "validate_dashboard_assets", lambda: None)
+    monkeypatch.setattr(start, "run_system_initialization", lambda environment: None)
+    monkeypatch.setattr(start.subprocess, "Popen", start_process)
+    monkeypatch.setattr(start, "TemporaryDirectory", lambda **kwargs: pytest.fail("remote notification center must not allocate a local ready directory"))
+    monkeypatch.setattr(start, "wait_for_notification_service", wait_for_notification)
+    monkeypatch.setattr(start, "wait_for_web_service", wait_for_web)
+    monkeypatch.setattr(start, "report_access_url", lambda config: None)
+    monkeypatch.setattr(start, "stop_processes", lambda running: stopped_processes.append(list(running)))
+
+    return_code = start.run()
+
+    assert return_code == 19
+    assert commands == [
+        start.build_web_command(web_config),
+        start.build_general_command(),
+        start.build_memory_command(),
+        start.build_terminal_command(),
+    ]
+    assert events[0] == ("notification-ready", None, notification_config)
+    assert stopped_processes == [processes]
+    assert len(processes) == 4
+
+
+def test_run_with_shared_notification_center_cleans_up_after_readiness_failure(monkeypatch):
+    from app.core.notifications.config import NotificationConfig
+
+    notification_config = NotificationConfig(
+        host="127.0.0.1",
+        port=8766,
+        token=secrets.token_hex(32),
+        server_host="192.0.2.20",
+    )
+    previous_handlers = {start.signal.SIGTERM: object()}
+    popen_calls = []
+    stopped_processes = []
+    restored_handlers = []
+    readiness_calls = []
+
+    def wait_for_notification(process, config, *, ready_path=None):
+        readiness_calls.append((process, config))
+        raise RuntimeError("shared notification center unavailable")
+
+    monkeypatch.setattr(start, "load_notification_config", lambda: notification_config)
+    monkeypatch.setattr(start, "validate_dashboard_assets", lambda: None)
+    monkeypatch.setattr(start, "run_system_initialization", lambda environment: None)
+    monkeypatch.setattr(start.subprocess, "Popen", lambda *args, **kwargs: popen_calls.append((args, kwargs)))
+    monkeypatch.setattr(start, "_install_shutdown_signal_handlers", lambda: previous_handlers)
+    monkeypatch.setattr(start, "_restore_signal_handlers", restored_handlers.append)
+    monkeypatch.setattr(start, "stop_processes", lambda processes: stopped_processes.append(list(processes)))
+    monkeypatch.setattr(start, "wait_for_notification_service", wait_for_notification)
+
+    with pytest.raises(RuntimeError, match="shared notification center unavailable"):
+        start.run()
+
+    assert readiness_calls == [(None, notification_config)]
+    assert popen_calls == []
+    assert stopped_processes == [[]]
+    assert restored_handlers == [previous_handlers]
+
+
+def test_run_rejects_invalid_notification_config_before_starting_processes(monkeypatch):
+    popen_calls = []
+
+    def load_invalid_config():
+        raise ValueError("invalid notification configuration")
+
+    monkeypatch.setattr(start, "validate_dashboard_assets", lambda: None)
+    monkeypatch.setattr(start, "run_system_initialization", lambda environment: None)
+    monkeypatch.setattr(start, "load_notification_config", load_invalid_config)
+    monkeypatch.setattr(start.subprocess, "Popen", lambda *args, **kwargs: popen_calls.append((args, kwargs)))
+
+    with pytest.raises(ValueError, match="invalid notification configuration"):
+        start.run()
+
+    assert popen_calls == []
 
 
 def test_run_propagates_system_initialization_error_before_starting_processes(monkeypatch):
@@ -399,6 +638,203 @@ def test_wait_for_web_service_completes_http_request_before_returning(monkeypatc
         "read",
         "close",
     ]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_notification_service_reports_early_process_exit(monkeypatch, notification_ready_path):
+    process = ExitedProcess(return_code=7)
+    ping_calls = []
+
+    async def ping(client):
+        ping_calls.append(client)
+        return SimpleNamespace(pid=process.pid)
+
+    _stub_notification_client(monkeypatch, ping)
+
+    with pytest.raises(RuntimeError, match="code 7"):
+        await start._wait_for_notification_service(process, ready_path=notification_ready_path)
+
+    assert ping_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reported_pid", [4321, 9876])
+async def test_wait_for_notification_service_authenticates_after_ready_report_regardless_of_pid(
+    monkeypatch,
+    notification_ready_path,
+    reported_pid,
+):
+    process = ExitedProcess(return_code=None, pid=4321)
+    ping_calls = []
+
+    async def ping(client):
+        ping_calls.append(client)
+        return SimpleNamespace(pid=reported_pid)
+
+    _stub_notification_client(monkeypatch, ping)
+
+    assert await start._wait_for_notification_service(process, ready_path=notification_ready_path) is None
+    assert len(ping_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_for_notification_service_requires_ready_report_path_before_ping(monkeypatch):
+    process = ExitedProcess(return_code=None)
+    ping_calls = []
+
+    async def ping(client):
+        ping_calls.append(client)
+        return SimpleNamespace(pid=9876)
+
+    _stub_notification_client(monkeypatch, ping)
+
+    with pytest.raises(ValueError):
+        await start._wait_for_notification_service(process)
+
+    assert ping_calls == []
+
+
+@pytest.mark.asyncio
+async def test_wait_for_notification_service_does_not_ping_before_ready_report(monkeypatch, tmp_path):
+    process = ExitedProcess(return_code=None)
+    ready_path = tmp_path / "notification-ready"
+    ping_started = asyncio.Event()
+    ping_calls = []
+
+    async def ping(client):
+        ping_calls.append(client)
+        ping_started.set()
+        return SimpleNamespace(pid=9876)
+
+    _stub_notification_client(monkeypatch, ping)
+    wait_task = asyncio.create_task(start._wait_for_notification_service(process, ready_path=ready_path))
+
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(ping_started.wait(), timeout=0.02)
+        assert ping_calls == []
+
+        ready_path.write_text("", encoding="utf-8")
+        await asyncio.wait_for(ping_started.wait(), timeout=1)
+        assert await asyncio.wait_for(wait_task, timeout=1) is None
+        assert len(ping_calls) == 1
+    finally:
+        if not wait_task.done():
+            wait_task.cancel()
+            try:
+                await wait_task
+            except asyncio.CancelledError:
+                pass
+
+
+@pytest.mark.asyncio
+async def test_wait_for_notification_service_rejects_exit_after_ping(monkeypatch, notification_ready_path):
+    process = ExitedProcess(return_code=None, pid=4321)
+
+    async def ping(client):
+        process.return_code = 9
+        return SimpleNamespace(pid=process.pid)
+
+    _stub_notification_client(monkeypatch, ping)
+
+    with pytest.raises(RuntimeError, match="code 9"):
+        await start._wait_for_notification_service(process, ready_path=notification_ready_path)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_notification_service_times_out_without_ready_report(monkeypatch, tmp_path):
+    process = ExitedProcess(return_code=None)
+    ready_path = tmp_path / "notification-ready"
+    ping_calls = []
+
+    async def ping(client):
+        ping_calls.append(client)
+        return SimpleNamespace(pid=process.pid)
+
+    _stub_notification_client(monkeypatch, ping)
+    monkeypatch.setattr(start, "NOTIFICATION_START_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(TimeoutError, match="within 0.01 seconds"):
+        await start._wait_for_notification_service(process, ready_path=ready_path)
+
+    assert ping_calls == []
+
+
+@pytest.mark.asyncio
+async def test_wait_for_notification_service_has_a_total_timeout(monkeypatch, notification_ready_path):
+    process = ExitedProcess(return_code=None)
+    ping_calls = []
+
+    async def ping(client):
+        ping_calls.append(client)
+        await asyncio.Event().wait()
+
+    async def skip_retry_delay(delay):
+        return None
+
+    _stub_notification_client(monkeypatch, ping)
+    monkeypatch.setattr(start, "NOTIFICATION_START_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(start.asyncio, "sleep", skip_retry_delay)
+
+    with pytest.raises(TimeoutError, match="within 0.01 seconds"):
+        await start._wait_for_notification_service(process, ready_path=notification_ready_path)
+
+    assert len(ping_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_for_remote_notification_service_accepts_any_pid_without_local_process(monkeypatch):
+    from app.core.notifications.config import NotificationConfig
+
+    notification_config = NotificationConfig(
+        host="127.0.0.1",
+        port=8766,
+        token=secrets.token_hex(32),
+        server_host="192.0.2.20",
+    )
+    ping_calls = []
+
+    async def ping(client):
+        ping_calls.append(client)
+        return SimpleNamespace(pid=9876)
+
+    monkeypatch.setattr(start.NotificationClient, "ping", ping)
+
+    assert await start._wait_for_notification_service(None, notification_config) is None
+    assert len(ping_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_for_remote_notification_service_timeout_shows_host_without_token(monkeypatch):
+    from app.core.notifications.config import NotificationConfig
+
+    token = secrets.token_hex(32)
+    notification_config = NotificationConfig(
+        host="127.0.0.1",
+        port=8766,
+        token=token,
+        server_host="192.0.2.20",
+    )
+    ping_calls = []
+
+    async def ping(client):
+        ping_calls.append(client)
+        await asyncio.Event().wait()
+
+    async def skip_retry_delay(delay):
+        return None
+
+    monkeypatch.setattr(start.NotificationClient, "ping", ping)
+    monkeypatch.setattr(start, "NOTIFICATION_START_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(start.asyncio, "sleep", skip_retry_delay)
+
+    with pytest.raises(TimeoutError) as exc_info:
+        await start._wait_for_notification_service(None, notification_config)
+
+    error = str(exc_info.value)
+    assert "192.0.2.20:8766" in error
+    assert token not in error
+    assert len(ping_calls) == 1
 
 
 def test_wait_for_web_service_reports_early_process_exit():
@@ -511,7 +947,9 @@ def test_install_shutdown_signal_handlers_registers_sigint_and_sigterm(monkeypat
 
 
 def test_run_stops_children_and_restores_handlers_after_shutdown_signal(monkeypatch):
-    process = ExitedProcess(return_code=None)
+    notification_process = ExitedProcess(return_code=None)
+    web_process = ExitedProcess(return_code=None)
+    processes = iter([notification_process, web_process])
     stopped_processes = []
     restored_handlers = []
     reported_access_urls = []
@@ -519,16 +957,17 @@ def test_run_stops_children_and_restores_handlers_after_shutdown_signal(monkeypa
 
     monkeypatch.setattr(start, "load_start_config", lambda: start.StartConfig(host="127.0.0.1", port=8000, web_workers=1))
     monkeypatch.setattr(start, "run_system_initialization", lambda environment: None)
-    monkeypatch.setattr(start.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(start.subprocess, "Popen", lambda *args, **kwargs: next(processes))
     monkeypatch.setattr(start, "_install_shutdown_signal_handlers", lambda: previous_handlers)
     monkeypatch.setattr(start, "_restore_signal_handlers", restored_handlers.append)
     monkeypatch.setattr(start, "stop_processes", lambda processes: stopped_processes.append(list(processes)))
+    monkeypatch.setattr(start, "wait_for_notification_service", lambda process, notification_config, *, ready_path=None: None)
     monkeypatch.setattr(start, "wait_for_web_service", lambda process, config: (_ for _ in ()).throw(KeyboardInterrupt))
     monkeypatch.setattr(start, "report_access_url", reported_access_urls.append)
 
     return_code = start.run()
 
     assert return_code == 0
-    assert stopped_processes == [[process]]
+    assert stopped_processes == [[notification_process, web_process]]
     assert restored_handlers == [previous_handlers]
     assert reported_access_urls == []

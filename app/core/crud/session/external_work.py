@@ -13,6 +13,8 @@ from app.core.crud.session.subagent_revision import bump_subagent_board_revision
 from app.core.crud.session.terminal_watch import get_terminal_watch_deliveries
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.transactions import notify_after_commit
 from app.core.utils.time import get_local_time
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.session_reply_work_item import (
@@ -41,6 +43,24 @@ def _request_ids(state: dict[str, Any]) -> list[str]:
             seen.add(request_id)
             result.append(request_id)
     return result
+
+
+def _notify_reply_work(
+    db: AsyncSession,
+    work: SessionReplyWorkItem,
+    *,
+    event: str,
+) -> None:
+    notify_after_commit(
+        db,
+        NotificationTopic.SESSION_REPLY,
+        event=event,
+        resource_type="session_reply_work",
+        resource_id=work.id,
+        uid=work.uid,
+        session_id=work.session_id,
+        profile_id=work.profile_id,
+    )
 
 
 class CRUDExternalWork:
@@ -294,6 +314,8 @@ class CRUDExternalWork:
         next_status = values.get("status")
         if updated and work.subagent_id is not None and next_status and next_status != work.status:
             await bump_subagent_board_revisions(db, [work.session_id])
+        if updated and next_status is not None and next_status != SessionReplyWorkStatus.RUNNING:
+            _notify_reply_work(db, work, event="capacity")
         return updated
 
     async def mark_stopped_results_delivered(self, db: AsyncSession, *, uid: str, task_ids: list[int]) -> None:
@@ -594,6 +616,7 @@ class CRUDExternalWork:
         )
         updated = (result.rowcount or 0) == 1
         if updated:
+            _notify_reply_work(db, work, event="capacity")
             await session_reply_work_item_crud.save_checkpoint(db, work.id, checkpoint)
         if updated and work.subagent_id is not None:
             await bump_subagent_board_revisions(db, [work.session_id])
@@ -629,6 +652,8 @@ class CRUDExternalWork:
             .execution_options(synchronize_session=False)
         )
         updated = (result.rowcount or 0) == 1
+        if updated:
+            _notify_reply_work(db, work, event="ready")
         if updated and work.subagent_id is not None:
             await bump_subagent_board_revisions(db, [work.session_id])
         if commit:
@@ -666,6 +691,8 @@ class CRUDExternalWork:
             .execution_options(synchronize_session=False)
         )
         updated = (result.rowcount or 0) == 1
+        if updated:
+            _notify_reply_work(db, work, event="capacity")
         if updated and work.subagent_id is not None:
             await bump_subagent_board_revisions(db, [work.session_id])
         if commit:

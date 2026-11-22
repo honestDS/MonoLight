@@ -11,6 +11,8 @@ from app.core.crud.audit.audit import audit_crud
 from app.core.crud.base import CRUDBase
 from app.core.crud.session.terminal_watch import terminal_watch_pending_delivery_condition
 from app.core.i18n import t
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.transactions import notify_after_commit
 from app.core.utils.background_task_result import build_background_task_failure_result
 from app.core.utils.time import get_local_time
 from app.models.audit import AUDIT_TERMINAL_STATUSES, AuditRecord, AuditRecordStatus
@@ -22,6 +24,25 @@ from app.models.background_task import (
 )
 from app.models.terminal_session import TerminalSession
 from app.providers.database.time import get_database_time, get_database_timestamp
+
+
+def _notify_background_task(
+    db: AsyncSession,
+    *,
+    task_id: int,
+    uid: str | None = None,
+    session_id: str | None = None,
+    profile_id: int | None = None,
+) -> None:
+    notify_after_commit(
+        db,
+        NotificationTopic.BACKGROUND_TASK,
+        resource_type="background_task",
+        resource_id=task_id,
+        uid=uid,
+        session_id=session_id,
+        profile_id=profile_id,
+    )
 
 
 class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, BackgroundTaskCreate]):
@@ -68,12 +89,18 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             audit_record_id=audit_record_id,
             audit_execution_record_id=audit_execution_record_id,
         )
-        db.add(task)
         try:
+            db.add(task)
+            await db.flush()
+            _notify_background_task(
+                db,
+                task_id=task.id,
+                uid=uid,
+                session_id=session_id,
+                profile_id=profile_id,
+            )
             if commit:
                 await db.commit()
-            else:
-                await db.flush()
         except IntegrityError:
             await db.rollback()
             if audit_execution_record_id is None:
@@ -199,7 +226,7 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             BackgroundTask.tool_name == TERMINAL_WATCH_TOOL_NAME,
             BackgroundTask.arguments["terminal_session_id"].as_string() == terminal_session_id,
         )
-        await db.execute(
+        cancelled_result = await db.execute(
             update(BackgroundTask)
             .where(
                 *terminal_conditions,
@@ -217,7 +244,7 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             )
             .execution_options(synchronize_session=False)
         )
-        await db.execute(
+        reply_result = await db.execute(
             update(BackgroundTask)
             .where(
                 *terminal_conditions,
@@ -233,6 +260,8 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             )
             .execution_options(synchronize_session=False)
         )
+        if (cancelled_result.rowcount or 0) > 0 or (reply_result.rowcount or 0) > 0:
+            notify_after_commit(db, NotificationTopic.BACKGROUND_TASK, uid=uid, session_id=session_id)
         await db.flush()
 
     async def lock_terminal_watch(
@@ -412,12 +441,19 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         )
         if (update_result.rowcount or 0) != 1:
             return None
+        _notify_background_task(db, task_id=task_id)
         await db.flush()
         refreshed_result = await db.execute(select(BackgroundTask).where(BackgroundTask.id == task_id).execution_options(populate_existing=True))
         return refreshed_result.scalars().first()
 
     async def list_by_audit_record(self, db: AsyncSession, audit_record_id: int) -> list[BackgroundTask]:
         result = await db.execute(select(BackgroundTask).where(BackgroundTask.audit_record_id == audit_record_id).order_by(BackgroundTask.id).execution_options(populate_existing=True))
+        return list(result.scalars().all())
+
+    async def get_by_ids(self, db: AsyncSession, task_ids: set[int]) -> list[BackgroundTask]:
+        if not task_ids:
+            return []
+        result = await db.execute(select(BackgroundTask).where(BackgroundTask.id.in_(task_ids)).order_by(BackgroundTask.id))
         return list(result.scalars().all())
 
     async def list_pending(self, db: AsyncSession, *, profile_id: int | None = None, limit: int = 100, observer: bool | None = None) -> list[BackgroundTask]:
@@ -469,7 +505,15 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         )
         return result.scalar() is not None
 
-    async def list_pending_replies(self, db: AsyncSession, *, limit: int = 100) -> list[BackgroundTask]:
+    async def list_pending_replies(
+        self,
+        db: AsyncSession,
+        *,
+        limit: int = 100,
+        profile_ids: set[int] | None = None,
+    ) -> list[BackgroundTask]:
+        if profile_ids is not None and not profile_ids:
+            return []
         stmt = (
             select(BackgroundTask)
             .where(
@@ -486,6 +530,8 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             .order_by(BackgroundTask.finished_at.asc(), BackgroundTask.id.asc())
             .limit(limit)
         )
+        if profile_ids is not None:
+            stmt = stmt.where(BackgroundTask.profile_id.in_(profile_ids))
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
@@ -542,6 +588,8 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             )
             .execution_options(synchronize_session=False)
         )
+        if result.rowcount == 1:
+            _notify_background_task(db, task_id=task_id)
         await db.commit()
         return result.rowcount == 1
 
@@ -675,8 +723,11 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             .returning(BackgroundTask.session_id)
             .execution_options(synchronize_session=False)
         )
-        retained_count = sum(returned_session_id != session_id for returned_session_id in cancelled_result.scalars().all())
+        cancelled_session_ids = cancelled_result.scalars().all()
+        retained_count = sum(returned_session_id != session_id for returned_session_id in cancelled_session_ids)
         delete_result = await db.execute(delete(BackgroundTask).where(*unbound_conditions).execution_options(synchronize_session=False))
+        if bool(cancelled_session_ids) or (delete_result.rowcount or 0) > 0:
+            notify_after_commit(db, NotificationTopic.BACKGROUND_TASK, uid=None if is_admin else uid, session_id=session_id)
         if commit:
             await db.commit()
         return retained_count + (delete_result.rowcount or 0)
@@ -729,7 +780,7 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
                     audit_id_set.add(task.audit_record_id)
                     audit_ids.append(task.audit_record_id)
 
-        await db.execute(
+        reply_result = await db.execute(
             update(BackgroundTask)
             .where(
                 BackgroundTask.uid == uid,
@@ -746,6 +797,8 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             )
             .execution_options(synchronize_session=False)
         )
+        if (reply_result.rowcount or 0) > 0:
+            notify_after_commit(db, NotificationTopic.BACKGROUND_TASK, uid=uid, session_id=session_id)
 
         if commit:
             await db.commit()
@@ -811,7 +864,7 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
                     audit_id_set.add(task.audit_record_id)
                     audit_ids.append(task.audit_record_id)
 
-        await db.execute(
+        reply_result = await db.execute(
             update(BackgroundTask)
             .where(
                 *conditions,
@@ -827,6 +880,8 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             )
             .execution_options(synchronize_session=False)
         )
+        if (reply_result.rowcount or 0) > 0:
+            notify_after_commit(db, NotificationTopic.BACKGROUND_TASK, uid=uid, session_id=session_id)
 
         if commit:
             await db.commit()
@@ -896,6 +951,7 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         pending_tasks = [task for task in tasks if task.status == BackgroundTaskStatus.PENDING]
         running_tasks = [task for task in tasks if task.status == BackgroundTaskStatus.RUNNING]
         cleared_count = 0
+        reply_update_count = 0
 
         for task in pending_tasks:
             cancelled = await self._cancel_task_conditionally(db, task, require_unexpired_lease=False)
@@ -935,6 +991,10 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
                 .execution_options(synchronize_session=False)
             )
             cleared_count += reply_result.rowcount or 0
+            reply_update_count = reply_result.rowcount or 0
+
+        if reply_update_count > 0:
+            notify_after_commit(db, NotificationTopic.BACKGROUND_TASK)
 
         if commit:
             await db.commit()
@@ -1046,6 +1106,14 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             )
             .execution_options(synchronize_session=False)
         )
+        if result.rowcount == 1:
+            _notify_background_task(
+                db,
+                task_id=task_id,
+                uid=task.uid,
+                session_id=task.session_id,
+                profile_id=task.profile_id,
+            )
         await db.commit()
         return result.rowcount == 1
 
@@ -1082,6 +1150,8 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             )
             .execution_options(synchronize_session=False)
         )
+        if update_result.rowcount == 1:
+            _notify_background_task(db, task_id=task_id)
         if commit:
             await db.commit()
         return update_result.rowcount == 1
@@ -1125,6 +1195,8 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         if require_unexpired_lease:
             conditions.append(BackgroundTask.lock_until >= now)
         update_result = await db.execute(update(BackgroundTask).where(*conditions).values(**values).execution_options(synchronize_session=False))
+        if update_result.rowcount == 1:
+            _notify_background_task(db, task_id=task_id)
         if commit:
             await db.commit()
         return update_result.rowcount == 1
@@ -1242,6 +1314,14 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             if deleted_session and task.id is not None:
                 values["session_id"] = f"deleted-session:{task.id}"
         result = await db.execute(update(BackgroundTask).where(*conditions).values(**values).execution_options(synchronize_session=False))
+        if (result.rowcount or 0) == 1:
+            _notify_background_task(
+                db,
+                task_id=task.id,
+                uid=task.uid,
+                session_id=task.session_id,
+                profile_id=task.profile_id,
+            )
         return (result.rowcount or 0) == 1
 
     async def cancel_user_task(self, db: AsyncSession, *, task_id: int, uid: str) -> BackgroundTask | None:
@@ -1296,6 +1376,14 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
                 )
                 .execution_options(synchronize_session=False)
             )
+            if update_result.rowcount == 1:
+                _notify_background_task(
+                    db,
+                    task_id=task.id,
+                    uid=task.uid,
+                    session_id=task.session_id,
+                    profile_id=task.profile_id,
+                )
             failed_count += update_result.rowcount or 0
         await db.commit()
         return failed_count

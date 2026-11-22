@@ -18,6 +18,8 @@ from app.core.constants import (
 )
 from app.core.crud.session.reply_work_item import reply_work_is_protected, session_reply_work_item_crud
 from app.core.crud.session.subagent_revision import bump_subagent_board_revisions
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.transactions import notify_after_commit
 from app.core.utils.time import get_local_time
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session_reply_work_item import (
@@ -762,6 +764,17 @@ class CRUDSubagent:
             )
             .execution_options(synchronize_session=False)
         )
+        if result.rowcount == 1:
+            notify_after_commit(
+                db,
+                NotificationTopic.SESSION_REPLY,
+                event="capacity",
+                resource_type="session_reply_work",
+                resource_id=work.id,
+                uid=work.uid,
+                session_id=work.session_id,
+                profile_id=work.profile_id,
+            )
         return result.rowcount == 1
 
     async def acknowledge_messages(

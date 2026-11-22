@@ -2,13 +2,17 @@ import asyncio
 import os
 
 import app.warning_filters  # noqa: F401
-from app.core.background_tasks.manager import background_task_manager
+from app.core.background_tasks.manager import BackgroundTaskManager
 from app.core.background_tasks.recovery import clear_background_tasks_on_startup
 from app.core.log import LogManager, get_logger
+from app.core.notifications.inbox import NotificationInbox
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.runtime import create_notification_runtime
 from app.core.paths import DEFAULT_LOG_FILE_PATH
 from app.core.utils.context_summary.cleanup import (
     background_context_summary_cleaner,
 )
+from app.providers.database import engine
 from app.providers.database.bootstrap import create_database_tables
 from app.tasks import (
     background_audit_cleaner,
@@ -28,6 +32,7 @@ BACKGROUND_TASK_WORKER_NAME = "background_task"
 async def run_owned_background_task_worker(
     owned_stop_event: asyncio.Event,
     *,
+    inbox: NotificationInbox,
     startup_ready: asyncio.Event | None = None,
 ) -> None:
     await run_startup_cleanup(
@@ -39,7 +44,8 @@ async def run_owned_background_task_worker(
     if startup_ready is not None:
         startup_ready.set()
 
-    background_task_manager.start()
+    manager = BackgroundTaskManager()
+    manager.start(inbox=inbox)
     cleaner_tasks = [
         asyncio.create_task(background_log_cleaner()),
         asyncio.create_task(background_log_file_cleaner()),
@@ -52,7 +58,7 @@ async def run_owned_background_task_worker(
     try:
         await owned_stop_event.wait()
     finally:
-        await background_task_manager.stop()
+        await manager.stop()
         for task in cleaner_tasks:
             task.cancel()
         await asyncio.gather(*cleaner_tasks, return_exceptions=True)
@@ -65,11 +71,31 @@ async def run_background_task_worker() -> None:
 
     await create_database_tables()
 
-    await run_with_worker_lease(
+    notifications = await create_notification_runtime(
         BACKGROUND_TASK_WORKER_NAME,
-        stop_event,
-        run_owned_background_task_worker,
+        bind=engine.sync_engine,
     )
+    inbox = notifications.subscribe(
+        (
+            NotificationTopic.BACKGROUND_TASK,
+            NotificationTopic.PROFILE_CONFIG,
+            NotificationTopic.SYSTEM_SETTINGS,
+        )
+    )
+
+    async with notifications:
+
+        async def _run_owned(owned_stop_event: asyncio.Event) -> None:
+            await run_owned_background_task_worker(
+                owned_stop_event,
+                inbox=inbox,
+            )
+
+        await run_with_worker_lease(
+            BACKGROUND_TASK_WORKER_NAME,
+            stop_event,
+            _run_owned,
+        )
 
 
 def main() -> None:

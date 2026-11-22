@@ -6,6 +6,8 @@ from sqlmodel import select
 
 from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN
 from app.core.i18n import t
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.transactions import notify_after_commit
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.providers.database.time import get_database_time
 
@@ -62,5 +64,14 @@ async def interrupt_background_tasks(db: AsyncSession, *, before: datetime) -> l
             )
             if (update_result.rowcount or 0) == 1:
                 interrupted.append((task.id, task.audit_record_id, task.audit_execution_record_id))
+                notify_after_commit(
+                    db,
+                    NotificationTopic.BACKGROUND_TASK,
+                    resource_type="background_task",
+                    resource_id=task.id,
+                    uid=task.uid,
+                    session_id=task.session_id,
+                    profile_id=task.profile_id,
+                )
     await db.flush()
     return interrupted

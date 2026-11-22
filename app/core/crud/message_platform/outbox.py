@@ -1,12 +1,14 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, or_, update
+from sqlalchemy import case, delete, func, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.crud.base import CRUDBase
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.transactions import notify_after_commit
 from app.core.utils.time import get_local_time
 from app.models.message_platform_outbox import MessagePlatformOutbox, MessagePlatformOutboxStatus
 
@@ -43,6 +45,15 @@ class CRUDMessagePlatformOutbox(CRUDBase[MessagePlatformOutbox, MessagePlatformO
         )
         db.add(item)
         try:
+            await db.flush()
+            notify_after_commit(
+                db,
+                NotificationTopic.OUTBOX,
+                resource_type="message_platform_outbox",
+                resource_id=item.id,
+                uid=uid,
+                session_id=session_id,
+            )
             await db.commit()
         except IntegrityError:
             await db.rollback()
@@ -57,20 +68,40 @@ class CRUDMessagePlatformOutbox(CRUDBase[MessagePlatformOutbox, MessagePlatformO
         result = await db.execute(select(MessagePlatformOutbox).where(MessagePlatformOutbox.dedupe_key == dedupe_key))
         return result.scalars().first()
 
-    async def list_claimable_ids(self, db: AsyncSession, *, limit: int = 20) -> list[int]:
+    async def list_claimable_ids(
+        self,
+        db: AsyncSession,
+        *,
+        limit: int = 20,
+        item_ids: set[int] | None = None,
+    ) -> list[int]:
+        if item_ids is not None and not item_ids:
+            return []
         now = get_local_time()
-        result = await db.execute(
-            select(MessagePlatformOutbox.id)
-            .where(
-                or_(
-                    (MessagePlatformOutbox.status == MessagePlatformOutboxStatus.PENDING) & (MessagePlatformOutbox.next_attempt_at <= now),
-                    (MessagePlatformOutbox.status == MessagePlatformOutboxStatus.PROCESSING) & (MessagePlatformOutbox.lock_until < now),
-                )
+        statement = select(MessagePlatformOutbox.id).where(
+            or_(
+                (MessagePlatformOutbox.status == MessagePlatformOutboxStatus.PENDING) & (MessagePlatformOutbox.next_attempt_at <= now),
+                (MessagePlatformOutbox.status == MessagePlatformOutboxStatus.PROCESSING) & (MessagePlatformOutbox.lock_until < now),
             )
-            .order_by(MessagePlatformOutbox.created_at.asc(), MessagePlatformOutbox.id.asc())
-            .limit(limit)
         )
+        if item_ids is not None:
+            statement = statement.where(MessagePlatformOutbox.id.in_(item_ids))
+        result = await db.execute(statement.order_by(MessagePlatformOutbox.created_at.asc(), MessagePlatformOutbox.id.asc()).limit(limit))
         return [item_id for item_id in result.scalars().all() if item_id is not None]
+
+    async def get_next_attempt_at(self, db: AsyncSession) -> datetime | None:
+        result = await db.execute(
+            select(
+                func.min(
+                    case(
+                        (MessagePlatformOutbox.status == MessagePlatformOutboxStatus.PENDING, MessagePlatformOutbox.next_attempt_at),
+                        (MessagePlatformOutbox.status == MessagePlatformOutboxStatus.PROCESSING, MessagePlatformOutbox.lock_until),
+                        else_=None,
+                    )
+                )
+            ).where(MessagePlatformOutbox.status.in_((MessagePlatformOutboxStatus.PENDING, MessagePlatformOutboxStatus.PROCESSING)))
+        )
+        return result.scalar_one_or_none()
 
     async def try_claim(
         self,
@@ -191,6 +222,14 @@ class CRUDMessagePlatformOutbox(CRUDBase[MessagePlatformOutbox, MessagePlatformO
             .values(**values)
             .execution_options(synchronize_session=False)
         )
+        if result.rowcount == 1 and next_status == MessagePlatformOutboxStatus.PENDING:
+            notify_after_commit(
+                db,
+                NotificationTopic.OUTBOX,
+                event="retry",
+                resource_type="message_platform_outbox",
+                resource_id=item_id,
+            )
         await db.commit()
         return next_status if result.rowcount == 1 else None
 

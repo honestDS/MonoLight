@@ -75,6 +75,16 @@ The prebuilt frontend is included by default, so **Node.js and npm are not requi
    APP_HOST=0.0.0.0
    APP_PORT=8001
    APP_WORKERS=1
+
+   # Notification center listener used when this node runs the center
+   NOTIFICATION_HOST=127.0.0.1
+   NOTIFICATION_PORT=8766
+
+   # Blank starts a local center; set an IP literal to connect to a shared center
+   NOTIFICATION_SERVER_HOST=
+
+   # Optional shared 64-character hexadecimal token; blank derives it from the system key
+   NOTIFICATION_TOKEN=
    ```
 
 3. **Start with one command**:
@@ -113,11 +123,30 @@ The table below uses tokens for context and maximum output lengths.
 <details>
 <summary>How MonoLight runs</summary>
 
-Running `python start.py` checks for the prebuilt frontend assets, initializes the system keys and database, and starts **one Web service plus three background Worker processes**:
+Running `python start.py` checks for the prebuilt frontend assets and initializes the system keys and database. When `NOTIFICATION_SERVER_HOST` is blank, the launcher starts a local notification center using `NOTIFICATION_HOST` as its listener address. When it is set, the launcher connects to and authenticates with that shared center without spawning or stopping it. After the center is ready, the launcher starts the existing **one Web service plus three background Worker processes**:
+- **Notification center (center-hosting node only)**: Provides TCP publish/subscribe for wake-up hints and resource references; tasks remain stored and claimed through the database.
 - **Web service**: Hosts the dashboard, HTTP/WebSocket endpoints, and conversation integrations.
 - **`general` Worker**: Handles messaging and scheduled tasks, general background jobs, and session replies. Each of these three roles uses a separate database lease.
 - **`memory` Worker**: Runs background jobs that organize and publish long-term memories and knowledge-base entries, including generating their embeddings.
 - **`terminal` Worker**: Hosts persistent interactive terminal sessions in a separate process for fault isolation.
+
+In `general`, post-commit notifications, next-due-time wakeups, and periodic rechecks wake processing of session replies, background and scheduled tasks, message-platform configuration, and outbox delivery; the database remains responsible for persistence, claiming, and lease renewal. The Web service and `memory` and `terminal` Workers use the shared publisher, but the `memory` and `terminal` task-consumption loops are unchanged.
+
+#### Shared notification center across machines
+
+For a single-machine deployment, leave `NOTIFICATION_SERVER_HOST` blank. To share one center across machines, designate a primary node: leave this variable blank on that node and set `NOTIFICATION_HOST` to the center's listener IP. IPv4 and IPv6 literals are supported, including the wildcard addresses `0.0.0.0` and `::`. On each remote node, set `NOTIFICATION_SERVER_HOST` to the primary node's reachable IP literal and use the same `NOTIFICATION_PORT`. The remote launcher connects to the existing center and starts only its Web service and three Workers; it does not start or stop a center. Continue using a shared database for all instances.
+
+`NOTIFICATION_HOST` and `NOTIFICATION_SERVER_HOST` accept IP literals only, not DNS names, URLs, or addresses with an embedded port. Use the primary node's reachable address for remote connections, not a wildcard listener address. `NOTIFICATION_TOKEN` is optional and must be the same 64-character hexadecimal token on every participant; surrounding whitespace is trimmed and hexadecimal case is normalized. When blank, authentication uses the existing HMAC derivation from the system channel encryption key, so every machine must have the same system key. A dedicated random shared notification token is recommended for multi-machine deployments. The TCP protocol has no built-in TLS: use a trusted private network, VPN, or encrypted tunnel, and restrict access to the notification port with firewall source rules.
+
+The wire protocol uses one UTF-8 JSON object per line. `version`, `type`, and `request_id` correlate request and response frames; pushed `event` frames do not require a `request_id`. A publish frame uses `type="publish"` and nests its notification body under `notification`:
+
+```json
+{"version":1,"type":"publish","request_id":"req-1","notification":{"notification_id":"n-1","topic":"task.background","event":"task.created","source":"web","resource":{"type":"task","id":"123"}}}
+```
+
+The notification body supports `notification_id`, `topic`, `event`, `source`, `occurred_at`, `available_at`, `scope`, `resource`, `correlation_id`, and `data`; `topic`, `event`, and `source` are required, while fields with defaults may be omitted. `resource.id` is always a string. `scope` supports `uid`, `session_id`, `profile_id`, and `worker_id` as location hints only, not authorization. Existing topics include `session.reply`, `task.background`, `task.scheduled`, `message_platform.outbox`, `memory.job`, `knowledge.job`, `terminal.session`, and `terminal.command`; new topics require no notification-center routing code changes.
+
+The center broadcasts by `topic`, and binds `source` to the authenticated connection's `client_id`. A `Published` acknowledgment confirms that the center received the notification; `recipient_count` is the number of currently matching subscriber connections to which it was successfully enqueued. A count of `0` means no notification is waiting for future subscribers, and does not mean a Worker has processed it. Every initial subscription and reconnect receives a `ReadyFrame`, which tells consumers to recheck the database. Publish only after the associated task is committed; `available_at` is advisory, and consumers remain responsible for scheduling. By default, the authentication token is derived from the existing system channel encryption key; configure the same optional `NOTIFICATION_TOKEN` on all participants to use a dedicated shared token instead. The center does not persist tasks.
 
 If a Worker exits unexpectedly, the launcher cleans up the remaining processes. For multi-instance deployments, all instances must share the same database. Workers coordinate through leases, so another instance can take over after the previous node goes offline or its lease expires.
 
@@ -163,6 +192,8 @@ For individual process debugging, run initialization once, then start each proce
 
 ```bash
 python -c "import asyncio; from start import initialize_system; asyncio.run(initialize_system())"
+# Run only on the node hosting the local notification center; skip on remote nodes.
+python -m app.workers.notification
 python main.py
 python -m app.workers.general
 python -m app.workers.memory

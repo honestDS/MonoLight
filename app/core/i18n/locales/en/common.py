@@ -1,6 +1,11 @@
 from app.core.constants import SEND_FILE_TO_USER_TOOL_NAME
 
 MESSAGES = {
+    "ERR_NOTIFICATION_HOST_INVALID": "NOTIFICATION_HOST must be a valid IPv4 or IPv6 listen address",
+    "ERR_NOTIFICATION_PORT_INVALID": "NOTIFICATION_PORT must be an integer between 1 and 65535",
+    "ERR_NOTIFICATION_READY_REPORT_REQUIRED": "Local notification service startup requires a readiness report path",
+    "ERR_NOTIFICATION_SERVER_HOST_INVALID": "NOTIFICATION_SERVER_HOST must be a connectable IPv4 or IPv6 address",
+    "ERR_NOTIFICATION_TOKEN_INVALID": "NOTIFICATION_TOKEN must be a 64-character hexadecimal string",
     "MSG_LOG_LIST_SUCCESS": "Log list retrieved successfully",
     "ERR_LOG_CLEANER_FAILED": "Failed to clean up log history: {message}",
     "MSG_TEMP_CLEANER_CLEARED": "Cleared {deleted_count} temporary files. Current largest single temp directory size: {current_size} bytes, per-directory limit: {max_size_bytes} bytes",

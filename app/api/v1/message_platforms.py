@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +28,8 @@ from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.session.session import session_crud
 from app.core.exceptions import ForbiddenException, ParameterException, ResourceNotFoundException
 from app.core.i18n.locale import get_available_locales
+from app.core.notifications.protocol import NotificationTopic
+from app.core.notifications.transactions import notify_after_commit
 from app.core.profile.validation import get_validated_profile_for_assignment
 from app.core.security import get_current_user
 from app.core.utils.database_integrity import is_unique_constraint_violation
@@ -282,7 +286,22 @@ async def recover_message_platform(
     if not platform.get_config_secret("token"):
         raise ParameterException(ERR_MESSAGE_PLATFORM_RECOVER_TOKEN_MISSING)
     next_status = MessagePlatformStatus.CONNECTED if platform.is_enabled else MessagePlatformStatus.DISCONNECTED
-    platform = await message_platform_crud.update_runtime_state(db, platform=platform, status=next_status, last_error="", commit=False)
+    platform = await message_platform_crud.update_runtime_state(
+        db,
+        platform=platform,
+        status=next_status,
+        state={"recovery_request_id": uuid4().hex},
+        last_error="",
+        commit=False,
+    )
+    notify_after_commit(
+        db,
+        NotificationTopic.MESSAGE_PLATFORM,
+        event="restart",
+        resource_type="message_platform",
+        resource_id=platform.id,
+        uid=platform.uid,
+    )
     response = StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=MSG_MESSAGE_PLATFORM_RECOVERED)
     await db.commit()
     return response
