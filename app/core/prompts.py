@@ -77,9 +77,17 @@ BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT = "Use the attached background-tool co
 
 EXTERNAL_WORK_RESUME_INSTRUCTION_PROMPT = "Use attached completed external-tool results as execution context for the original authorized work, together with the latest conversation and current user directions. request_context, purpose, and tool_call explain why each result was requested, even after a summary. Do not rerun an original action that was already submitted or completed merely to obtain its result. Assess original task completion against its acceptance criteria and verified results. Use currently available permitted tools for remaining authorized steps or delivery, and provide a final reply only when appropriate. Newer user stop, cancel, or changed directions take precedence; do not automatically retry uncertain side effects."
 
-EXTERNAL_RESULT_REPLY_GUIDANCE_PROMPT = f"""[External result reply guidance]
-Process the completed results in this batch using the latest user request and replies already given. Continue any remaining authorized work. If the results add information the user has not received, report only that new information. When the relevant results have already been explained or add no useful new information, call {END_SESSION_TOOL_NAME} with {{"skip_reply": true}} as the sole tool call and return no text. Send a normal user-facing reply when a user question remains unanswered, a necessary file still needs to be delivered, or an important risk requires user awareness; use {{}} or {{"skip_reply": false}} for that final-reply path.
-[End external result reply guidance]"""
+EXTERNAL_RESULT_REPLY_GUIDANCE_PROMPT = (
+    "Process the completed results in this batch using the latest user request and replies already given. "
+    "Continue any remaining authorized work. "
+    "If the results add information the user has not received, report only that new information. "
+    f"When the relevant results have already been explained or add no useful new information, call {END_SESSION_TOOL_NAME} with "
+    '{"skip_reply": true} as the sole tool call and return no text. '
+    "Send a normal user-facing reply when a user question remains unanswered, "
+    "a necessary file still needs to be delivered, "
+    "or an important risk requires user awareness; "
+    'use {} or {"skip_reply": false} for that final-reply path.'
+)
 
 BACKGROUND_PROACTIVE_TOOL_CORRECTION_PROMPT = "The previous tool call is not allowed in background proactive replies and has been ignored. Do not call the original background tool again. If you cannot use an allowed delivery tool, reply in natural language only: summarize the completed result for the user, do not output raw JSON, tool arguments, file path arrays, or internal tool response text."
 
