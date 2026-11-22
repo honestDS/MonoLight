@@ -13,6 +13,7 @@ from app.core.constants import (
     ERR_AUDIT_FILE_PATH_NOT_ABSOLUTE,
     ERR_AUDIT_PENDING_EXPIRY_REQUIRED,
     ERR_AUDIT_PREPARATION_STATUS_INVALID,
+    ERR_AUDIT_RESULT_INVALID,
     ERR_AUDIT_ROUND_RESULT_MISMATCH,
     ERR_AUDIT_TOOL_CALL_ID_INVALID,
     ERR_AUDIT_TOOL_DETAIL_COUNT_MISMATCH,
@@ -224,6 +225,14 @@ class CRUDAuditPreparation:
                 raise ValueError(t(ERR_AUDIT_TOOL_ORDER_INVALID))
             seen_call_ids.add(call_id)
             seen_turn_indexes.add(turn_index)
+            decision_source = str(detail.get("decision_source") or "model_audit")
+            action_request = detail.get("action_request")
+            if decision_source not in {"model_audit", "system_rule", "none"}:
+                raise ValueError(t(ERR_AUDIT_RESULT_INVALID))
+            if decision_source == "system_rule" and (detail.get("score") is not None or not isinstance(action_request, dict)):
+                raise ValueError(t(ERR_AUDIT_RESULT_INVALID))
+            if decision_source != "system_rule" and action_request is not None:
+                raise ValueError(t(ERR_AUDIT_RESULT_INVALID))
             detail_models.append(
                 AuditToolDetail(
                     audit_record_id=audit_record_id,
@@ -236,6 +245,8 @@ class CRUDAuditPreparation:
                     arguments_hash=str(detail["arguments_hash"]),
                     arguments_summary=str(detail.get("arguments_summary") or "")[:1000],
                     file_snapshots=_validate_file_snapshots(detail.get("file_snapshots") or []),
+                    decision_source=decision_source,
+                    action_request=action_request,
                 )
             )
         if seen_turn_indexes != set(range(record.tool_count)):

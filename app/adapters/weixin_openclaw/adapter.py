@@ -29,7 +29,7 @@ from app.adapters.weixin_openclaw.message import (
 from app.adapters.weixin_openclaw.outbound import build_weixin_openclaw_concise_output_system_prompt
 from app.adapters.weixin_openclaw.response import extract_event_reply
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawChatResult, WeixinOpenClawMessage
-from app.core.audit.confirmation import message_has_quote
+from app.core.confirmation import message_has_quote
 from app.core.constants import (
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_MESSAGE_PLATFORM_NOT_FOUND,

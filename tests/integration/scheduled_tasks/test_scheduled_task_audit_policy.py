@@ -9,10 +9,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
-import app.core.audit.confirmation_events as audit_confirmation_events_module
 import app.core.audit.persistence as audit_persistence_module
 import app.core.audit.service as audit_service_module
 import app.core.background_tasks.scheduler as scheduler_module
+import app.core.confirmation.events as audit_confirmation_events_module
+import app.core.confirmation.service as confirmation_service_module
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.dispatchers.interactive_generation as interactive_generation_module
@@ -21,7 +22,7 @@ import app.core.session.notifier as session_notifier_module
 import app.core.session_reply_queue.executor_interactive as executor_interactive_module
 import app.core.session_reply_queue.executor_lifecycle as executor_lifecycle_module
 import app.core.session_reply_queue.executor_metadata as executor_metadata_module
-from app.core.audit.confirmation import persist_pending_confirmation_bundle
+from app.core.confirmation import persist_pending_confirmation_bundle
 from app.core.constants import (
     END_SESSION_SCOPE_TASK,
     END_SESSION_TOOL_NAME,
@@ -151,7 +152,7 @@ async def test_scheduled_task_mutation_waits_for_audit_confirmation(
     monkeypatch.setattr(channel_cursor_module, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(
-        audit_service_module,
+        confirmation_service_module,
         "persist_prepared_audit_round",
         partial(audit_persistence_module.persist_prepared_audit_round, audit_root=tmp_path / "audit"),
     )
@@ -366,7 +367,7 @@ async def _persist_main_pending_confirmation(
         InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[tool_call]),
     )
     assert source_message.id is not None
-    pending = await audit_service_module.audit_tool_round(
+    pending = await confirmation_service_module.prepare_tool_round(
         db,
         cfg=cfg,
         tool_calls=[tool_call],
@@ -435,7 +436,7 @@ async def test_scheduled_agent_work_audit_policy_isolated_from_main_confirmation
 
     monkeypatch.setattr(audit_confirmation_events_module, "send_session_event", send_session_event)
     monkeypatch.setattr(
-        audit_service_module,
+        confirmation_service_module,
         "persist_prepared_audit_round",
         partial(audit_persistence_module.persist_prepared_audit_round, audit_root=tmp_path / "audit"),
     )
@@ -601,7 +602,7 @@ async def test_scheduled_agent_work_audit_policy_isolated_from_main_confirmation
         InternalMessage(role=MessageRole.ASSISTANT, tool_calls=scheduled_tool_calls),
     )
     assert scheduled_source_message.id is not None
-    scheduled_result = await audit_service_module.audit_tool_round(
+    scheduled_result = await confirmation_service_module.prepare_tool_round(
         db_session,
         cfg=cfg,
         tool_calls=scheduled_tool_calls,
@@ -722,7 +723,7 @@ async def test_non_scheduled_agent_work_task_scope_keeps_pending_confirmation_an
 
     monkeypatch.setattr(audit_confirmation_events_module, "send_session_event", send_session_event)
     monkeypatch.setattr(
-        audit_service_module,
+        confirmation_service_module,
         "persist_prepared_audit_round",
         partial(audit_persistence_module.persist_prepared_audit_round, audit_root=tmp_path / "audit"),
     )
@@ -800,7 +801,7 @@ async def test_non_scheduled_agent_work_task_scope_keeps_pending_confirmation_an
     )
     assert source_message.id is not None
 
-    result = await audit_service_module.audit_tool_round(
+    result = await confirmation_service_module.prepare_tool_round(
         db_session,
         cfg=cfg,
         tool_calls=[ordinary_call],
@@ -911,7 +912,7 @@ async def test_scheduled_task_audit_block_then_safe_read_finishes_with_original_
         monkeypatch.setattr(module, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-api-key")
     monkeypatch.setattr(
-        audit_service_module,
+        confirmation_service_module,
         "persist_prepared_audit_round",
         partial(audit_persistence_module.persist_prepared_audit_round, audit_root=tmp_path / "audit"),
     )
@@ -1202,7 +1203,7 @@ async def test_confirmation_continuation_reuses_root_agent_work_audit_policy(
 
     monkeypatch.setattr(audit_confirmation_events_module, "send_session_event", send_session_event)
     monkeypatch.setattr(
-        audit_service_module,
+        confirmation_service_module,
         "persist_prepared_audit_round",
         partial(audit_persistence_module.persist_prepared_audit_round, audit_root=tmp_path / "audit"),
     )
@@ -1413,7 +1414,7 @@ async def test_confirmation_continuation_reuses_root_agent_work_audit_policy(
     followup_source_row = await db_session.get(Message, followup_source_message.id)
     assert followup_source_row is not None
     assert followup_source_row.work_id == confirmed_work_id
-    followup_result = await audit_service_module.audit_tool_round(
+    followup_result = await confirmation_service_module.prepare_tool_round(
         db_session,
         cfg=cfg,
         tool_calls=[followup_call],

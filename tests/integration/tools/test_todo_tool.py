@@ -52,6 +52,7 @@ from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import SessionReplyWorkItem
 from app.models.session_todo import SessionTodoPlan
+from app.models.user import User
 from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 
@@ -354,11 +355,15 @@ async def test_runtime_identity_isolation_returns_uniform_failures_without_plan_
 
 
 @pytest.mark.asyncio
-async def test_manage_todo_is_builtin_even_when_profile_disables_all_tools():
+async def test_manage_todo_is_builtin_even_when_profile_disables_all_tools(database_factory):
     profile = _profile(profile_id=None, enabled_tools=[])
     original_configs = copy.deepcopy(profile.configs)
 
-    tools, whitelist = await get_tools_for_profile(None, profile)
+    async with database_factory() as factory:
+        async with factory() as db:
+            db.add(User(uid=profile.uid, username="todo_builtin_user"))
+            await db.commit()
+            tools, whitelist = await get_tools_for_profile(db, profile)
 
     assert MANAGE_TODO_TOOL_NAME in {tool["function"]["name"] for tool in tools}
     assert whitelist == []

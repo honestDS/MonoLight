@@ -3,6 +3,7 @@ import inspect
 import json
 from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -186,7 +187,8 @@ def test_longterm_memory_tool_descriptions_require_atomic_memory_updates():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("memory_enabled, expected_exposed", [(True, True), (False, False)])
-async def test_get_tools_for_profile_memory_switch_is_independent_of_enabled_tools(memory_enabled, expected_exposed):
+async def test_get_tools_for_profile_memory_switch_is_independent_of_enabled_tools(monkeypatch, memory_enabled, expected_exposed):
+    monkeypatch.setattr("app.core.tools.resolve_action_actor", AsyncMock(return_value=None))
     tools, _whitelist = await get_tools_for_profile(None, _profile(memory_enabled=memory_enabled, enabled_tools=[]))
     names = {tool["function"]["name"] for tool in tools}
 
@@ -955,6 +957,7 @@ async def test_dynamic_knowledge_base_tool_schema_does_not_embed_untrusted_names
 
     monkeypatch.setattr("app.core.tools.knowledge_base_crud.list_recall_sources_by_profile", fake_knowledge_bases)
 
+    monkeypatch.setattr("app.core.tools.resolve_action_actor", AsyncMock(return_value=None))
     tools, whitelist = await get_tools_for_profile(
         None,
         _profile(memory_enabled=False, enabled_tools=[]),

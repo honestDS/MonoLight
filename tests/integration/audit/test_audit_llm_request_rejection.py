@@ -6,6 +6,7 @@ import pytest
 from sqlmodel import select
 
 import app.core.audit.service as audit_service_module
+import app.core.confirmation.service as confirmation_service_module
 from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.constants import (
     ERR_AUDIT_ROUND_BLOCKED,
@@ -118,7 +119,7 @@ def _patch_audit_root(monkeypatch: pytest.MonkeyPatch, audit_root: Path) -> None
     async def persist_in_test_root(db, **kwargs: Any) -> bool:
         return await persist_prepared_audit_round(db, audit_root=audit_root, **kwargs)
 
-    monkeypatch.setattr(audit_service_module, "persist_prepared_audit_round", persist_in_test_root)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist_in_test_root)
 
 
 def _raise_request_rejection(kind: str, kwargs: dict[str, Any]) -> None:
@@ -238,7 +239,7 @@ async def test_scoring_request_rejection_persists_failed_audit_without_execution
     )
 
     async with audit_database() as db:
-        result = await audit_service_module.audit_tool_round(
+        result = await confirmation_service_module.prepare_tool_round(
             db,
             cfg=_audit_config(tmp_path),
             tool_calls=[tool_call],
@@ -288,7 +289,7 @@ async def test_summary_request_rejection_preserves_pending_confirmation_with_fal
     )
 
     async with audit_database() as db:
-        result = await audit_service_module.audit_tool_round(
+        result = await confirmation_service_module.prepare_tool_round(
             db,
             cfg=_audit_config(tmp_path),
             tool_calls=[tool_call],
@@ -688,7 +689,7 @@ async def test_shell_blacklist_feedback_survives_history_reload_and_locale_switc
         monkeypatch.setattr(ShellExecutor, "execute", count_shell_execution)
 
         async with audit_database() as db:
-            result = await audit_service_module.audit_tool_round(
+            result = await confirmation_service_module.prepare_tool_round(
                 db,
                 cfg=_audit_config(tmp_path),
                 tool_calls=[shell_call, background_call],

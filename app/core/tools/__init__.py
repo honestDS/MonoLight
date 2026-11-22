@@ -3,6 +3,8 @@ from typing import Any
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.action_control.actor import resolve_action_actor
+from app.core.action_control.tools import restrict_tool_actions
 from app.core.channel.router import select_channel
 from app.core.constants import (
     END_SESSION_SCOPE_TASK,
@@ -273,10 +275,11 @@ def get_tool_parameters_schema(
     tool_name: str,
     *,
     tool_schemas: list[dict[str, Any]] | None = None,
-    tool_workflow: str = TOOL_WORKFLOW_FOREGROUND,
+    tool_workflow: str | None = TOOL_WORKFLOW_FOREGROUND,
 ) -> dict[str, Any] | None:
     schemas = tool_schemas if tool_schemas is not None else _iter_tool_schemas()
-    schemas = filter_tools_for_workflow(schemas, tool_workflow)
+    if tool_workflow is not None:
+        schemas = filter_tools_for_workflow(schemas, tool_workflow)
     for schema in schemas:
         function = schema.get("function", {})
         if function.get("name") != tool_name:
@@ -360,6 +363,7 @@ async def get_tools_for_profile(
     allow_background: bool = True,
     goal_mode: bool = False,
     tool_workflow: str = TOOL_WORKFLOW_FOREGROUND,
+    actor_uid: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[int]]:
     """
     根据 Profile 中的 enabled_tools 生成当前会话向 LLM 暴露的工具列表。
@@ -367,6 +371,7 @@ async def get_tools_for_profile(
     并会注入运行时知识库白名单；该工具不受 enabled_tools 控制。
     """
     cfg = ProfileConfig.model_validate(profile.configs or {})
+    actor = await resolve_action_actor(db, uid=profile.uid, actor_uid=actor_uid)
     base_tools = []
     for schema in SYSTEM_BUILTIN_TOOL_SCHEMAS:
         if is_tool_enabled_for_config(schema["function"]["name"], cfg):
@@ -381,6 +386,8 @@ async def get_tools_for_profile(
         base_tools.append(copy.deepcopy(IMAGE_GENERATION_TOOL_SCHEMA))
     if is_tool_enabled_for_config(MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME, cfg):
         base_tools.extend(copy.deepcopy(schema) for schema in CONFIGURABLE_MEMORY_TOOL_SCHEMAS)
+    restrict_tool_actions(base_tools, actor)
+    if is_tool_enabled_for_config(MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME, cfg):
         return filter_tools_for_workflow(base_tools, tool_workflow), []
 
     whitelist_ids = []

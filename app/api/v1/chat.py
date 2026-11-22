@@ -16,8 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, Valida
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.chat_web import _response_has_background_tasks, web_chat_adapter
-from app.core.audit.confirmation_lifecycle import stop_interactive_reply
 from app.core.channel.router import select_channel
+from app.core.confirmation.lifecycle import stop_interactive_reply
 from app.core.constants import (
     DEFAULT_SESSION_GOAL_MODE,
     DEFAULT_SESSION_MAX_TURNS,

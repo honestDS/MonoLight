@@ -2,6 +2,7 @@ import os
 import shutil
 import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any
 
 import yaml
 
@@ -12,6 +13,7 @@ from app.core.constants import (
     ERR_SKILL_NOT_FOUND,
     ERR_SKILL_PAGE_INVALID,
     ERR_SKILL_PATH_INVALID,
+    ERR_SYSTEM_ACTION_TARGET_CHANGED,
     SKILL_DESCRIPTION_MAX_CHARS,
     SKILL_METADATA_MAX_BYTES,
     SKILL_NAME_MAX_CHARS,
@@ -315,7 +317,7 @@ def browse_skill(
     }
 
 
-def delete_skill(skills_root: Path, skill_id: str) -> None:
+def prepare_skill_deletion(skills_root: Path, skill_id: str) -> dict[str, Any]:
     if not _valid_skill_id(skill_id):
         raise ParameterException(ERR_SKILL_ID_INVALID)
 
@@ -331,6 +333,32 @@ def delete_skill(skills_root: Path, skill_id: str) -> None:
         if not resolved.is_dir():
             raise ParameterException(ERR_SKILL_NOT_DIRECTORY)
 
+        info = package.lstat()
+        root_info = root.lstat()
+        return {
+            "skill_id": skill_id,
+            "skills_root": str(root),
+            "path": str(package),
+            "resolved_path": str(resolved),
+            "device": info.st_dev,
+            "inode": info.st_ino,
+            "created_ns": info.st_ctime_ns,
+            "root_device": root_info.st_dev,
+            "root_inode": root_info.st_ino,
+        }
+    except FileNotFoundError as exc:
+        raise ResourceNotFoundException(ERR_SKILL_NOT_FOUND) from exc
+    except (OSError, RuntimeError) as exc:
+        raise ServerException(ERR_SKILL_DELETE_FAILED, cause=str(exc)) from exc
+
+
+def delete_skill(skills_root: Path, skill_id: str, *, expected_target: dict | None = None) -> None:
+    try:
+        snapshot = prepare_skill_deletion(skills_root, skill_id)
+        if expected_target is not None and expected_target != snapshot:
+            raise ParameterException(ERR_SYSTEM_ACTION_TARGET_CHANGED)
+
+        package = Path(snapshot["path"])
         info = package.lstat()
         if stat.S_ISLNK(info.st_mode):
             package.unlink()

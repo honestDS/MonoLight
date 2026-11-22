@@ -399,7 +399,7 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
             return _Channel(), {"model_id": "model-2", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
         return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile, *, goal_mode=False, tool_workflow=None):
+    async def get_tools(db, current_profile, actor_uid=None, *, goal_mode=False, tool_workflow=None):
         return [], []
 
     async def prepare_messages(*args, **kwargs):
@@ -546,7 +546,7 @@ async def test_hidden_stream_content_does_not_prevent_channel_retry(monkeypatch)
             return _Channel(), {"model_id": "model-2", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
         return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile, *, goal_mode=False, tool_workflow=None):
+    async def get_tools(db, current_profile, actor_uid=None, *, goal_mode=False, tool_workflow=None):
         return [], []
 
     async def generate_with_stream_callback(**kwargs):

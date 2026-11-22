@@ -6,7 +6,7 @@ from aiohttp import SocketTimeoutError
 
 from app.adapters.weixin_openclaw import DEFAULT_BASE_URL, DEFAULT_BOT_TYPE, DEFAULT_CHANNEL_VERSION, WeixinOpenClawAdapter, WeixinOpenClawConfig, WeixinOpenClawMessage, normalize_weixin_openclaw_config
 from app.adapters.weixin_openclaw.message import merge_message_pair, parse_session_user_id
-from app.core.audit.confirmation import is_confirmation_candidate, message_has_quote
+from app.core.confirmation import is_confirmation_candidate, message_has_quote
 from app.core.constants import DEFAULT_MESSAGE_PLATFORM_MERGE_WAIT_MS, ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED, MESSAGE_PLATFORM_MERGE_MAX_WAIT_MS, MESSAGE_PLATFORM_RECONNECT_INTERVAL_SECONDS
 from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.crud.session.session import session_crud

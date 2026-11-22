@@ -257,6 +257,7 @@ async def test_image_generation_is_submitted_in_background_without_parameter(
         session_id="session-1",
         turn=1,
         uid="user-1",
+        tool_schemas=[IMAGE_GENERATION_TOOL_SCHEMA],
     )
 
     payload = json.loads(result.content)

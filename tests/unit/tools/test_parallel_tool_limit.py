@@ -32,6 +32,7 @@ def _state(tool_limit: int = 5, tools: list[dict] | None = None) -> SimpleNamesp
     return SimpleNamespace(
         db=object(),
         uid="uid",
+        actor_uid="uid",
         session_id="session",
         active_tasks=set(),
         session_source="test",
@@ -135,7 +136,7 @@ async def test_interactive_round_persists_rejected_calls_and_executes_prefix(mon
     executed_ids: list[str] = []
     _install_storage_stubs(monkeypatch)
 
-    async def audit_tool_round(*_args, **_kwargs):
+    async def prepare_tool_round(*_args, **_kwargs):
         return None
 
     async def execute_isolated_tool_call(_context, tool_call):
@@ -146,7 +147,7 @@ async def test_interactive_round_persists_rejected_calls_and_executes_prefix(mon
             content=json.dumps({"status": "ok", "tool_name": tool_call.name}),
         )
 
-    monkeypatch.setattr(interactive_tools, "audit_tool_round", audit_tool_round)
+    monkeypatch.setattr(interactive_tools, "prepare_tool_round", prepare_tool_round)
     monkeypatch.setattr(interactive_tools, "_execute_isolated_tool_call", execute_isolated_tool_call)
     monkeypatch.setattr(interactive_tools, "extract_files_to_user", lambda _results: [])
 
@@ -207,7 +208,7 @@ async def test_exclusive_round_policy_rejects_mixed_round_atomically(monkeypatch
     _install_storage_stubs(monkeypatch)
     monkeypatch.setattr(ManageTodoExecutor, "round_execution_policy", "exclusive")
 
-    async def audit_tool_round(*_args, **_kwargs):
+    async def prepare_tool_round(*_args, **_kwargs):
         return None
 
     async def execute_isolated_tool_call(_context, tool_call):
@@ -218,7 +219,7 @@ async def test_exclusive_round_policy_rejects_mixed_round_atomically(monkeypatch
             content=json.dumps({"status": "ok", "tool_name": tool_call.name}),
         )
 
-    monkeypatch.setattr(interactive_tools, "audit_tool_round", audit_tool_round)
+    monkeypatch.setattr(interactive_tools, "prepare_tool_round", prepare_tool_round)
     monkeypatch.setattr(interactive_tools, "_execute_isolated_tool_call", execute_isolated_tool_call)
 
     await interactive_tools.handle_interactive_tool_round(
@@ -253,7 +254,7 @@ async def test_atomic_round_policy_rejects_over_limit_round(monkeypatch) -> None
     _install_storage_stubs(monkeypatch)
     monkeypatch.setattr(ManageTodoExecutor, "round_execution_policy", "atomic")
 
-    async def audit_tool_round(*_args, **_kwargs):
+    async def prepare_tool_round(*_args, **_kwargs):
         return None
 
     async def execute_isolated_tool_call(_context, tool_call):
@@ -264,7 +265,7 @@ async def test_atomic_round_policy_rejects_over_limit_round(monkeypatch) -> None
             content=json.dumps({"status": "ok", "tool_name": tool_call.name}),
         )
 
-    monkeypatch.setattr(interactive_tools, "audit_tool_round", audit_tool_round)
+    monkeypatch.setattr(interactive_tools, "prepare_tool_round", prepare_tool_round)
     monkeypatch.setattr(interactive_tools, "_execute_isolated_tool_call", execute_isolated_tool_call)
 
     await interactive_tools.handle_interactive_tool_round(

@@ -4,13 +4,13 @@ import socket
 import time
 from typing import Any
 
-from app.core.audit.confirmation import (
+from app.core.confirmation import (
     persist_cancelled_pending_audit_results,
     persist_pending_confirmation_bundle,
     supersede_persisted_pending_confirmation_bundle,
     update_confirmation_message_status,
 )
-from app.core.audit.service import audit_tool_round
+from app.core.confirmation.service import prepare_tool_round
 from app.core.constants import (
     ERR_AUDIT_EXECUTION_CLAIM_FAILED,
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
@@ -268,12 +268,13 @@ async def handle_interactive_tool_round(
                 )
         await _save_execution_checkpoint(state.checkpoint_state, state.messages, state.current_turn)
 
-    audit_round = await audit_tool_round(
+    audit_round = await prepare_tool_round(
         state.db,
         cfg=state.cfg,
         tool_calls=executable_tool_calls,
         source_assistant_message_id=saved_msg.id,
         uid=state.uid,
+        actor_uid=state.actor_uid,
         operator_username=state.username,
         session_id=state.session_id,
         source=state.session_source,
@@ -582,6 +583,7 @@ async def handle_interactive_tool_round(
         session_id=state.session_id,
         current_turn=state.current_turn,
         uid=state.uid,
+        actor_uid=state.actor_uid,
         allowed_knowledge_base_ids=state.allowed_knowledge_base_ids,
         context_window_k=state.chat_params["context_window_k"],
         model_id=state.model_entry["model_id"],

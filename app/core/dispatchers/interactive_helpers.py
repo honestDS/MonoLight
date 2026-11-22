@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation import update_confirmation_message_status
+from app.core.confirmation import update_confirmation_message_status
 from app.core.constants import (
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
     ERR_VALUE_MUST_BE_POSITIVE,
@@ -361,6 +361,7 @@ class _ParallelToolExecutionContext:
     execution_scope: str | None = None
     tool_schemas: list[dict[str, Any]] | None = None
     tool_workflow: str | None = None
+    actor_uid: str | None = None
 
 
 async def _execute_isolated_tool_call(
@@ -384,6 +385,7 @@ async def _execute_isolated_tool_call(
                 protocol=context.protocol,
                 context_summary_boundary_message_id=context.context_summary_boundary_message_id,
                 source_message_id=context.source_message_id,
+                actor_uid=context.actor_uid,
                 session_reply_work_claim=context.session_reply_work_claim,
                 execution_scope=context.execution_scope,
                 tool_schemas=context.tool_schemas,

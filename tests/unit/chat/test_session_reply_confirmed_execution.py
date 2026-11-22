@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.audit.service import AuditRoundResult
+from app.core.confirmation.service import ToolRoundResult
 from app.core.session_reply_queue import (
     executor_audit as executor_audit_module,
 )
@@ -337,7 +337,7 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
         execution_scope="foreground",
     )
     new_record = SimpleNamespace(operator_username="tester", execution_scope="foreground")
-    details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
+    details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64, decision_source="model_audit", action_request=None)]
     work = SimpleNamespace(
         id=7,
         work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
@@ -375,7 +375,7 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
         return SimpleNamespace(security=SimpleNamespace(audit_channel_id=1, audit_model_id="audit-model"))
 
     async def audit_round(*args, **kwargs):
-        return AuditRoundResult(
+        return ToolRoundResult(
             audit_record_id=99,
             status=AuditRecordStatus.PASSED,
             tool_results=(),
@@ -423,7 +423,7 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
     monkeypatch.setattr(executor_confirmed_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: True)
     monkeypatch.setattr(executor_confirmed_module.audit_crud, "cancel_execution_for_file_reaudit", cancel_reaudit)
     monkeypatch.setattr(executor_confirmed_module, "update_confirmation_message_status", update_confirmation)
-    monkeypatch.setattr(executor_confirmed_module, "audit_tool_round", audit_round)
+    monkeypatch.setattr(executor_confirmed_module, "prepare_tool_round", audit_round)
     monkeypatch.setattr(executor_confirmed_module.audit_crud, "claim_passed_for_execution", claim_passed)
     monkeypatch.setattr(executor_audit_module.session_reply_work_item_crud, "update_claimed", update_claimed)
     monkeypatch.setattr(executor_confirmed_module, "get_tools_for_profile", get_tools)
@@ -476,7 +476,7 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
         decision_message_id=4,
         execution_scope="task",
     )
-    details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
+    details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64, decision_source="model_audit", action_request=None)]
     work = SimpleNamespace(
         id=7,
         work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
@@ -561,7 +561,7 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
         return True
 
     async def audit_round(*args, **kwargs):
-        return AuditRoundResult(
+        return ToolRoundResult(
             audit_record_id=99,
             status=AuditRecordStatus.PENDING,
             tool_results=(pending_audit_tool_result("original-1"),),
@@ -601,9 +601,9 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     monkeypatch.setattr(executor_confirmed_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: True)
     monkeypatch.setattr(executor_confirmed_module, "get_pending_tool_results", get_pending)
     monkeypatch.setattr(executor_confirmed_module.audit_crud, "cancel_execution_for_file_reaudit", cancel_reaudit)
-    monkeypatch.setattr(executor_confirmed_module, "audit_tool_round", audit_round)
+    monkeypatch.setattr(executor_confirmed_module, "prepare_tool_round", audit_round)
     monkeypatch.setattr(executor_confirmed_module, "replace_pending_tool_result", replace_result)
-    monkeypatch.setattr(executor_confirmed_module, "save_message", save_confirmation)
+    monkeypatch.setattr(executor_confirmed_module, "persist_pending_confirmation_bundle", save_confirmation)
     monkeypatch.setattr(executor_confirmed_module, "update_confirmation_message_status", update_confirmation)
     monkeypatch.setattr(executor_confirmed_module, "notify_confirmation_tool_results", notify_confirmation_results)
     monkeypatch.setattr(executor_confirmed_module, "dump_background_proactive_history", dump_history)
@@ -620,7 +620,8 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     assert notified_audit_record_ids == [99]
     assert event_order == ["replace", "commit", "notify"]
     assert len(saved_messages) == 1
-    assert saved_messages[0][0][4] == MessageType.AUDIT_CONFIRMATION
+    assert saved_messages[0][1]["confirmation_payload"] == confirmation_payload
+    assert saved_messages[0][1]["tool_results"] == []
     assert any(message.role == MessageRole.TOOL and message.tool_call_id == "original-1" for message in memory_chains[0])
     refreshed_frozen_payload = await executor_replies_module.session_reply_work_item_crud.get_frozen_context(FakeDb(), work)
     refreshed_frozen = [InternalMessage.model_validate(item) for item in refreshed_frozen_payload]
@@ -725,6 +726,8 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
             turn_index=0,
             tool_name="execute_shell",
             arguments_hash="b" * 64,
+            decision_source="model_audit",
+            action_request=None,
         )
     ]
     pending_message = Message(
@@ -977,7 +980,7 @@ async def test_confirmed_execution_does_not_run_without_complete_pending_results
         return record
 
     async def list_details(db, audit_record_id):
-        return [SimpleNamespace(original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
+        return [SimpleNamespace(original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64, decision_source="model_audit", action_request=None)]
 
     async def get_profile(db, profile_id):
         return SimpleNamespace(id=3, uid="user-1")
@@ -1070,7 +1073,7 @@ async def test_confirmed_execution_rejects_mismatched_decision_message_boundary(
         return record
 
     async def list_details(db, audit_record_id):
-        return [SimpleNamespace(original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
+        return [SimpleNamespace(original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64, decision_source="model_audit", action_request=None)]
 
     async def get_profile(db, profile_id):
         return SimpleNamespace(id=3, uid="user-1")
@@ -1145,7 +1148,7 @@ async def test_confirmed_execution_precheck_failure_closes_round_as_failed(monke
         decision_message_id=4,
         execution_scope="foreground",
     )
-    details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
+    details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64, decision_source="model_audit", action_request=None)]
     work = SimpleNamespace(
         source_id="42",
         execution_state={"audit_claim_token": "claim-token", "decision_message_id": 4},
@@ -1271,8 +1274,8 @@ async def test_confirmed_execution_closes_round_when_execution_attempt_creation_
         execution_scope="foreground",
     )
     details = [
-        SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64),
-        SimpleNamespace(id=12, original_tool_call_id="original-2", turn_index=1, tool_name="safe_tool", arguments_hash="c" * 64),
+        SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64, decision_source="model_audit", action_request=None),
+        SimpleNamespace(id=12, original_tool_call_id="original-2", turn_index=1, tool_name="safe_tool", arguments_hash="c" * 64, decision_source="model_audit", action_request=None),
     ]
     work = SimpleNamespace(
         source_id="42",

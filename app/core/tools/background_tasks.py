@@ -154,7 +154,7 @@ class ManageBackgroundTasksExecutor(BaseExecutor):
 
         if task.status == BackgroundTaskStatus.CANCELLED and task.audit_record_id is not None:
             # 避免工具注册与审计初始化之间形成循环依赖。
-            from app.core.audit.confirmation import update_confirmation_message_status
+            from app.core.confirmation import update_confirmation_message_status
 
             await update_confirmation_message_status(self.db, audit_record_id=task.audit_record_id)
 

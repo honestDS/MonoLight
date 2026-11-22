@@ -22,21 +22,31 @@ Run MonoLight under a dedicated, low-privilege account. Choose a trusted audit p
 2. The server offers text-file reads and non-interactive shell commands for evidence gathering. Evidence calls must refer to a tool call under review and share a fixed budget. The audit prompt directs evidence commands to inspect only; they still run through a general-purpose shell.
 3. The server checks that the model returns a structured result for each original call, with a matching call ID, risk score, denial flag, and reason. The server applies its own checks and the configured threshold. Format checks verify that a decision belongs to the right call; the model can still be misled into giving a valid-looking but incorrect risk assessment. Model output carries no user approval.
 
-### Confirmation, duplicates, and rejection
+### System action control
 
-1. **When approval applies.** A call flagged for confirmation waits for the user. For calls eligible for confirmation, scores of 8–10 require an explicit override (the dashboard's **Ignore and allow** button or `ignore` in WeChat). A directory-policy denial cannot be overridden by approval. A scheduled run blocks operations that would require approval.
-2. **Where approval comes from.** The web card displays a pending record created by the server. The server takes web decisions from an authenticated account with write access to the conversation, and WeChat decisions from the sender bound to that conversation. The web buttons submit the same standalone decision words used in chat. Card text and assistant messages do not grant approval; a WeChat reply with a quote or attachment is not a decision.
+`action_control` is a general program rule for registered system actions. The first registered action is skill uninstall.
+
+- **Operations and account scope.** The backend exposes the operations allowed for the current MonoLight account. Only an enabled super-admin account is allowed to use `uninstall`; an ordinary account remains limited to `list` and `browse`. Execution and confirmation approval re-check the account's current permission. If an operation exists but the account is not allowed to use it, MonoLight tells the AI that the MonoLight account lacks permission. An unknown operation is reported as not existing.
+- **Skill uninstall.** Uninstall skips model risk scoring and model-generated summaries. The current rule checks `Profile.security.audit_threshold`: a value greater than 0 waits for system confirmation, while 0 executes directly. This is independent of whether an audit model is configured. The system card has no risk score and uses fixed text stating that it deletes the target skill package and all its resources, affects all users, and cannot be restored by the system.
+- **Shared request lifecycle.** System actions and model-audited calls use the same records and lifecycle for expiry, cancellation, duplicate submissions, recovery of the original request, and result notifications. After approval, execution uses the saved request directly. It re-checks the current permissions of the original operator and confirmer and the skill-directory identity snapshot; if the target is replaced, the request must be submitted again.
+- **Mixed rounds and other sources.** In a mixed round, ordinary tools still receive model scoring and directory-policy checks. System and ordinary calls are one batch; any blocker prevents the entire batch. The existing high-risk `ignore` rule remains for model-audited calls that are eligible for that override. A real scheduled source is blocked when confirmation is needed. A subagent dispatched in the foreground inherits the actual account of the parent work; when confirmation is needed, a user with the required operation permission confirms before execution continues. The existing management-page delete entry keeps its original permissions and interaction.
+- **Historical data and migration.** Migration sets `detail.decision_source='model_audit'` for existing tool details and defaults the new `action_request` to empty. Historical records are retained; uninstall requests that only went through model audit must be submitted again under the new rules.
+
+### Model-audited tool confirmation, duplicates, and rejection
+
+1. **When model-audit approval applies.** A call flagged for confirmation by model audit waits for the user. For calls eligible for confirmation, scores of 8–10 require an explicit override (the dashboard's **Ignore and allow** button or `ignore` in WeChat). A directory-policy denial cannot be overridden by approval. A scheduled run blocks operations that would require approval.
+2. **Where model-audit approval comes from.** The web card displays a pending record created by the server. The server takes web decisions from an authenticated account with write access to the conversation, and WeChat decisions from the sender bound to that conversation. The web buttons submit the same standalone decision words used in chat. Card text and assistant messages do not grant approval; a WeChat reply with a quote or attachment is not a decision.
 3. **What happens on repeat submission.** Only one approval can claim the same pending, unexpired record, even if decisions arrive together. An HTTP retry with the same request ID and content reuses the original submission. The web and WeChat decisions target the conversation's current pending record, not a signed token for a particular card. Submitting the same approval word as a new message can approve a later pending operation.
 4. **What can run.** Before executing an approved round, the server checks the execution token and verifies the original tool calls, arguments, and working directory against the stored fingerprint. A change to a file covered by the integrity check triggers another review while auditing is configured. Once the server records a rejection, that pending round will not run. If decisions arrive together, the first one to update the pending record wins. Rejection does not undo earlier actions or apply to a later proposal.
 
-### Audit unavailable or timed out
+### Model audit unavailable or timed out
 
 - **Audit configured:** If risk scoring times out, the model or its channel is unavailable, or its results cannot be validated, the affected tool round does not run. If only the card summary fails after scoring, the server shows a standard summary and still waits for the user's decision.
-- **Audit not configured:** A profile without an audit channel or model skips model review. Enabled tools still apply their own rules.
+- **Audit not configured:** A profile without an audit channel or model skips model audit only. System action rules, account permissions, and the tools' own checks still apply.
 
 ### What is recorded today
 
-MonoLight stores review details, confirmation decisions, and execution status for audited tool calls. Existing records follow the server's retention settings. End-to-end audit trails and automated audit reports are planned.
+MonoLight stores model-review details, system-action decision details, confirmation decisions, and execution status. System actions and model-audited tool calls share pending-request records and the server's retention settings. End-to-end audit trails and automated audit reports are planned.
 
 ### Verification
 
@@ -49,6 +59,10 @@ The integration tests simulate model responses and check the server's behavior:
 - [Web and WeChat decision handling, including rejection and repeat approval](../tests/integration/audit/test_confirmation_entry_flows.py)
 - [Approval expiry and checks on the original call arguments](../tests/integration/audit/test_audit_records.py)
 - [HTTP retries, authenticated decision identity](../tests/integration/audit/test_confirmation_audit_entry_identity.py), and [re-audit after a file changes](../tests/integration/audit/test_confirmation_audit_reaudit.py)
+- [System-action confirmation, permissions, and uninstall workflow](../tests/integration/audit/test_system_action_confirmation_workflow.py)
+- [Mixed system-action and ordinary-tool rounds](../tests/integration/audit/test_system_action_mixed_round.py)
+- [Foreground subagent system-action account and confirmation handling](../tests/integration/subagents/test_subagent_system_actions.py)
+- [Scheduled system actions that require confirmation](../tests/integration/scheduled_tasks/test_scheduled_system_actions.py)
 
 #### Web approval screenshots
 
@@ -80,21 +94,31 @@ MonoLight 从项目初期就选择不使用内置沙箱，以保持部署轻量�
 2. 服务端只提供文本读取和非交互式 Shell 两类取证工具，取证必须关联本轮调用，并共用调用次数上限。审计提示要求取证命令只做检查，实际使用的仍是通用 Shell。
 3. 服务端核对每个审计结果是否包含匹配的工具调用编号、风险评分、拒绝标记和理由，再结合本地检查及配置阈值处理。格式校验核对的是结果与调用的对应关系；模型仍可能被构造的内容误导，给出格式正确但判断有误的结果。模型输出本身不是用户授权。
 
-### 确认、防重复执行与拒绝
+### 系统操作控制
 
-1. **何时确认。** 审计判定需要确认时，先等待用户决定。对可确认的调用，风险评分为 8–10 分时，须明确选择网页上的「忽略并放行」或在微信回复「忽略」。目录写入规则判定为违规的调用直接拦截，确认也不会放行。定时任务遇到需要确认的操作时直接拦截。
-2. **谁能确认。** 网页卡片展示服务端生成的待确认记录。网页只接受对该会话有写权限的登录账号提交决定；微信按发送者与会话的绑定关系识别决定。网页按钮发送的也是单独一条确认关键词。卡片文案和模型回复本身不会变成授权；带引用或附件的微信回复不会被当成确认决定。
+`action_control` 是针对已登记系统操作的通用程序规则。当前首个登记操作是技能卸载。
+
+- **操作与账号范围。** 后端提供当前 MonoLight 账号获准使用的操作。只有已启用的超级管理员账号可以使用 `uninstall`，普通账号仍仅可 `list` 和 `browse`。执行和确认批准前仍会重新校验账号当前权限。请求的操作真实存在但当前账号无权时，MonoLight 会明确告诉 AI 当前 MonoLight 账号权限不足；未知操作会明确说明不存在。
+- **技能卸载。** 卸载跳过模型风险评分和模型生成的摘要。当前规则检查 `Profile.security.audit_threshold`：大于 0 时等待系统确认，等于 0 时直接执行，与是否配置审计模型无关。系统卡片没有风险分数，并固定说明：删除目标技能包及其全部资源，会影响所有用户，系统无法恢复。
+- **共用请求生命周期。** 系统操作与模型审计调用共用记录及过期、取消、重复提交、恢复原请求和结果通知流程。确认后直接执行已保存的请求；执行前再次核对原操作人和确认人的当前权限，以及技能目录身份快照。目标被替换时，必须重新提出请求。
+- **混合批次与其他来源。** 混合批次中的普通工具仍照常进行模型评分和目录限制检查；系统操作和普通调用合并成一批，任一阻止条件都会使整批不执行。现有较高风险调用的 `ignore` 规则继续保留，仅适用于原本允许该覆盖的模型审计调用。真实定时来源遇到需要确认的操作时拦截。前台派出的子代理继承父工作的实际账号；需要确认时，由具备操作权限的用户确认后继续执行。现有管理页面删除入口保持原有权限与交互。
+- **历史记录与迁移。** 迁移为既有工具明细设置 `decision_source='model_audit'`，新增 `action_request` 默认为空。历史记录继续保留；原仅经过模型审计的卸载请求需要按新规则重新发起。
+
+### 模型审计调用的确认、防重复执行与拒绝
+
+1. **何时需要模型审计确认。** 模型审计判定需要确认时，先等待用户决定。对可确认的调用，风险评分为 8–10 分时，须明确选择网页上的「忽略并放行」或在微信回复「忽略」。目录写入规则判定为违规的调用直接拦截，确认也不会放行。定时任务遇到需要审批的操作时直接拦截。
+2. **谁能提交模型审计确认。** 网页卡片展示服务端生成的待确认记录。网页只接受对该会话有写权限的登录账号提交决定；微信按发送者与会话的绑定关系识别决定。网页按钮发送的也是单独一条确认关键词。卡片文案和模型回复本身不会变成授权；带引用或附件的微信回复不会被当成确认决定。
 3. **重复提交。** 同一条尚未过期的待确认记录只能放行一次，由数据库处理同时到达的决定。网页 HTTP 请求使用同一请求编号和内容重试时，复用原提交结果。网页和微信处理的都是当前会话正在等待确认的操作，消息没有绑定到某张卡片。把同样的「同意」作为新消息再发一次，可能确认之后出现的另一项操作。
 4. **执行与拒绝。** 执行前，服务端核对执行凭证，以及原工具调用、参数和工作目录的校验值。配置了审计时，纳入校验的文件发生变化会重新审计。服务端记为「已拒绝」后，这批待确认调用不会执行。批准和拒绝同时到达时，以先更新待确认记录的决定为准。拒绝只针对这一批调用，不撤回已发生的操作，也不替以后提出的操作作决定。
 
-### 审计模型不可用或超时
+### 模型审计不可用或超时
 
 - **已配置审计：** 风险评分请求超时、模型或渠道不可用，或评分结果无法通过校验时，这批工具不执行。若评分已完成，仅卡片摘要生成失败，则用默认摘要展示卡片，仍等待用户决定。
-- **未配置审计：** 配置文件缺少审计渠道或模型时，跳过模型审计，已启用的工具仍按各自规则运行。
+- **未配置审计：** 配置文件缺少审计渠道或模型时，仅跳过模型审计；系统操作规则、账号权限和工具自身检查仍然生效。
 
-### 已有记录与规划
+### 当前记录内容
 
-当前会保存已审计工具调用的判定明细、确认决定和执行状态，记录按服务端保留策略清理。「全程留痕」和自动生成审计报告仍在规划中。
+当前会保存模型审计明细、系统操作决定明细、确认决定和执行状态。系统操作与模型审计调用共用待处理请求记录，并按服务端保留策略清理。「全程留痕」和自动生成审计报告仍在规划中。
 
 ### 如何验证
 
@@ -107,6 +131,10 @@ MonoLight 从项目初期就选择不使用内置沙箱，以保持部署轻量�
 - [网页和微信的拒绝与重复确认](../tests/integration/audit/test_confirmation_entry_flows.py)
 - [确认过期和原调用参数校验](../tests/integration/audit/test_audit_records.py)
 - [网页请求重试、确认人身份](../tests/integration/audit/test_confirmation_audit_entry_identity.py)和[文件变化后的复查](../tests/integration/audit/test_confirmation_audit_reaudit.py)
+- [系统操作确认、权限和卸载流程](../tests/integration/audit/test_system_action_confirmation_workflow.py)
+- [系统操作与普通工具的混合批次](../tests/integration/audit/test_system_action_mixed_round.py)
+- [前台子代理的系统操作账号与确认处理](../tests/integration/subagents/test_subagent_system_actions.py)
+- [需要确认的定时系统操作](../tests/integration/scheduled_tasks/test_scheduled_system_actions.py)
 
 #### 网页确认截图
 

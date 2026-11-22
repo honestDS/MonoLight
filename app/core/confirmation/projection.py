@@ -10,13 +10,13 @@ from app.core.crud.session.message import message_crud
 from app.core.i18n import t
 from app.models.audit import AuditRecordStatus
 
-from .confirmation_common import (
+from .common import (
     _STATUS_TEXT_KEYS,
     ConfirmationMessageProjection,
     ConfirmationStatusUpdate,
 )
-from .confirmation_events import _broadcast_confirmation_status_update
-from .confirmation_queries import _get_confirmation_message
+from .events import _broadcast_confirmation_status_update
+from .queries import _get_confirmation_message
 
 __all__ = [
     "update_confirmation_message_status",

@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from app.core.audit.service import AuditRoundResult
+from app.core.confirmation.service import ToolRoundResult
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.audit import AuditRecordStatus
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
@@ -46,7 +46,7 @@ async def test_pending_audit_cancels_unpersisted_confirmation_when_batch_arrives
         ),
         source_message_ids=(32, 30, 31),
     )
-    audit_result = AuditRoundResult(
+    audit_result = ToolRoundResult(
         audit_record_id=42,
         status=AuditRecordStatus.PENDING,
         tool_results=(pending_audit_tool_result("call-1"),),
@@ -226,7 +226,7 @@ async def test_allowed_tool_executes_once_before_appended_batch_reaches_next_mod
 @pytest.mark.asyncio
 async def test_streamed_pending_audit_bundle_is_superseded_when_batch_arrives_during_persistence(monkeypatch):
     confirmation_payload = audit_confirmation_payload(42, risk=8, confirmation_mode="high_risk_override")
-    audit_result = AuditRoundResult(
+    audit_result = ToolRoundResult(
         audit_record_id=42,
         status=AuditRecordStatus.PENDING,
         tool_results=(pending_audit_tool_result("call-1"),),
@@ -389,19 +389,19 @@ async def test_interactive_batches_advance_confirmation_and_summary_boundaries_w
         source_message_ids=(122, 120),
     )
     pending_results = [
-        AuditRoundResult(
+        ToolRoundResult(
             audit_record_id=42,
             status=AuditRecordStatus.PENDING,
             tool_results=(pending_audit_tool_result("call-pending-a"),),
             confirmation_payload=audit_confirmation_payload(42),
         ),
-        AuditRoundResult(
+        ToolRoundResult(
             audit_record_id=43,
             status=AuditRecordStatus.PENDING,
             tool_results=(pending_audit_tool_result("call-pending-b"),),
             confirmation_payload=audit_confirmation_payload(43),
         ),
-        AuditRoundResult(
+        ToolRoundResult(
             audit_record_id=44,
             status=AuditRecordStatus.PASSED,
             tool_results=(),

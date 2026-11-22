@@ -640,7 +640,7 @@ async def _dispatch_interactive_work(
         "message": message,
         "uid": uid,
         "cache_key": build_session_cache_key(uid=uid, session_id=session_id, subagent_id=work.subagent_id),
-        "actor_uid": execution_state.get("actor_uid") or uid,
+        "actor_uid": execution_state.get("actor_uid"),
         "actor_username": execution_state.get("actor_username"),
         "session_id": session_id,
         "attachments": attachments or None,

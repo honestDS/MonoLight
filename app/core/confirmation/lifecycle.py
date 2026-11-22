@@ -14,12 +14,12 @@ from app.core.session.tool_cancellation import complete_cancelled_tool_results
 from app.core.terminal.audit_lifecycle import stop_terminal_sessions
 from app.models.audit import AuditRecordStatus
 
-from .confirmation_events import _broadcast_confirmation_status_update
-from .confirmation_projection import (
+from .events import _broadcast_confirmation_status_update
+from .projection import (
     _sync_confirmation_message_status_projection,
     update_confirmation_message_status,
 )
-from .confirmation_results import (
+from .results import (
     _update_confirmation_tool_results,
     cancel_persisted_pending_confirmation_bundle,
 )

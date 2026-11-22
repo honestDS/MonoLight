@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from app.core.audit.service import AuditRoundResult
+from app.core.confirmation.service import ToolRoundResult
 from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.dispatchers import interactive_tools as interactive_tools_module
 from app.core.terminal.schemas import (
@@ -233,7 +233,7 @@ async def test_interactive_keeps_active_binding_when_audit_round_finish_fails(mo
 @pytest.mark.asyncio
 async def test_streamed_pending_audit_publishes_tool_events_before_confirmation(monkeypatch):
     confirmation_payload = audit_confirmation_payload(42, risk=8, confirmation_mode="high_risk_override")
-    audit_result = AuditRoundResult(
+    audit_result = ToolRoundResult(
         audit_record_id=42,
         status=AuditRecordStatus.PENDING,
         tool_results=(pending_audit_tool_result("call-1"),),
@@ -324,7 +324,7 @@ async def test_pending_audit_publishes_tool_start_before_audit_finishes(monkeypa
     release_audit = asyncio.Event()
     published_events = []
     checkpoints = []
-    audit_result = AuditRoundResult(
+    audit_result = ToolRoundResult(
         audit_record_id=42,
         status=AuditRecordStatus.PENDING,
         tool_results=(pending_audit_tool_result("call-1"),),

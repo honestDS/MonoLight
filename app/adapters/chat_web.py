@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.base import BaseChatAdapter
-from app.core.audit.confirmation import build_confirmation_update_events
+from app.core.confirmation import build_confirmation_update_events
 from app.core.constants import ERR_LLM_UNEXPECTED_ERROR, ERR_SESSION_ID_REQUIRED
 from app.core.crud.session.todo import session_todo_crud
 from app.core.dispatchers.dispatcher import ChatDispatcher

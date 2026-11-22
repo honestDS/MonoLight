@@ -1,4 +1,4 @@
-from app.core.audit.confirmation import update_confirmation_message_status
+from app.core.confirmation import update_confirmation_message_status
 from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, ERR_BACKGROUND_TASK_LEASE_MAX_ATTEMPTS_EXCEEDED
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.external_work import external_work_crud

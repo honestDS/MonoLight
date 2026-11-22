@@ -3,7 +3,6 @@ import json
 
 import httpx
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.profile import get_profile_tool_options
 from app.core.constants import WEB_TOOL_NAME
@@ -14,6 +13,7 @@ from app.core.tools.web_tool import WebToolExecutor
 from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
 from app.models.message import InternalToolCall
 from app.models.profile import Profile, ProfileConfig
+from app.models.user import User
 
 
 class _InternalWebClient:
@@ -100,7 +100,7 @@ async def test_web_tool_uses_an_alternate_client_without_firecrawl_configuration
 
 @pytest.mark.asyncio
 async def test_profile_exposes_one_web_tool_protocol_and_rejects_provider_arguments(
-    db_session: AsyncSession,
+    database_factory,
 ):
     cfg = ProfileConfig.model_validate({"tool": {"firecrawl_api_key": "", "enabled_tools": [WEB_TOOL_NAME]}})
     profile = Profile(
@@ -110,7 +110,11 @@ async def test_profile_exposes_one_web_tool_protocol_and_rejects_provider_argume
         configs=cfg.model_dump(),
     )
 
-    tools, whitelist = await get_tools_for_profile(db_session, profile)
+    async with database_factory() as session_factory:
+        async with session_factory() as db:
+            db.add(User(uid="user-1", username="web_boundary_user"))
+            await db.commit()
+            tools, whitelist = await get_tools_for_profile(db, profile)
     tool_names = {tool["function"]["name"] for tool in tools}
     web_schemas = [tool for tool in tools if tool["function"]["name"] == WEB_TOOL_NAME]
 

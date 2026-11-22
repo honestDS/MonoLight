@@ -116,6 +116,8 @@ class AuditToolDetail(SQLModel, table=True):
     arguments_hash: str = Field(index=True, max_length=64)
     arguments_summary: str = Field(sa_column=Column(Text))
     file_snapshots: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    decision_source: str = Field(default="model_audit", max_length=30)
+    action_request: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True))
 
 

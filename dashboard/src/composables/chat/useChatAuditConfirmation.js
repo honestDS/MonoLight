@@ -46,6 +46,21 @@ export function useChatAuditConfirmation({ props, emit, t }) {
     return payload
   }
   const isHighRiskAuditConfirmation = message => getAuditConfirmation(message).confirmation_mode === 'high_risk_override'
+  const isSystemConfirmation = message => getAuditConfirmation(message).confirmation_kind === 'system'
+  const getConfirmationTitle = (message) => {
+    if (isHighRiskAuditConfirmation(message)) return t('chat.audit_high_risk_warning_title')
+    const kind = getAuditConfirmation(message).confirmation_kind
+    if (kind === 'system') return t('chat.system_confirmation_title')
+    if (kind === 'mixed') return t('chat.mixed_confirmation_title')
+    return t('chat.audit_confirmation_title')
+  }
+  const getConfirmationApproveLabel = (message) => {
+    if (isSystemConfirmation(message)) return t('chat.system_confirmation_approve')
+    return t(isHighRiskAuditConfirmation(message) ? 'chat.audit_ignore_and_allow' : 'chat.audit_approve')
+  }
+  const getConfirmationRejectLabel = message => t(
+    isSystemConfirmation(message) ? 'chat.system_confirmation_reject' : 'chat.audit_reject',
+  )
   const getAuditRemainingSeconds = (message) => {
     const expiresAt = Date.parse(getAuditConfirmation(message).expires_at || '')
     if (!Number.isFinite(expiresAt)) return null
@@ -78,8 +93,12 @@ export function useChatAuditConfirmation({ props, emit, t }) {
     return t(`chat.audit_status_${status === 'pending' && isAuditConfirmationExpired(message) ? 'expired' : status}`)
   }
   const submitAuditDecision = async (message, decision) => {
-    const auditRecordId = getAuditConfirmation(message).audit_record_id
+    const confirmation = getAuditConfirmation(message)
+    const auditRecordId = confirmation.audit_record_id
     if (!auditRecordId || pendingAuditDecisions.value.has(auditRecordId)) return
+    if (props.currentSessionReadOnly || props.confirmationBusy || !isAuditConfirmationActionable(confirmation, Date.now())) return
+    if (!['approve', 'ignore', 'reject'].includes(decision)) return
+    if (isSystemConfirmation(message) && decision === 'ignore') return
 
     if (decision === 'ignore') {
       pendingAuditDecisions.value = new Set([...pendingAuditDecisions.value, auditRecordId])
@@ -104,6 +123,7 @@ export function useChatAuditConfirmation({ props, emit, t }) {
       const now = Date.now()
       if (
         props.currentSessionReadOnly ||
+        props.confirmationBusy ||
         !latestAuditConfirmation ||
         !hasSameAuditRecordId(latestAuditConfirmation.confirmation.audit_record_id, auditRecordId) ||
         !isAuditConfirmationActionable(latestAuditConfirmation.confirmation, now)
@@ -124,6 +144,10 @@ export function useChatAuditConfirmation({ props, emit, t }) {
   return {
     getAuditConfirmation,
     isHighRiskAuditConfirmation,
+    isSystemConfirmation,
+    getConfirmationTitle,
+    getConfirmationApproveLabel,
+    getConfirmationRejectLabel,
     getAuditStatusLabel,
     getAuditExpiryLabel,
     isAuditDecisionPending,

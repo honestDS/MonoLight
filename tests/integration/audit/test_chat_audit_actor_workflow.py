@@ -11,8 +11,9 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
-import app.core.audit.confirmation_events as confirmation_events_module
 import app.core.audit.service as audit_service_module
+import app.core.confirmation.events as confirmation_events_module
+import app.core.confirmation.service as confirmation_service_module
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.security as security_module
 import app.core.session_reply_queue.executor_interactive as executor_interactive_module
@@ -173,12 +174,12 @@ async def actor_workflow_runtime(
             )
 
         monkeypatch.setattr(audit_service_module, "_call_auditor", fake_call_auditor)
-        original_persist = audit_service_module.persist_prepared_audit_round
+        original_persist = confirmation_service_module.persist_prepared_audit_round
 
         async def persist_in_test_root(db: AsyncSession, **kwargs: Any) -> bool:
             return await original_persist(db, audit_root=audit_root, **kwargs)
 
-        monkeypatch.setattr(audit_service_module, "persist_prepared_audit_round", persist_in_test_root)
+        monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist_in_test_root)
 
         async def fake_generate(**kwargs: Any) -> InternalResponse:
             model_id = kwargs["model_id"]

@@ -10,12 +10,12 @@ from app.core.message_platforms.notifier import send_session_event
 from app.models.audit import AuditRecordStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
 
-from .confirmation_common import (
+from .common import (
     ConfirmationStatusUpdate,
     PendingConfirmationCancellation,
     logger,
 )
-from .confirmation_queries import (
+from .queries import (
     _get_confirmation_message,
     _get_structured_tool_result_messages,
 )

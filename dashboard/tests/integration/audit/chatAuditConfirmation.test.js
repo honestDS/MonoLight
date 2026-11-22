@@ -7,6 +7,8 @@ import { renderToString } from 'vue/server-renderer'
 import { ref } from 'vue'
 import enChat from '../../../src/i18n/locales/en/chat.js'
 import enCommon from '../../../src/i18n/locales/en/common.js'
+import zhChat from '../../../src/i18n/locales/zh/chat.js'
+import zhCommon from '../../../src/i18n/locales/zh/common.js'
 import { isAuditConfirmationActionable } from '../../../src/utils/auditConfirmation.js'
 import { loadUseConfirmDialog } from '../../confirmDialogHarness.js'
 
@@ -34,12 +36,17 @@ const loadUseChatAuditConfirmation = ({ clockDate, window, onUnmounted, useConfi
 
 const toHost = value => value === undefined ? value : JSON.parse(JSON.stringify(value))
 
-const createTranslate = () => {
+const localeMessages = {
+  en: { chat: enChat, common: enCommon },
+  zh: { chat: zhChat, common: zhCommon },
+}
+
+const createTranslate = (locale = 'en') => {
   const i18n = createI18n({
     legacy: false,
-    locale: 'en',
+    locale,
     fallbackLocale: 'en',
-    messages: { en: { chat: enChat, common: enCommon } },
+    messages: localeMessages,
   })
 
   const t = (...args) => i18n.global.t(
@@ -56,6 +63,8 @@ const createAuditMessage = ({
   auditRecordId = 42,
   status = 'pending',
   confirmationMode = 'high_risk_override',
+  confirmationKind,
+  risk = 95,
   expiresAt = '2026-07-29T00:01:00.000Z',
   ...overrides
 } = {}) => ({
@@ -68,9 +77,10 @@ const createAuditMessage = ({
     type: 'audit_confirmation',
     audit_record_id: auditRecordId,
     summary: 'Delete production records',
-    risk: 95,
+    risk,
     status,
     confirmation_mode: confirmationMode,
+    confirmation_kind: confirmationKind,
     expires_at: expiresAt,
     plain_text: 'Audit confirmation for deleting production records',
   }),
@@ -82,7 +92,7 @@ const setAuditStatus = (message, status) => {
   message.content = JSON.stringify({ ...content, status })
 }
 
-const createHarness = ({ message = createAuditMessage() } = {}) => {
+const createHarness = ({ message = createAuditMessage(), locale = 'en' } = {}) => {
   let now = Date.parse('2026-07-29T00:00:00.000Z')
   const timerCalls = []
   const clearedTimerIds = []
@@ -93,6 +103,7 @@ const createHarness = ({ message = createAuditMessage() } = {}) => {
   const props = {
     messages: [message],
     currentSessionReadOnly: false,
+    confirmationBusy: false,
   }
   const window = {
     setInterval(callback, delay) {
@@ -108,7 +119,7 @@ const createHarness = ({ message = createAuditMessage() } = {}) => {
     now: () => now,
     parse: value => Date.parse(value),
   }
-  const { t } = createTranslate()
+  const { t } = createTranslate(locale)
   const ElMessageBox = {
     confirm(dialogMessage, title, options) {
       confirmations.push({
@@ -176,8 +187,8 @@ const createHarness = ({ message = createAuditMessage() } = {}) => {
   }
 }
 
-const withHarness = async callback => {
-  const harness = createHarness()
+const withHarness = async (callback, options = {}) => {
+  const harness = createHarness(options)
   try {
     return await callback(harness)
   } finally {
@@ -340,4 +351,225 @@ test('approve and reject keep their direct non-ignore behavior', async () => {
       assert.equal(api.getAuditStatusLabel(message), expectedLabel, decision)
     })
   }
+})
+
+test('renders pure system confirmations in both locales and sends each button decision once', async () => {
+  for (const locale of ['en', 'zh']) {
+    for (const decision of ['approve', 'reject']) {
+      await withHarness(async harness => {
+        const { api, message } = harness
+        const expectedChat = localeMessages[locale].chat
+
+        assert.equal(api.isSystemConfirmation(message), true, locale)
+        assert.equal(api.getAuditConfirmation(message).confirmation_mode, 'standard', locale)
+        assert.equal(api.getAuditConfirmation(message).risk, null, locale)
+        assert.equal(api.getConfirmationTitle(message), expectedChat.system_confirmation_title, locale)
+        assert.equal(api.getConfirmationApproveLabel(message), expectedChat.system_confirmation_approve, locale)
+        assert.equal(api.getConfirmationRejectLabel(message), expectedChat.system_confirmation_reject, locale)
+
+        const firstDecision = api.submitAuditDecision(message, decision)
+        const duplicateDecision = api.submitAuditDecision(message, decision)
+        await Promise.all([firstDecision, duplicateDecision])
+
+        assert.equal(harness.confirmations.length, 0, `${locale} ${decision}`)
+        assert.deepEqual(harness.emitted, [[
+          'audit-decision',
+          { auditRecordId: 42, decision },
+        ]], `${locale} ${decision}`)
+      }, {
+        locale,
+        message: createAuditMessage({
+          confirmationKind: 'system',
+          confirmationMode: 'standard',
+          risk: null,
+        }),
+      })
+    }
+  }
+})
+
+test('does not allow ignore for pure system confirmations', async () => {
+  await withHarness(async harness => {
+    const { api, message } = harness
+    await api.submitAuditDecision(message, 'ignore')
+
+    assert.equal(harness.confirmations.length, 0)
+    assert.deepEqual(harness.emitted, [])
+  }, {
+    message: createAuditMessage({
+      confirmationKind: 'system',
+      confirmationMode: 'standard',
+      risk: null,
+    }),
+  })
+})
+
+test('does not emit system button decisions after expiry, read-only changes, or cancellation', async () => {
+  const staleSystemCases = [
+    {
+      name: 'expiry reaches now',
+      apply: ({ harness, message }) => harness.setNow(JSON.parse(message.content).expires_at),
+    },
+    {
+      name: 'session becomes read-only',
+      apply: ({ harness }) => { harness.props.currentSessionReadOnly = true },
+    },
+    {
+      name: 'status becomes cancelled',
+      apply: ({ message }) => setAuditStatus(message, 'cancelled'),
+    },
+  ]
+
+  for (const staleCase of staleSystemCases) {
+    await withHarness(async harness => {
+      const { api, message } = harness
+      staleCase.apply({ harness, message })
+
+      await Promise.all([
+        api.submitAuditDecision(message, 'approve'),
+        api.submitAuditDecision(message, 'reject'),
+      ])
+
+      assert.deepEqual(harness.emitted, [], staleCase.name)
+      assert.equal(harness.confirmations.length, 0, staleCase.name)
+    }, {
+      message: createAuditMessage({
+        confirmationKind: 'system',
+        confirmationMode: 'standard',
+        risk: null,
+      }),
+    })
+  }
+})
+
+test('keeps audit presentation and approve behavior for standard mixed confirmations', async () => {
+  await withHarness(async harness => {
+    const { api, message } = harness
+
+    assert.equal(api.isSystemConfirmation(message), false)
+    assert.equal(api.getConfirmationTitle(message), enChat.mixed_confirmation_title)
+    assert.equal(api.getConfirmationApproveLabel(message), enChat.audit_approve)
+    assert.equal(api.getConfirmationRejectLabel(message), enChat.audit_reject)
+
+    await api.submitAuditDecision(message, 'approve')
+    assert.equal(harness.confirmations.length, 0)
+    assert.deepEqual(harness.emitted, [[
+      'audit-decision',
+      { auditRecordId: 42, decision: 'approve' },
+    ]])
+  }, {
+    message: createAuditMessage({
+      confirmationKind: 'mixed',
+      confirmationMode: 'standard',
+      risk: 5,
+    }),
+  })
+})
+
+test('uses the high-risk ignore dialog for high-risk mixed confirmations', async () => {
+  await withHarness(async harness => {
+    const { api, message } = harness
+    const decision = api.submitAuditDecision(message, 'ignore')
+
+    assert.equal(api.getConfirmationTitle(message), enChat.audit_high_risk_warning_title)
+    assert.equal(api.getConfirmationApproveLabel(message), enChat.audit_ignore_and_allow)
+    assert.equal(harness.confirmations.length, 1)
+    assert.equal(harness.confirmations[0].title, enChat.audit_high_risk_warning_title)
+    assert.equal(harness.confirmations[0].options.confirmButtonText, enChat.audit_ignore_and_allow)
+    assert.equal(harness.confirmations[0].options.cancelButtonText, enCommon.cancel)
+
+    harness.settleDialog(0, 'confirm')
+    await decision
+    assert.deepEqual(harness.emitted, [[
+      'audit-decision',
+      { auditRecordId: 42, decision: 'ignore' },
+    ]])
+  }, {
+    message: createAuditMessage({
+      confirmationKind: 'mixed',
+      confirmationMode: 'high_risk_override',
+      risk: 95,
+    }),
+  })
+})
+
+test('blocks standard button decisions while confirmation is busy and retries after it clears', async () => {
+  const standardCases = [
+    { name: 'system', confirmationKind: 'system', risk: null },
+    { name: 'mixed', confirmationKind: 'mixed', risk: 5 },
+    { name: 'audit', confirmationKind: 'audit', risk: 5 },
+  ]
+
+  for (const standardCase of standardCases) {
+    for (const [decision, expectedStatus] of [
+      ['approve', 'executing'],
+      ['reject', 'rejected'],
+    ]) {
+      await withHarness(async harness => {
+        const { api, message } = harness
+        const caseName = `${standardCase.name} ${decision}`
+        harness.props.confirmationBusy = true
+
+        await api.submitAuditDecision(message, decision)
+        assert.deepEqual(harness.emitted, [], `${caseName} while busy`)
+        assert.equal(harness.confirmations.length, 0, `${caseName} while busy`)
+        assert.equal(api.isAuditDecisionPending(message), false, `${caseName} while busy`)
+        assert.equal(api.getAuditConfirmation(message).status, 'pending', `${caseName} while busy`)
+
+        harness.props.confirmationBusy = false
+        await api.submitAuditDecision(message, decision)
+        assert.deepEqual(harness.emitted, [[
+          'audit-decision',
+          { auditRecordId: 42, decision },
+        ]], caseName)
+        assert.equal(api.isAuditDecisionPending(message), true, caseName)
+        assert.equal(api.getAuditConfirmation(message).status, expectedStatus, caseName)
+      }, {
+        message: createAuditMessage({
+          confirmationKind: standardCase.confirmationKind,
+          confirmationMode: 'standard',
+          risk: standardCase.risk,
+        }),
+      })
+    }
+  }
+})
+
+test('rechecks confirmation busy state before emitting a mixed high-risk ignore decision', async () => {
+  await withHarness(async harness => {
+    const { api, message } = harness
+    const firstDecision = api.submitAuditDecision(message, 'ignore')
+
+    assert.equal(harness.confirmations.length, 1)
+    assert.equal(api.isAuditDecisionPending(message), true)
+
+    harness.props.confirmationBusy = true
+    harness.settleDialog(0, 'confirm')
+    await firstDecision
+
+    assert.deepEqual(harness.emitted, [])
+    assert.equal(api.isAuditDecisionPending(message), false)
+    assert.equal(api.getAuditConfirmation(message).status, 'pending')
+
+    harness.props.confirmationBusy = false
+    const retryDecision = api.submitAuditDecision(message, 'ignore')
+    assert.equal(harness.confirmations.length, 2)
+    assert.equal(harness.confirmations[1].title, enChat.audit_high_risk_warning_title)
+    assert.equal(api.isAuditDecisionPending(message), true)
+
+    harness.settleDialog(1, 'confirm')
+    await retryDecision
+    assert.deepEqual(harness.emitted, [[
+      'audit-decision',
+      { auditRecordId: 42, decision: 'ignore' },
+    ]])
+    assert.equal(api.isAuditDecisionPending(message), true)
+    assert.equal(api.getAuditConfirmation(message).status, 'executing')
+  }, {
+    message: createAuditMessage({
+      confirmationKind: 'mixed',
+      confirmationMode: 'high_risk_override',
+      risk: 95,
+    }),
+  })
 })

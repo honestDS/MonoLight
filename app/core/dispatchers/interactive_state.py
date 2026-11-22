@@ -62,6 +62,7 @@ class InteractiveDispatchState:
     execution_resume_state: dict[str, Any] | None
     checkpoint_state: _ExecutionCheckpointState
     execution_scope: str = END_SESSION_SCOPE_FOREGROUND
+    actor_uid: str | None = None
     tool_workflow: str = TOOL_WORKFLOW_FOREGROUND
     context_frozen: bool = False
     turn_messages: list[InternalMessage] = field(default_factory=list)
@@ -100,6 +101,7 @@ def build_interactive_dispatch_state(
     *,
     db: AsyncSession,
     uid: str,
+    actor_uid: str | None = None,
     session_id: str = "default",
     active_tasks: MutableSet[asyncio.Task] | None = None,
     session_source: str = "http",
@@ -182,6 +184,7 @@ def build_interactive_dispatch_state(
     return InteractiveDispatchState(
         db=db,
         uid=uid,
+        actor_uid=actor_uid,
         session_id=session_id,
         active_tasks=active_tasks,
         session_source=session_source,

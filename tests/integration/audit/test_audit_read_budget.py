@@ -723,9 +723,8 @@ async def test_format_correction_preserves_evidence_budget_and_result_id_mapping
         assert [item["tool_call_id"] for item in summary_payload["audit_results"]] == [
             call_one.id,
             call_two.id,
-            background_call.id,
         ]
-        assert [item["score"] for item in summary_payload["audit_results"]] == [5, 0, 0]
+        assert [item["score"] for item in summary_payload["audit_results"]] == [5, 0]
         assert [item["content"] for item in summary_payload["file_reads"]] == [
             "verified evidence for the first command",
             "verified evidence for the second command",

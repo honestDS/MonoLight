@@ -13,8 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import select
 
 from app.api.v1 import chat as chat_api
-from app.core.audit.confirmation_persistence import persist_pending_confirmation_bundle
 from app.core.audit.integrity import build_tool_round_integrity_snapshot
+from app.core.confirmation.persistence import persist_pending_confirmation_bundle
 from app.core.security import get_current_user
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.time import get_local_time

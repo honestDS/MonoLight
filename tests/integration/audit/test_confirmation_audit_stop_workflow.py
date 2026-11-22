@@ -6,9 +6,10 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
-import app.core.audit.confirmation_events as confirmation_events_module
 import app.core.audit.service as audit_service_module
 import app.core.background_tasks.external_work as external_work_module
+import app.core.confirmation.events as confirmation_events_module
+import app.core.confirmation.service as confirmation_service_module
 import app.providers.database as database_provider
 from app.core.constants import (
     ERR_BACKGROUND_TASK_CANCELLED_BEFORE_EXECUTION,
@@ -391,7 +392,7 @@ async def test_stop_during_preparing_audit_discards_delayed_result_without_confi
     async def run_audit() -> object:
         async with confirmation_workflow_session_factory() as db:
             db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, worker_id)
-            return await audit_service_module.audit_tool_round(
+            return await confirmation_service_module.prepare_tool_round(
                 db,
                 cfg=cfg,
                 tool_calls=[tool_call],
@@ -993,7 +994,7 @@ async def test_stopped_foreground_work_blocks_audit_before_preparation(
     async with confirmation_workflow_session_factory() as db:
         db.info[SESSION_REPLY_WORK_CLAIM_INFO_KEY] = (work_id, worker_id)
         with pytest.raises(asyncio.CancelledError):
-            await audit_service_module.audit_tool_round(
+            await confirmation_service_module.prepare_tool_round(
                 db,
                 cfg=cfg,
                 tool_calls=source_tool_calls,

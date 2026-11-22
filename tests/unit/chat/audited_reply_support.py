@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from app.core.audit.service import AuditRoundResult
+from app.core.confirmation.service import ToolRoundResult
 from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.dispatchers import interactive_helpers as interactive_helpers_module
 from app.core.dispatchers import interactive_runtime as interactive_runtime_module
@@ -96,7 +96,7 @@ async def _run_audited_interactive_dispatch(
     async def select_channel(db, channel_config, expected_usage, **kwargs):
         return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile, *, goal_mode=False, tool_workflow=None):
+    async def get_tools(db, current_profile, *, actor_uid=None, goal_mode=False, tool_workflow=None):
         return [
             {
                 "type": "function",
@@ -164,7 +164,7 @@ async def _run_audited_interactive_dispatch(
             except StopIteration:
                 pass
         if selected_audit_result is _DEFAULT_AUDIT_RESULT:
-            selected_audit_result = AuditRoundResult(
+            selected_audit_result = ToolRoundResult(
                 audit_record_id=audit_record_id,
                 status=AuditRecordStatus.PASSED,
                 tool_results=(),
@@ -324,7 +324,7 @@ async def _run_audited_interactive_dispatch(
         "persist_session_todo_snapshot_on_tool_results",
         persist_todo_snapshot_handler or persist_todo_snapshot,
     )
-    monkeypatch.setattr(interactive_tools_module, "audit_tool_round", audit_round)
+    monkeypatch.setattr(interactive_tools_module, "prepare_tool_round", audit_round)
     monkeypatch.setattr(interactive_tools_module.audit_crud, "claim_passed_for_execution", claim_execution)
     monkeypatch.setattr(interactive_tools_module.audit_crud, "list_tool_details", list_details)
     monkeypatch.setattr(interactive_tools_module.audit_crud, "create_execution_attempt", create_execution)

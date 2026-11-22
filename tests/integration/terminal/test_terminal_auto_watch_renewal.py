@@ -9,7 +9,6 @@ from sqlmodel import select
 
 import app.core.terminal.audit_lifecycle as terminal_audit_lifecycle_module
 import app.core.terminal.watcher as watcher_module
-from app.core.audit.confirmation_lifecycle import stop_interactive_reply
 from app.core.background_tasks import runner as runner_module
 from app.core.background_tasks.terminal_watch_coordinator import (
     complete_terminal_watch_round,
@@ -17,6 +16,7 @@ from app.core.background_tasks.terminal_watch_coordinator import (
     create_terminal_watch_subscription,
 )
 from app.core.background_tasks.terminal_watch_reply import route_terminal_auto_watch_reply
+from app.core.confirmation.lifecycle import stop_interactive_reply
 from app.core.constants import TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.task.background import background_task_crud
 from app.core.dispatchers.context import DispatchContext

@@ -156,6 +156,7 @@ def _build_interactive_state(
     return SimpleNamespace(
         db=db,
         uid=UID,
+        actor_uid=UID,
         session_id=SESSION_ID,
         active_tasks=set(),
         session_source="http",
@@ -270,10 +271,10 @@ async def test_interactive_parallel_tool_limit_budget_uses_executable_call_count
 
     monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", parallel_tool_limit_budget_session_factory)
 
-    async def audit_tool_round(*_args: Any, **_kwargs: Any) -> None:
+    async def prepare_tool_round(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(interactive_tools, "audit_tool_round", audit_tool_round)
+    monkeypatch.setattr(interactive_tools, "prepare_tool_round", prepare_tool_round)
 
     async with parallel_tool_limit_budget_session_factory() as db:
         state = _build_interactive_state(db, profile, cfg, assistant_message)
@@ -340,10 +341,10 @@ async def test_interactive_tool_round_budget_ignores_openai_responses_image_outp
 
     monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", parallel_tool_limit_budget_session_factory)
 
-    async def audit_tool_round(*_args: Any, **_kwargs: Any) -> None:
+    async def prepare_tool_round(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(interactive_tools, "audit_tool_round", audit_tool_round)
+    monkeypatch.setattr(interactive_tools, "prepare_tool_round", prepare_tool_round)
 
     async with parallel_tool_limit_budget_session_factory() as db:
         state = _build_interactive_state(db, profile, cfg, assistant_message)
@@ -423,7 +424,7 @@ async def test_background_parallel_tool_limit_budget_uses_executable_call_count(
     async def get_tools_for_profile(*_args: Any, **_kwargs: Any) -> tuple[list[dict[str, Any]], list[int]]:
         return [FILE_TOOL_SCHEMA], []
 
-    async def audit_tool_round(*_args: Any, **_kwargs: Any) -> None:
+    async def prepare_tool_round(*_args: Any, **_kwargs: Any) -> None:
         return None
 
     responses = [
@@ -446,7 +447,7 @@ async def test_background_parallel_tool_limit_budget_uses_executable_call_count(
     monkeypatch.setattr(background_module.user_crud, "get_by_uid", get_user)
     monkeypatch.setattr(background_module, "validate_profile_and_cfg", validate_profile_and_cfg)
     monkeypatch.setattr(background_module, "get_tools_for_profile", get_tools_for_profile)
-    monkeypatch.setattr(background_module, "audit_tool_round", audit_tool_round)
+    monkeypatch.setattr(background_module, "prepare_tool_round", prepare_tool_round)
     monkeypatch.setattr(background_module, "generate_chat_with_fallback", generate_chat_with_fallback)
 
     async with parallel_tool_limit_budget_session_factory() as db:

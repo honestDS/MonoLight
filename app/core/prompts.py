@@ -9,7 +9,6 @@ from app.core.constants import (
     MANAGE_TODO_TOOL_NAME,
     READ_TEXT_FILE_TOOL_NAME,
     SHELL_TOOL_NAME,
-    SKILL_TOOL_NAME,
     TERMINAL_TOOL_NAME,
 )
 
@@ -229,9 +228,6 @@ _AUDIT_DIRECTORY_POLICY_PROMPT = (
     "Pure reads, listings, searches, and metadata access do not trigger directory-policy denial merely for being outside allowed or protected roots; assess their sensitive-data and other risks under the ordinary scoring rules. "
     "Script execution alone does not establish a file change: assess actual script and compound-command effects, including redirections and mixed commands, and do not trust a self-description as read-only. "
     "Do not infer targets from unvisited ordinary text or URLs, or from implicitly loaded interpreters or system dependencies. No filesystem change means no denial from an empty allowlist.\n"
-    f"The sole dedicated administrator package-management exception is an exact {SKILL_TOOL_NAME} call with operation='uninstall': the program permits only an enabled super administrator to delete, by skill_id, one selected installed shared skill package and its resources, affecting all users. "
-    "For this exact operation only, do not apply the business-file directory allowlist or protected-directory write protection to the shared package's storage targets. Still score the actual impact of deleting the entire shared package and its resources and apply the existing confirmation rules. Do not infer that the administrator identity has been verified or that the user has approved the action; identity is validated at execution time. "
-    f"This exception does not extend to {SHELL_TOOL_NAME}, {TERMINAL_TOOL_NAME}, {FILE_TOOL_NAME}, or any other operation.\n"
     f"Resolve change targets from actual directory context, working_directory, normalized paths, and available .., symlink, junction, or other alias evidence; never rely on simple string-prefix matching. For {TERMINAL_TOOL_NAME} (operation='write'), use terminal_context; history and output alone do not prove the current working directory.\n"
     "Your evidence-gathering "
     f"{READ_TEXT_FILE_TOOL_NAME}"
@@ -241,11 +237,10 @@ _AUDIT_DIRECTORY_POLICY_PROMPT = (
 
 _AUDIT_PROTECTED_DIRECTORY_PROMPT = (
     "Apply this rule only when the payload supplies directory_policy.write_protected_directories; "
-    "that list contains system-protected directory roots. Except for the dedicated "
-    f"{SKILL_TOOL_NAME} operation='uninstall' described above, no tool call may write, edit, patch, delete, "
+    "that list contains system-protected directory roots. No tool call may write, edit, patch, delete, "
     "rename, replace, change permissions of, or otherwise modify a protected root or anything beneath it. "
     "This also covers indirect destruction, such as replacing or renaming a parent directory so a protected "
-    "root or its contents are displaced. Except for that exact exception, this prohibition takes priority over "
+    "root or its contents are displaced. This prohibition takes priority over "
     "directory_policy.allowed_operation_dirs. Read-only access alone is not a protected-directory violation "
     "and does not trigger directory-policy denial. Set deny=true for a direct or indirect prohibited "
     "modification attempt even if the operation may fail. Use deny only for directory write-policy violations, "

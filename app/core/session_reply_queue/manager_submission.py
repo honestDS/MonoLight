@@ -5,15 +5,17 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation_common import ConfirmationDecision
-from app.core.audit.confirmation_decision import parse_confirmation_decision
-from app.core.audit.confirmation_events import _broadcast_confirmation_status_update, broadcast_pending_confirmation_cancellation
-from app.core.audit.confirmation_lifecycle import expire_confirmation_by_session
-from app.core.audit.confirmation_projection import (
+from app.core.action_control.contracts import PreparedAction
+from app.core.action_control.service import is_action_available
+from app.core.confirmation.common import ConfirmationDecision
+from app.core.confirmation.decision import parse_confirmation_decision
+from app.core.confirmation.events import _broadcast_confirmation_status_update, broadcast_pending_confirmation_cancellation
+from app.core.confirmation.lifecycle import expire_confirmation_by_session
+from app.core.confirmation.projection import (
     _sync_confirmation_message_status_projection,
     update_confirmation_message_status,
 )
-from app.core.audit.confirmation_results import (
+from app.core.confirmation.results import (
     cancel_persisted_pending_confirmation_bundle,
     update_confirmation_tool_results_for_decision,
 )
@@ -22,6 +24,7 @@ from app.core.constants import (
     ERR_AUDIT_HIGH_RISK_CONFIRMATION_INVALID_INPUT,
     ERR_CHAT_REQUEST_ID_CONFLICT,
     ERR_CHAT_REQUEST_WORK_UNAVAILABLE,
+    ERR_ONLY_ADMIN_ALLOWED,
 )
 from app.core.crud.account.user import user_crud
 from app.core.crud.audit.audit import audit_crud
@@ -30,7 +33,7 @@ from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.session.subagent import subagent_crud
 from app.core.crud.session.subagent_revision import bump_subagent_board_revisions
-from app.core.exceptions import ParameterException
+from app.core.exceptions import ForbiddenException, ParameterException
 from app.core.i18n import get_current_locale, t
 from app.core.utils.dispatcher.frozen_context import serialize_frozen_context_messages
 from app.models.audit import AuditRecordStatus
@@ -60,6 +63,27 @@ from .manager_common import (
 __all__ = [
     "SessionReplySubmission",
 ]
+
+
+async def _validate_system_confirmation_actor(
+    db: AsyncSession,
+    *,
+    audit_record_id: int,
+    actor_uid: str,
+) -> None:
+    details = await audit_crud.list_tool_details(db, audit_record_id)
+    system_details = [detail for detail in details if detail.decision_source == "system_rule"]
+    if not system_details:
+        return
+
+    actor = await user_crud.get_by_uid(db, actor_uid)
+    for detail in system_details:
+        try:
+            action = PreparedAction.from_dict(detail.action_request)
+        except ValueError as exc:
+            raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED) from exc
+        if not is_action_available(action.action_id, actor):
+            raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
 
 
 class SessionReplySubmission:
@@ -210,6 +234,12 @@ class SessionReplySubmission:
             has_quote=has_quote,
             requires_high_risk_override=requires_high_risk_override,
         )
+        if decision in {ConfirmationDecision.APPROVE, ConfirmationDecision.IGNORE}:
+            await _validate_system_confirmation_actor(
+                db,
+                audit_record_id=current_confirmation_id,
+                actor_uid=actor_uid,
+            )
         if decision is not None and not actor_username:
             actor = await user_crud.get_by_uid(db, actor_uid)
             actor_username = actor.username if actor is not None else "Unknown"

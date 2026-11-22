@@ -2,7 +2,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation import (
+from app.core.confirmation import (
     build_confirmation_update_events,
 )
 from app.core.constants import (

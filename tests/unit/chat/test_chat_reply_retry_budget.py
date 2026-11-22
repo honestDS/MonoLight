@@ -59,7 +59,7 @@ async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_m
             return _Channel(), {"model_id": "model-2", "max_tokens": 256, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
         return _Channel(), {"model_id": "model-1", "max_tokens": 1024, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile, *, goal_mode=False, tool_workflow=None):
+    async def get_tools(db, current_profile, *, goal_mode=False, tool_workflow=None, actor_uid=None):
         return [], []
 
     async def prepare_messages(*args, **kwargs):
@@ -259,7 +259,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
             return _Channel(), {"model_id": "model-2", "max_tokens": 256, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
         return _Channel(), {"model_id": "model-1", "max_tokens": 1024, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile, *, goal_mode=False, tool_workflow=None):
+    async def get_tools(db, current_profile, *, goal_mode=False, tool_workflow=None, actor_uid=None):
         return [], []
 
     async def prepare_messages(*args, **kwargs):

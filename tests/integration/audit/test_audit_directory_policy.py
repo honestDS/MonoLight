@@ -6,6 +6,7 @@ import pytest
 from sqlmodel import select
 
 import app.core.audit.service as audit_service_module
+import app.core.confirmation.service as confirmation_service_module
 from app.core import paths
 from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.constants import ERR_AUDIT_SERVICE_FAILED_STOP
@@ -132,7 +133,7 @@ def _patch_audit_root(monkeypatch: pytest.MonkeyPatch, audit_root: Path) -> None
     async def persist_in_test_root(db, **kwargs: Any) -> bool:
         return await persist_prepared_audit_round(db, audit_root=audit_root, **kwargs)
 
-    monkeypatch.setattr(audit_service_module, "persist_prepared_audit_round", persist_in_test_root)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist_in_test_root)
 
 
 def _audit_response(
@@ -165,7 +166,7 @@ def _audit_response(
 
 
 async def _audit_round(db, *, cfg: ProfileConfig, tool_calls: list[InternalToolCall], working_directory: Path):
-    return await audit_service_module.audit_tool_round(
+    return await confirmation_service_module.prepare_tool_round(
         db,
         cfg=cfg,
         tool_calls=tool_calls,

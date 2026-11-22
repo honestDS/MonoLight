@@ -5,12 +5,12 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.background_tasks.external_work import reconcile_external_work
 from app.core.background_tasks.recovery import recover_pending_background_task_replies, recover_pending_background_tasks
 from app.core.background_tasks.reply_trigger import trigger_background_task_reply
 from app.core.background_tasks.runner import run_background_task
 from app.core.background_tasks.terminal_watch_coordinator import create_terminal_watch_subscription
+from app.core.confirmation import update_confirmation_message_status
 from app.core.constants import (
     ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN,
     ERR_TERMINAL_ACTION_NOT_ALLOWED,

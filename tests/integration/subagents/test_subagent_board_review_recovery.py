@@ -825,14 +825,14 @@ async def test_subagent_board_review_resume_clears_yield_marker_before_audit_and
                 assert checkpoint.get("yield_to_user_pending") is True
                 assert isinstance(checkpoint.get("pending_generation"), dict)
 
-            original_audit_tool_round = interactive_tools_module.audit_tool_round
+            original_prepare_tool_round = interactive_tools_module.prepare_tool_round
 
             async def observe_audit(db, **kwargs):
                 claim = getattr(db, "info", {}).get(SESSION_REPLY_WORK_CLAIM_INFO_KEY)
                 tool_calls = kwargs.get("tool_calls")
                 target_call = isinstance(claim, (tuple, list)) and len(claim) == 2 and claim[0] == case.origin_work_id and isinstance(tool_calls, list) and any(isinstance(tool_call, InternalToolCall) and tool_call.name == write_call.name and tool_call.arguments == write_call.arguments for tool_call in tool_calls)
                 if not target_call:
-                    return await original_audit_tool_round(db, **kwargs)
+                    return await original_prepare_tool_round(db, **kwargs)
 
                 assert user_completed
                 assert not observed_audits
@@ -876,9 +876,9 @@ async def test_subagent_board_review_resume_clears_yield_marker_before_audit_and
                         restored_parent.lock_until = old_lock_until
                         await recovery_db.commit()
 
-                return await original_audit_tool_round(db, **kwargs)
+                return await original_prepare_tool_round(db, **kwargs)
 
-            monkeypatch.setattr(interactive_tools_module, "audit_tool_round", observe_audit)
+            monkeypatch.setattr(interactive_tools_module, "prepare_tool_round", observe_audit)
             parent_resume_provider_start = len(runtime.provider_payloads)
             runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_final))
             parent_done = await asyncio.wait_for(runtime.run_next(independent_only=False), timeout=5)

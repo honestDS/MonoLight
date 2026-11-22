@@ -1,9 +1,9 @@
 import asyncio
 from typing import Any
 
-from app.core.audit.confirmation import notify_confirmation_tool_results, update_confirmation_message_status
-from app.core.audit.confirmation_results import _update_confirmation_tool_results
 from app.core.audit.integrity import create_file_integrity_snapshot, verify_file_integrity_snapshot
+from app.core.confirmation import notify_confirmation_tool_results, update_confirmation_message_status
+from app.core.confirmation.results import _update_confirmation_tool_results
 from app.core.constants import ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT, SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud

@@ -7,7 +7,7 @@ import psutil
 import pytest
 
 import app.core.terminal.session_runtime_core as terminal_runtime_core_module
-from app.core.audit.confirmation_lifecycle import stop_interactive_reply
+from app.core.confirmation.lifecycle import stop_interactive_reply
 from app.core.constants import ERR_TERMINAL_WORKER_STOPPED
 from app.core.crud.task.background import background_task_crud
 from app.core.crud.terminal.session import terminal_control_command_crud

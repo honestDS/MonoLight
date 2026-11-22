@@ -114,7 +114,7 @@ def _recall_messages(boundary: int) -> tuple[InternalMessage, InternalMessage]:
     )
 
 
-async def _audit_tool_round_none(*args, **kwargs):
+async def _prepare_tool_round_none(*args, **kwargs):
     return None
 
 
@@ -148,7 +148,7 @@ def _install_dispatcher_stubs(
     async def select_channel(db, channel_config, expected_usage, **kwargs):
         return channel, {"model_id": "chat-model", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
-    async def get_tools(db, current_profile, *, goal_mode=False, tool_workflow=None):
+    async def get_tools(db, current_profile, *, actor_uid=None, goal_mode=False, tool_workflow=None):
         if expose_memory_tool:
             return [copy.deepcopy(MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_SCHEMA)], []
         return [], []
@@ -257,7 +257,7 @@ def _install_dispatcher_stubs(
         "persist_session_todo_snapshot_on_tool_results",
         persist_todo_snapshot,
     )
-    monkeypatch.setattr(interactive_tools_module, "audit_tool_round", _audit_tool_round_none)
+    monkeypatch.setattr(interactive_tools_module, "prepare_tool_round", _prepare_tool_round_none)
     monkeypatch.setattr(interactive_tools_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
     monkeypatch.setattr(interactive_helpers_module, "process_single_tool_with_isolated_db", isolated_tool)
 

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
 import app.core.audit.service as audit_service_module
+import app.core.confirmation.service as confirmation_service_module
 import app.core.dispatchers.background as background_module
 import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.dispatchers.interactive_tools as interactive_tools_module
@@ -26,8 +27,8 @@ import app.core.terminal.session_runtime_commands as terminal_session_runtime_co
 import app.core.terminal.session_runtime_core as terminal_session_runtime_core_module
 import app.core.terminal.session_runtime_state as terminal_session_runtime_state_module
 import app.core.terminal.worker_coordinator as terminal_worker_coordinator_module
-from app.core.audit.confirmation_persistence import persist_pending_confirmation_bundle
 from app.core.audit.integrity import build_tool_round_integrity_snapshot
+from app.core.confirmation.persistence import persist_pending_confirmation_bundle
 from app.core.constants import (
     ERR_TERMINAL_COMMAND_TIMEOUT,
     ERR_TOOL_EXECUTION_TIMEOUT,
@@ -408,7 +409,7 @@ def _install_isolated_auditor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
             },
         )
 
-    original_persist_prepared_audit_round = audit_service_module.persist_prepared_audit_round
+    original_persist_prepared_audit_round = confirmation_service_module.persist_prepared_audit_round
 
     async def persist_prepared_audit_round_in_test_root(db, **kwargs):
         return await original_persist_prepared_audit_round(
@@ -418,7 +419,7 @@ def _install_isolated_auditor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
         )
 
     monkeypatch.setattr(audit_service_module, "_call_auditor", fake_call_auditor)
-    monkeypatch.setattr(audit_service_module, "persist_prepared_audit_round", persist_prepared_audit_round_in_test_root)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist_prepared_audit_round_in_test_root)
 
 
 @pytest.mark.asyncio
@@ -949,6 +950,7 @@ async def test_interactive_unconfirmed_file_tool_timeout_persists_execution_unkn
                 state = SimpleNamespace(
                     db=db,
                     uid="timeout-owner",
+                    actor_uid=None,
                     session_id="timeout-session",
                     execution_scope=None,
                     tool_workflow=TOOL_WORKFLOW_FOREGROUND,

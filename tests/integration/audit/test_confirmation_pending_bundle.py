@@ -6,8 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 import app.core.session_reply_queue.manager_submission as session_reply_queue_manager_module
-from app.core.audit import confirmation
-from app.core.audit.confirmation import (
+from app.core import confirmation
+from app.core.confirmation import (
     get_pending_tool_results,
     persist_pending_confirmation_bundle,
     replace_pending_tool_result,
@@ -633,7 +633,7 @@ async def test_invalid_confirmation_input_rolls_back_bundle_when_work_enqueue_fa
 
     monkeypatch.setattr(session_reply_queue_manager_module, "expire_confirmation_by_session", no_expiration)
     monkeypatch.setattr(session_reply_queue_manager, "_enqueue_foreground_message", fail_enqueue)
-    monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
+    monkeypatch.setattr("app.core.confirmation.events.send_session_event", send_event)
 
     with pytest.raises(RuntimeError, match="injected work enqueue failure"):
         await session_reply_queue_manager.submit_user_message(
@@ -685,7 +685,7 @@ async def test_invalid_confirmation_input_commits_bundle_before_broadcast(db_ses
     monkeypatch.setattr(session_reply_queue_manager_module, "expire_confirmation_by_session", no_expiration)
     monkeypatch.setattr(db_session, "commit", counted_commit)
     monkeypatch.setattr(session_reply_queue_manager_module, "broadcast_pending_confirmation_cancellation", broadcast_after_commit)
-    monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
+    monkeypatch.setattr("app.core.confirmation.events.send_session_event", send_event)
 
     initial_message, work, status, direct_events = await session_reply_queue_manager.submit_user_message(
         db_session,

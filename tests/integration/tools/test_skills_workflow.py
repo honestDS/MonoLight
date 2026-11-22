@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -11,20 +12,22 @@ from sqlmodel import select
 
 import app.core.audit.service as audit_service_module
 import app.core.background_tasks.runner as background_task_runner
+import app.core.confirmation.service as confirmation_service_module
 import app.core.paths as paths
 import app.core.skills as skills_module
 from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.constants import (
-    ERR_AUDIT_ROUND_BLOCKED,
-    ERR_AUDIT_SERVICE_FAILED_STOP,
-    ERR_ONLY_ADMIN_ALLOWED,
     ERR_SKILL_DELETE_FAILED,
     ERR_SKILL_ID_INVALID,
     ERR_SKILL_NOT_DIRECTORY,
     ERR_SKILL_NOT_FOUND,
     ERR_SKILL_PATH_INVALID,
-    MSG_AUDIT_WAITING_CONFIRMATION,
+    ERR_SYSTEM_ACTION_CONFIRMATION_REQUIRED,
+    ERR_SYSTEM_ACTION_PERMISSION_DENIED,
+    ERR_TOOL_OPERATION_NOT_FOUND,
+    ERR_TOOL_OPERATION_PERMISSION_DENIED,
     MSG_SKILL_DELETED,
+    MSG_SKILL_UNINSTALL_CONFIRMATION,
     READ_TEXT_FILE_TOOL_NAME,
     SHELL_TOOL_NAME,
     SKILL_TOOL_NAME,
@@ -35,7 +38,8 @@ from app.core.constants import (
     TOOL_WORKFLOW_SUBAGENT,
 )
 from app.core.crud.audit.audit import audit_crud
-from app.core.i18n import t
+from app.core.i18n import set_current_locale, t
+from app.core.i18n.context import reset_current_locale
 from app.core.paths import get_user_temp_dir
 from app.core.tools import get_tools_for_profile
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt
@@ -182,6 +186,7 @@ async def _process_tool(
         1,
         uid,
         tool_workflow=tool_workflow,
+        actor_uid=uid,
     )
 
 
@@ -233,11 +238,11 @@ def _patch_audit_root(monkeypatch: pytest.MonkeyPatch, audit_root: Path) -> None
     async def persist_in_test_root(db, **kwargs: Any) -> bool:
         return await persist_prepared_audit_round(db, audit_root=audit_root, **kwargs)
 
-    monkeypatch.setattr(audit_service_module, "persist_prepared_audit_round", persist_in_test_root)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist_in_test_root)
 
 
 async def _audit_round(db, cfg: ProfileConfig, tool_calls: list[InternalToolCall], working_directory: Path):
-    return await audit_service_module.audit_tool_round(
+    return await confirmation_service_module.prepare_tool_round(
         db,
         cfg=cfg,
         tool_calls=tool_calls,
@@ -935,7 +940,7 @@ async def test_skill_tool_uninstall_runs_in_each_workflow(
         repeated = json.loads(repeated_result.content or "{}")
         assert repeated_result.tool_execution_status == "failed"
         assert repeated["status"] == "failed"
-        assert repeated["operation"] == "uninstall"
+        assert repeated["tool_name"] == SKILL_TOOL_NAME
         assert repeated["error"] == t(ERR_SKILL_NOT_FOUND)
 
 
@@ -994,9 +999,41 @@ async def test_skill_tool_uninstall_rejects_non_admin_execution_uid(
     profile = _profile(uid="skills-workflow-owner")
     cfg = _config(tmp_path)
     async with skills_database() as db:
+        tools, _ = await get_tools_for_profile(db, profile, actor_uid=UID)
+        skill_schema = next(schema for schema in tools if schema["function"]["name"] == SKILL_TOOL_NAME)
+        skill_function = skill_schema["function"]
+        skill_parameters = skill_function["parameters"]
+        operation_schema = skill_parameters["properties"]["operation"]
+        skill_id_schema = skill_parameters["properties"]["skill_id"]
+        assert operation_schema["enum"] == ["list", "browse"]
+        assert "uninstall" not in skill_function["description"]
+        assert "uninstall" not in operation_schema["description"]
+        assert "uninstall" not in skill_id_schema["description"]
+
+        unauthorized_call = _skill_call(
+            "unauthorized-uninstall",
+            operation="uninstall",
+            skill_id="target-package",
+        )
+        precheck_errors = prevalidate_tool_round(
+            [unauthorized_call],
+            cfg,
+            tool_schemas=tools,
+        )
+        assert unauthorized_call.id in precheck_errors
+        precheck_payload = json.loads(precheck_errors[unauthorized_call.id])
+        assert precheck_payload["status"] == "failed"
+        assert precheck_payload["tool_name"] == SKILL_TOOL_NAME
+        expected_permission_error = t(
+            ERR_TOOL_OPERATION_PERMISSION_DENIED,
+            tool_name=SKILL_TOOL_NAME,
+            operation="uninstall",
+        )
+        assert precheck_payload["error"] == expected_permission_error
+
         result = await _process_tool(
             db,
-            _skill_call("unauthorized-uninstall", operation="uninstall", skill_id="target-package"),
+            unauthorized_call,
             profile,
             cfg,
             uid=UID,
@@ -1005,12 +1042,76 @@ async def test_skill_tool_uninstall_rejects_non_admin_execution_uid(
         payload = json.loads(result.content or "{}")
         assert result.tool_execution_status == "failed"
         assert payload["status"] == "failed"
-        assert payload["operation"] == "uninstall"
-        assert payload["error"] == t(ERR_ONLY_ADMIN_ALLOWED)
+        assert payload["tool_name"] == SKILL_TOOL_NAME
+        assert payload["error"] == expected_permission_error
         assert target_package.exists()
         assert {item.relative_to(target_package): item.read_bytes() for item in target_package.rglob("*") if item.is_file()} == target_before
         assert retained_document.read_bytes() == retained_before
         assert outside_sentinel.read_bytes() == outside_before
+
+
+@pytest.mark.parametrize("is_superuser", [False, True], ids=["non-admin", "admin"])
+@pytest.mark.parametrize("locale", ["zh", "en"])
+@pytest.mark.asyncio
+async def test_skill_tool_reports_unknown_operation_without_confirmation(
+    skills_database,
+    tmp_path: Path,
+    is_superuser: bool,
+    locale: str,
+) -> None:
+    target_document = _write_skill(
+        paths.SKILLS_DIR,
+        "target-package",
+        name="Target package",
+        body="TARGET_BODY_SENTINEL",
+    )
+    target_package = target_document.parent
+    await _seed_skill_user(skills_database, is_superuser=is_superuser)
+
+    profile = _profile()
+    cfg = _config(tmp_path)
+    operation = "uninstall_typo"
+    unknown_operation_call = _skill_call(
+        "unknown-operation",
+        operation=operation,
+        skill_id="target-package",
+    )
+    locale_token = set_current_locale(locale)
+    try:
+        async with skills_database() as db:
+            tools, _ = await get_tools_for_profile(db, profile, actor_uid=UID)
+            precheck_errors = prevalidate_tool_round(
+                [unknown_operation_call],
+                cfg,
+                tool_schemas=tools,
+            )
+            precheck_payload = json.loads(precheck_errors[unknown_operation_call.id])
+            expected_error = t(
+                ERR_TOOL_OPERATION_NOT_FOUND,
+                tool_name=SKILL_TOOL_NAME,
+                operation=operation,
+            )
+            assert precheck_payload["status"] == "failed"
+            assert precheck_payload["tool_name"] == SKILL_TOOL_NAME
+            assert precheck_payload["error"] == expected_error
+            assert target_package.exists()
+
+            result = await _process_tool(
+                db,
+                unknown_operation_call,
+                profile,
+                cfg,
+                tool_workflow=TOOL_WORKFLOW_FOREGROUND,
+            )
+            payload = json.loads(result.content or "{}")
+            assert result.tool_execution_status == "failed"
+            assert payload["status"] == "failed"
+            assert payload["tool_name"] == SKILL_TOOL_NAME
+            assert payload["error"] == expected_error
+            assert target_package.exists()
+            assert list((await db.execute(select(AuditRecord))).scalars().all()) == []
+    finally:
+        reset_current_locale(locale_token)
 
 
 @pytest.mark.parametrize(
@@ -1067,7 +1168,7 @@ async def test_skill_tool_uninstall_rejects_invalid_skill_ids(
         payload = json.loads(result.content or "{}")
         assert result.tool_execution_status == "failed"
         assert payload["status"] == "failed"
-        assert payload["operation"] == "uninstall"
+        assert payload["tool_name"] == SKILL_TOOL_NAME
         assert payload["error"] == t(ERR_SKILL_ID_INVALID)
         assert target_package.exists()
         assert {item.relative_to(target_package): item.read_bytes() for item in target_package.rglob("*") if item.is_file()} == target_before
@@ -1127,7 +1228,7 @@ async def test_skill_tool_uninstall_reports_missing_and_non_directory_targets(
         payload = json.loads(result.content or "{}")
         assert result.tool_execution_status == "failed"
         assert payload["status"] == "failed"
-        assert payload["operation"] == "uninstall"
+        assert payload["tool_name"] == SKILL_TOOL_NAME
         assert payload["error"] == t(expected_error)
         assert outside_sentinel.read_bytes() == outside_before
 
@@ -1179,7 +1280,7 @@ async def test_skill_tool_uninstall_reports_filesystem_delete_failure(
         payload = json.loads(result.content or "{}")
         assert result.tool_execution_status == "failed"
         assert payload["status"] == "failed"
-        assert payload["operation"] == "uninstall"
+        assert payload["tool_name"] == SKILL_TOOL_NAME
         assert payload["error"] == t(ERR_SKILL_DELETE_FAILED)
         assert target_package.exists()
         assert {item.relative_to(target_package): item.read_bytes() for item in target_package.rglob("*") if item.is_file()} == target_before
@@ -1225,7 +1326,7 @@ async def test_skill_tool_uninstall_respects_directory_symlink_boundaries(
         alias_payload = json.loads(alias_result.content or "{}")
         assert alias_result.tool_execution_status == "failed"
         assert alias_payload["status"] == "failed"
-        assert alias_payload["operation"] == "uninstall"
+        assert alias_payload["tool_name"] == SKILL_TOOL_NAME
         assert alias_payload["error"] == t(ERR_SKILL_PATH_INVALID)
         assert external_alias.is_symlink()
         assert external_sentinel.read_bytes() == external_before
@@ -1249,26 +1350,17 @@ async def test_skill_tool_uninstall_respects_directory_symlink_boundaries(
         assert external_sentinel.read_bytes() == external_before
 
 
-@pytest.mark.parametrize(
-    ("outcome", "score", "deny", "audit_threshold", "expected_status"),
-    [
-        ("passed", 1, False, 0, AuditRecordStatus.PASSED),
-        ("pending", 6, False, 5, AuditRecordStatus.PENDING),
-        ("blocked", 1, True, 0, AuditRecordStatus.BLOCKED),
-        ("audit-failed", 0, False, 0, AuditRecordStatus.AUDIT_FAILED),
-    ],
-    ids=["passed", "pending", "blocked", "audit-failed"],
-)
+@pytest.mark.parametrize("audit_enabled", [False, True], ids=["audit-disabled", "audit-enabled"])
+@pytest.mark.parametrize("audit_threshold", [0, 1, 7])
+@pytest.mark.parametrize("is_superuser", [False, True], ids=["non-admin", "admin"])
 @pytest.mark.asyncio
-async def test_skill_uninstall_audit_round_covers_catalog_operations_and_outcomes(
+async def test_skill_uninstall_system_action_confirmation_rules(
     skills_database,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    outcome: str,
-    score: int,
-    deny: bool,
+    audit_enabled: bool,
     audit_threshold: int,
-    expected_status: AuditRecordStatus,
+    is_superuser: bool,
 ) -> None:
     skills_root = paths.SKILLS_DIR
     target_document = _write_skill(
@@ -1280,7 +1372,7 @@ async def test_skill_uninstall_audit_round_covers_catalog_operations_and_outcome
     target_package = target_document.parent
     target_resource = target_package / "nested" / "target-resource.txt"
     target_resource.parent.mkdir()
-    target_resource.write_text("TARGET_RESOURCE_SENTINEL", encoding="utf-8")
+    target_resource.write_bytes(b"TARGET_RESOURCE_SENTINEL")
     retained_document = _write_skill(
         skills_root,
         "retained-package",
@@ -1288,119 +1380,129 @@ async def test_skill_uninstall_audit_round_covers_catalog_operations_and_outcome
         body="RETAINED_BODY_SENTINEL",
     )
     retained_resource = retained_document.parent / "retained-resource.txt"
-    retained_resource.write_text("RETAINED_RESOURCE_SENTINEL", encoding="utf-8")
+    retained_resource.write_bytes(b"RETAINED_RESOURCE_SENTINEL")
     target_before = {item.relative_to(target_package): item.read_bytes() for item in target_package.rglob("*") if item.is_file()}
     retained_before = {item.relative_to(retained_document.parent): item.read_bytes() for item in retained_document.parent.rglob("*") if item.is_file()}
 
-    await _seed_skill_user(skills_database)
-    await _seed_audit_channel(skills_database)
-    audit_root = tmp_path / "audit"
-    _patch_audit_root(monkeypatch, audit_root)
-    monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-key")
+    await _seed_skill_user(skills_database, is_superuser=is_superuser)
+    if audit_enabled:
+        await _seed_audit_channel(skills_database)
+        monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "test-key")
+    _patch_audit_root(monkeypatch, tmp_path / "audit")
 
-    cfg = _config(tmp_path, audit_enabled=True)
+    generate_calls = 0
+
+    async def unexpected_audit_call(**_kwargs: Any) -> InternalResponse:
+        nonlocal generate_calls
+        generate_calls += 1
+        raise AssertionError("skill uninstall system actions must not call the audit model")
+
+    monkeypatch.setattr(audit_service_module.LLMClient, "generate", unexpected_audit_call)
+
+    cfg = _config(tmp_path, audit_enabled=audit_enabled)
     cfg.security.audit_threshold = audit_threshold
     profile = _profile()
-    summary = "Confirm removal of the target shared skill."
-    model_fails = outcome == "audit-failed"
+    list_call = _skill_call("system-list", operation="list")
+    browse_call = _skill_call("system-browse", operation="browse", skill_id="target-package")
+    uninstall_call = _skill_call("system-uninstall", operation="uninstall", skill_id="target-package")
+    tool_calls = [list_call, browse_call, uninstall_call]
+    if not is_superuser:
+        expected_status = AuditRecordStatus.BLOCKED
+    elif audit_threshold > 0:
+        expected_status = AuditRecordStatus.PENDING
+    else:
+        expected_status = AuditRecordStatus.PASSED
 
     async with skills_database() as db:
-        tools, _ = await get_tools_for_profile(db, profile)
-        exposed_names = {item["function"]["name"] for item in tools}
-        assert SKILL_TOOL_NAME in exposed_names
-        assert SHELL_TOOL_NAME not in exposed_names
-
-        list_call = _skill_call("audit-list", operation="list")
-        list_result = await _process_tool(db, list_call, profile, cfg)
-        list_payload = json.loads(list_result.content or "{}")
-        assert list_result.tool_execution_status == "succeeded"
-        assert list_payload["status"] == "success"
-        target_id = None
-        for item in list_payload["skills"]:
-            if item["id"] == "target-package":
-                target_id = item["id"]
-                break
-        assert target_id == "target-package"
-
-        browse_call = _skill_call("audit-browse", operation="browse", skill_id=target_id)
-        browse_result = await _process_tool(db, browse_call, profile, cfg)
-        browse_payload = json.loads(browse_result.content or "{}")
-        assert browse_result.tool_execution_status == "succeeded"
-        assert browse_payload["status"] == "success"
-
-        uninstall_call = _skill_call("audit-uninstall", operation="uninstall", skill_id=target_id)
-        tool_calls = [list_call, browse_call, uninstall_call]
-        generate_calls: list[dict[str, Any]] = []
-
-        async def generate(**kwargs: Any) -> InternalResponse:
-            generate_calls.append(kwargs)
-            if model_fails:
-                raise RuntimeError("simulated audit model failure")
-            request_payload = json.loads(kwargs["messages"][1].content or "{}")
-            if "audit_results" in request_payload:
-                return InternalResponse(
-                    message=InternalMessage(role=MessageRole.ASSISTANT, content=summary),
-                    model=AUDIT_MODEL_ID,
-                    usage={"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
-                    finish_reason="stop",
-                )
-            return _audit_response(uninstall_call.id, score=score, deny=deny)
-
-        monkeypatch.setattr(audit_service_module.LLMClient, "generate", generate)
         result = await _audit_round(db, cfg, tool_calls, tmp_path)
 
         assert result is not None
         assert result.status is expected_status
         assert result.may_execute is (expected_status is AuditRecordStatus.PASSED)
+        assert generate_calls == 0
 
-        scoring_payloads = []
-        summary_payloads = []
-        for request in generate_calls:
-            request_payload = json.loads(request["messages"][1].content or "{}")
-            if "confirmation_threshold" in request_payload:
-                scoring_payloads.append(request_payload)
-            if "audit_results" in request_payload:
-                summary_payloads.append(request_payload)
-        assert len(scoring_payloads) == 1
-        assert len(summary_payloads) == (1 if expected_status is AuditRecordStatus.PENDING else 0)
-
-        scoring_payload = scoring_payloads[0]
-        assert len(scoring_payload["tool_calls"]) == 1
-        audited_call_payload = scoring_payload["tool_calls"][0]
-        assert audited_call_payload["tool_call_id"] == uninstall_call.id
-        assert audited_call_payload["tool_name"] == SKILL_TOOL_NAME
-        assert audited_call_payload["arguments"] == {"operation": "uninstall", "skill_id": target_id}
-        assert SHELL_TOOL_NAME not in {item["tool_name"] for item in scoring_payload["tool_calls"]}
-        assert scoring_payload["directory_policy"]["write_protected_directories"] == [str(skills_root.resolve())]
-
-        assert {item.relative_to(target_package): item.read_bytes() for item in target_package.rglob("*") if item.is_file()} == target_before
-        assert {item.relative_to(retained_document.parent): item.read_bytes() for item in retained_document.parent.rglob("*") if item.is_file()} == retained_before
-
-        record = await audit_crud.get_record(db, result.audit_record_id)
+        records = list((await db.execute(select(AuditRecord))).scalars().all())
+        assert len(records) == 1
+        record = records[0]
+        assert record.id == result.audit_record_id
         details = await audit_crud.list_tool_details(db, result.audit_record_id)
-        assert record is not None
         assert record.status is expected_status
+        assert record.tool_count == 3
         assert record.context_file_path is not None
-        assert Path(record.context_file_path).is_file()
+        context_path = Path(record.context_file_path)
+        assert context_path.is_file()
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        assert len(context["tool_calls"]) == 3
+        assert len(context["results"]) == 3
+        assert [item["id"] for item in context["tool_calls"]] == [call.id for call in tool_calls]
+        assert {item["original_tool_call_id"] for item in context["results"]} == {call.id for call in tool_calls}
         assert len(details) == 3
         details_by_call_id = {item.original_tool_call_id: item for item in details}
         assert set(details_by_call_id) == {list_call.id, browse_call.id, uninstall_call.id}
-        expected_catalog_conclusion = AuditToolConclusion.AUDIT_FAILED if model_fails else AuditToolConclusion.PASSED
-        assert details_by_call_id[list_call.id].conclusion is expected_catalog_conclusion
-        assert details_by_call_id[browse_call.id].conclusion is expected_catalog_conclusion
+        for call in (list_call, browse_call):
+            detail = details_by_call_id[call.id]
+            assert detail.conclusion is AuditToolConclusion.PASSED
+            assert detail.score == 0
+            assert detail.decision_source == "none"
+
+        uninstall_detail = details_by_call_id[uninstall_call.id]
         expected_uninstall_conclusion = AuditToolConclusion(expected_status.value)
-        assert details_by_call_id[uninstall_call.id].conclusion is expected_uninstall_conclusion
-        assert details_by_call_id[uninstall_call.id].score == (None if model_fails else score)
+        assert uninstall_detail.conclusion is expected_uninstall_conclusion
+        assert uninstall_detail.decision_source == "system_rule"
+        assert uninstall_detail.score is None
+
+        system_actions = context["extra"]["system_actions"]
+        assert len(system_actions) == 1
+        system_action = system_actions[0]
+        assert system_action["tool_call_id"] == uninstall_call.id
+        assert system_action["action_id"] == "skills.uninstall"
+        assert system_action["parameters"] == {"skill_id": "target-package"}
+        assert uninstall_detail.action_request == system_action["action_request"]
+
+        if is_superuser:
+            assert uninstall_detail.action_request is not None
+            action_request = uninstall_detail.action_request
+            assert action_request["action_id"] == "skills.uninstall"
+            assert action_request["parameters"] == {"skill_id": "target-package"}
+            assert action_request["actor_uid"] == UID
+            assert action_request["target"]["path"] == str(target_package)
+            assert action_request["target"]["resolved_path"] == str(target_package.resolve())
+            assert system_action["action_request"]["actor_uid"] == UID
+            assert system_action["action_request"]["target"]["path"] == str(target_package)
+        else:
+            assert uninstall_detail.reason == t(ERR_SYSTEM_ACTION_PERMISSION_DENIED)
+            assert uninstall_detail.action_request == {
+                "action_id": "skills.uninstall",
+                "parameters": {"skill_id": "target-package"},
+                "error": t(ERR_SYSTEM_ACTION_PERMISSION_DENIED),
+            }
 
         if expected_status is AuditRecordStatus.PENDING:
             assert result.confirmation_payload is not None
             assert result.confirmation_payload["audit_record_id"] == result.audit_record_id
             assert result.confirmation_payload["status"] == AuditRecordStatus.PENDING.value
-            assert result.confirmation_payload["summary"] == summary
-            assert record.intent_summary == summary
+            assert result.confirmation_payload["confirmation_kind"] == "system"
+            assert result.confirmation_payload["risk"] is None
+            assert result.confirmation_payload["confirmation_mode"] == "standard"
+            assert result.confirmation_payload["summary"] == t(
+                MSG_SKILL_UNINSTALL_CONFIRMATION,
+                locale="zh",
+                skill_id="target-package",
+            )
+            assert record.intent_summary == result.confirmation_payload["summary"]
+            assert record.pending_at is not None
+            assert record.expires_at is not None
+            assert record.expires_at > record.pending_at
+            assert datetime.fromisoformat(result.confirmation_payload["expires_at"]).replace(tzinfo=None) == record.expires_at.replace(tzinfo=None)
+            assert abs((record.expires_at - record.pending_at).total_seconds() - cfg.security.audit_confirmation_timeout_seconds) < 1
+            assert [message.tool_call_id for message in result.tool_results] == [call.id for call in tool_calls]
+            assert all(json.loads(message.content or "{}")["status"] == AuditRecordStatus.PENDING.value for message in result.tool_results)
         else:
             assert result.confirmation_payload is None
             assert record.intent_summary is None
+            assert record.expires_at is None
+
+        assert {item.relative_to(target_package): item.read_bytes() for item in target_package.rglob("*") if item.is_file()} == target_before
 
         if expected_status is AuditRecordStatus.PASSED:
             assert result.tool_results == ()
@@ -1409,23 +1511,35 @@ async def test_skill_uninstall_audit_round_covers_catalog_operations_and_outcome
             assert uninstall_result.tool_execution_status == "succeeded"
             assert uninstall_payload["status"] == "success"
             assert uninstall_payload["operation"] == "uninstall"
-            assert uninstall_payload["skill_id"] == target_id
+            assert uninstall_payload["skill_id"] == "target-package"
             assert uninstall_payload["message"] == t(MSG_SKILL_DELETED)
             assert not target_package.exists()
-            assert {item.relative_to(retained_document.parent): item.read_bytes() for item in retained_document.parent.rglob("*") if item.is_file()} == retained_before
+        elif expected_status is AuditRecordStatus.PENDING:
+            uninstall_result = await _process_tool(db, uninstall_call, profile, cfg)
+            uninstall_payload = json.loads(uninstall_result.content or "{}")
+            assert uninstall_result.tool_execution_status == "failed"
+            assert uninstall_payload["status"] == "failed"
+            assert uninstall_payload["error"] == t(ERR_SYSTEM_ACTION_CONFIRMATION_REQUIRED)
+            assert target_package.exists()
+            assert {item.relative_to(target_package): item.read_bytes() for item in target_package.rglob("*") if item.is_file()} == target_before
         else:
             assert result.may_execute is False
             assert [message.tool_call_id for message in result.tool_results] == [call.id for call in tool_calls]
-            expected_error_key = {
-                AuditRecordStatus.PENDING: MSG_AUDIT_WAITING_CONFIRMATION,
-                AuditRecordStatus.BLOCKED: ERR_AUDIT_ROUND_BLOCKED,
-                AuditRecordStatus.AUDIT_FAILED: ERR_AUDIT_SERVICE_FAILED_STOP,
-            }[expected_status]
-            expected_tool_result = {
-                "status": expected_status.value,
-                "error": t(expected_error_key, locale="zh"),
-            }
-            assert [json.loads(message.content or "{}") for message in result.tool_results] == [expected_tool_result] * 3
+            tool_result_payloads = [json.loads(message.content or "{}") for message in result.tool_results]
+            assert [payload["status"] for payload in tool_result_payloads] == [
+                AuditRecordStatus.BLOCKED.value,
+                AuditRecordStatus.BLOCKED.value,
+                "failed",
+            ]
+            assert tool_result_payloads[2]["tool_name"] == SKILL_TOOL_NAME
+            assert tool_result_payloads[2]["error"] == t(ERR_SYSTEM_ACTION_PERMISSION_DENIED)
+            uninstall_result = await _process_tool(db, uninstall_call, profile, cfg)
+            uninstall_payload = json.loads(uninstall_result.content or "{}")
+            assert uninstall_result.tool_execution_status == "failed"
+            assert uninstall_payload["status"] == "failed"
             assert target_package.exists()
             assert {item.relative_to(target_package): item.read_bytes() for item in target_package.rglob("*") if item.is_file()} == target_before
-            assert {item.relative_to(retained_document.parent): item.read_bytes() for item in retained_document.parent.rglob("*") if item.is_file()} == retained_before
+
+        assert retained_document.parent.is_dir()
+        assert {item.relative_to(retained_document.parent): item.read_bytes() for item in retained_document.parent.rglob("*") if item.is_file()} == retained_before
+        assert generate_calls == 0

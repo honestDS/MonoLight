@@ -65,6 +65,7 @@ from app.models.profile import Profile, ProfileConfig
 from app.models.prompt import PromptLibrary
 from app.models.session import ChatSession
 from app.models.session_todo import SessionTodoPlan
+from app.models.user import User
 from app.transformers import http_transport
 from app.transformers.openai.chat_completions import OpenAIChatCompletionsTransformer
 from tests.database_support import clone_sqlite_schema
@@ -94,6 +95,7 @@ async def memory_recall_session_factory(tmp_path, monkeypatch: pytest.MonkeyPatc
         ChatSession.__table__,
         SessionTodoPlan.__table__,
         Message.__table__,
+        User.__table__,
         KnowledgeBase.__table__,
         KnowledgeBaseCollectionOwner.__table__,
         KnowledgeBaseProfileBinding.__table__,
@@ -107,6 +109,9 @@ async def memory_recall_session_factory(tmp_path, monkeypatch: pytest.MonkeyPatc
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(channel_cursor_module, "AsyncSessionLocal", session_factory)
     try:
+        async with session_factory() as db:
+            db.add(User(uid="owner", username="memory_recall_owner"))
+            await db.commit()
         yield session_factory
     finally:
         await engine.dispose()

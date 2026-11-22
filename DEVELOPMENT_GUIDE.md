@@ -72,6 +72,15 @@ Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发�
 - 无法通过一次性迁移安全完成的升级，必须先暂停并说明具体影响，确认升级方案后再实施，不得自行在业务代码中增加长期兼容逻辑。
 
 ## 六、 新增功能与测试要求
+### 系统操作与公共确认接入
+1. 系统行为复用 `app/core/action_control/contracts.py` 中的 `ActionDefinition`/`PreparedAction` 契约，定义业务 `action_id`、权限、参数与目标准备、说明键和执行函数并注册；新增权限集中在 service 扩展。
+2. 工具在 `app/core/action_control/tools.py` 映射并按实际账号裁剪 schema；可信工作链解析 `actor`，子代理继承该身份，模型不可传入账号或批准字段。
+3. AI 回执区分账号权限不足与未知操作。
+4. 系统说明由程序生成并跳过模型，是否确认遵循当前 Profile 的 `security.audit_threshold > 0`；普通工具照常进行模型审计。
+5. 工具轮次统一使用公共 `app/core/confirmation/service.prepare_tool_round`，确认、执行与恢复共用既有流程；持久化来源字段 `decision_source`（`system_rule`/`model_audit`/`none`）与 `action_request` 快照归属于 `AuditToolDetail`，相关 CRUD 和文件存储按现有链路处理，迁移遵循既有规范。
+6. 确认绑定原参数、目标并复核当前权限；集成测试使用真实数据库、队列和原工具结果，覆盖权限暴露、AI 回执、开关、取消、过期、重复、权限变化、目标变化、混合场景、子代理和定时任务。
+
+### 通用测试要求
 - 代码变更后必须按业务域分批运行全量测试，确保新增功能与已存在功能无冲突。
 - 所有一次性迁移脚本的测试用例应在测试完成后及时删除，不应提交到git。
 - **后端目录结构**：单元测试存放在 `tests/unit`，集成测试存放在 `tests/integration`。

@@ -120,9 +120,11 @@ app/api/v1/
 
 ```text
 app/core/
-├── audit/                  # 审计领域与审计持久化
+├── action_control/         # 业务系统操作定义、权限与执行控制
+├── audit/                  # 模型风险评估与审计持久化
 ├── background_tasks/       # 后台工具执行、外部观察与结果回传
 ├── channel/                # 渠道与模型引用管理
+├── confirmation/           # 模型审计与系统规则共用确认
 ├── crud/                   # 持久化数据访问
 ├── dispatchers/            # 对话分发应用服务
 ├── embedding/              # 知识库嵌入能力
@@ -197,27 +199,45 @@ app/core/user/
 ```
 
 
+### 系统操作控制：`app/core/action_control/`
+
+```text
+app/core/action_control/
+├── actor.py                 # 可信身份解析
+├── contracts.py             # 操作定义与准备请求
+├── service.py               # 通用系统操作权限、准备、复核与执行控制
+├── skills.py                # 技能系统操作
+└── tools.py                 # 工具操作映射、单工具入口执行与权限裁剪
+```
+
 ### 审计：`app/core/audit/`
 
 ```text
 app/core/audit/
 ├── __init__.py             # 审计能力导出
-├── confirmation.py         # 审计确认兼容导出入口
-├── confirmation_common.py  # 确认枚举、状态更新与投影数据结构
-├── confirmation_decision.py # 确认候选识别与决定解析
-├── confirmation_events.py  # 确认状态及工具结果事件通知
-├── confirmation_lifecycle.py # 确认过期、取消与会话清理
-├── confirmation_persistence.py # 待确认数据包及取消结果持久化
-├── confirmation_projection.py # 确认状态的消息投影同步
-├── confirmation_queries.py # 确认消息与结构化结果内部查询
-├── confirmation_results.py # 待确认工具结果读取、替换与终态更新
 ├── context_budget.py       # 审计模型请求预算与证据裁剪
 ├── integrity.py            # 审计完整性数据
 ├── persistence.py          # 审计持久化协调
-├── service.py              # 工具风险审计、任务授权与人工确认
+├── service.py              # 模型风险评估、取证与摘要
 ├── startup.py              # 审计启动支持
 ├── storage.py              # 审计文件存储
 └── visibility.py           # 面向主模型对审计工具结果做安全可见性裁剪/隐藏
+```
+
+### 公共确认：`app/core/confirmation/`
+
+```text
+app/core/confirmation/
+├── __init__.py             # 公共确认能力导出
+├── common.py               # 确认枚举、状态更新与投影数据结构
+├── decision.py             # 确认候选识别与决定解析
+├── events.py               # 确认状态及工具结果事件通知
+├── lifecycle.py            # 确认过期、取消与会话清理
+├── persistence.py          # 待确认数据包及取消结果持久化
+├── projection.py           # 确认状态的消息投影同步
+├── queries.py              # 确认消息与结构化结果内部查询
+├── results.py              # 待确认工具结果读取、替换与终态更新
+└── service.py              # 协调系统规则与模型审计并准备公共记录
 ```
 
 ### 通用后台任务：`app/core/background_tasks/`
@@ -563,7 +583,7 @@ app/core/retrieval/
 
 ```text
 app/core/tools/
-├── __init__.py             # 工具注册、Profile 可用性与工作流工具范围筛选
+├── __init__.py             # 工具注册、Profile 可用性、按实际账号裁剪操作与工作流工具范围筛选
 ├── base.py                 # 工具抽象
 ├── background_tasks.py      # 后台任务查询与取消工具
 ├── end_session.py          # 会话结束与回复控制工具
@@ -587,7 +607,7 @@ app/core/tools/
 ├── scheduled_tasks.py      # 间隔与 Cron 定时任务管理工具
 ├── send_file_to_user.py    # 文件投递与下载凭证管理
 ├── shell.py                # 一次性命令执行与交互终端创建
-├── skill.py                # 全局共享技能包只读目录访问工具
+├── skill.py                # 全局共享技能包只读执行器与系统操作入口协议定义
 ├── terminal.py             # 交互终端工具（terminal_tool，集成 read/write/resize/close 操作）
 ├── terminal_watch.py       # 终端输出观察工具
 ├── todo.py                 # 当前会话 Todo 计划工具
@@ -680,7 +700,7 @@ app/core/i18n/
 ```text
 app/models/
 ├── __init__.py             # 模型导出
-├── audit.py                # 审计模型
+├── audit.py                # 模型审计、系统规则及公共确认与执行记录
 ├── background_task.py      # 后台任务模型
 ├── channel.py              # 渠道与模型条目模型
 ├── channel_cursor.py       # 渠道路由模型
@@ -722,6 +742,8 @@ app/models/
 ├── user.py                 # 用户模型
 └── worker_lease.py         # Worker 协调模型
 ```
+
+系统规则与模型审计复用 AuditRecord、AuditToolDetail 及执行记录；操作来源和系统请求快照保存在工具明细中。
 
 ## 外部能力封装：`app/providers/`
 
@@ -880,7 +902,7 @@ dashboard/src/composables/
 ├── useWebSocket.js               # WebSocket 连接生命周期封装
 ├── webSocketConnection.js        # 连接、重连、心跳与消息订阅
 ├── chat/                         # 聊天状态、消息同步与任务协调
-│   ├── auditConfirmationState.js # 审计确认与工具结果状态合并
+│   ├── auditConfirmationState.js # 公共确认与工具结果状态合并
 │   ├── chatMessageHelpers.js     # 消息分类与身份匹配辅助
 │   ├── chatTransportRuntime.js   # HTTP 与 WebSocket 传输执行
 │   ├── contextSummaryTracker.js  # 上下文总结状态与事件顺序跟踪
@@ -905,7 +927,7 @@ dashboard/src/composables/
 │   ├── terminalHistory.js        # 工具轮次与异常事件历史合并
 │   ├── thinkingTracker.js        # 回复处理中占位消息管理
 │   ├── transportNotifications.js # 传输状态提示
-│   ├── useChatAuditConfirmation.js # 审计确认交互
+│   ├── useChatAuditConfirmation.js # 公共确认交互
 │   ├── useChatComposer.js        # 消息输入、附件上传与外部会话指引
 │   ├── useChatDrafts.js          # 按用户和会话保存草稿
 │   ├── useChatHistory.js         # 历史加载、分页与增量合并
@@ -948,7 +970,7 @@ dashboard/src/composables/
 ```text
 dashboard/src/utils/
 ├── assistantResponseIdentity.js # 助手回复身份匹配与历史合并
-├── auditConfirmation.js         # 审计确认可操作性判断
+├── auditConfirmation.js         # 公共确认可操作性判断
 ├── channelAdvancedSettings.js   # 模型高级设置与请求头编辑
 ├── channelHttpProxy.js          # 渠道代理地址校验
 ├── channelModelMetadata.js      # OpenRouter 模型信息匹配与参数补全
@@ -1014,7 +1036,7 @@ scripts/                    # 数据库迁移和运行维护脚本
 
 ```text
 data/                       # SQLite、Chroma、日志与审计等持久化数据
-├── audit/                  # 审计文件
+├── audit/                  # 审计与公共确认共用的控制过程文件
 ├── chromadb/               # Chroma 向量数据
 ├── file_download_tokens/   # 发送文件下载凭证
 ├── logs/                   # 各进程的服务日志、工具日志与轮转文件（默认目录）

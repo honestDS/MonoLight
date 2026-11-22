@@ -9,9 +9,9 @@ import app.core.constants as constants
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatchers.dispatcher as dispatcher_module
 import app.providers.database as database_provider
-from app.core.audit import confirmation_events as confirmation_events_module
 from app.core.audit import service as audit_service_module
 from app.core.audit.integrity import create_file_integrity_snapshot
+from app.core.confirmation import events as confirmation_events_module
 from app.core.constants import (
     FILE_TOOL_NAME,
     SESSION_REPLY_WORK_CLAIM_INFO_KEY,

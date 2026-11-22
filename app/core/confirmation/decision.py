@@ -1,4 +1,4 @@
-from .confirmation_common import (
+from .common import (
     _APPROVE_WORDS,
     _CONFIRMATION_CANDIDATE_WORDS,
     _IGNORE_WORDS,

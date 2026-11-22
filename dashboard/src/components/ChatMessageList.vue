@@ -113,24 +113,24 @@
           <div :class="['content', 'audit-confirmation-card', { 'audit-confirmation-card--high-risk': isHighRiskAuditConfirmation(msg) }]">
             <div class="audit-confirmation-title">
               <WarningFilled v-if="isHighRiskAuditConfirmation(msg)" class="audit-confirmation-warning-icon" />
-              {{ $t(isHighRiskAuditConfirmation(msg) ? 'chat.audit_high_risk_warning_title' : 'chat.audit_confirmation_title') }}
+              {{ getConfirmationTitle(msg) }}
             </div>
             <div class="audit-confirmation-summary">{{ getAuditConfirmation(msg).summary }}</div>
             <div class="audit-confirmation-meta">
               <span>{{ $t('chat.audit_status', { status: getAuditStatusLabel(msg) }) }}</span>
-              <span>{{ $t('chat.audit_risk', { score: getAuditConfirmation(msg).risk }) }}</span>
+              <span v-if="!isSystemConfirmation(msg)">{{ $t('chat.audit_risk', { score: getAuditConfirmation(msg).risk }) }}</span>
               <span>{{ getAuditExpiryLabel(msg) }}</span>
             </div>
             <div class="audit-confirmation-actions">
               <el-button
-                :type="isHighRiskAuditConfirmation(msg) ? 'danger' : 'primary'"
-                :disabled="currentSessionReadOnly || isAuditDecisionPending(msg) || getAuditConfirmation(msg).status !== 'pending' || isAuditConfirmationExpired(msg)"
-                @click="submitAuditDecision(msg, isHighRiskAuditConfirmation(msg) ? 'ignore' : 'approve')"
-              >{{ isHighRiskAuditConfirmation(msg) ? $t('chat.audit_ignore_and_allow') : $t('chat.audit_approve') }}</el-button>
+                :type="isSystemConfirmation(msg) || isHighRiskAuditConfirmation(msg) ? 'danger' : 'primary'"
+                :disabled="currentSessionReadOnly || confirmationBusy || isAuditDecisionPending(msg) || getAuditConfirmation(msg).status !== 'pending' || isAuditConfirmationExpired(msg)"
+                @click="submitAuditDecision(msg, isSystemConfirmation(msg) ? 'approve' : (isHighRiskAuditConfirmation(msg) ? 'ignore' : 'approve'))"
+              >{{ getConfirmationApproveLabel(msg) }}</el-button>
               <el-button
-                :disabled="currentSessionReadOnly || isAuditDecisionPending(msg) || getAuditConfirmation(msg).status !== 'pending' || isAuditConfirmationExpired(msg)"
+                :disabled="currentSessionReadOnly || confirmationBusy || isAuditDecisionPending(msg) || getAuditConfirmation(msg).status !== 'pending' || isAuditConfirmationExpired(msg)"
                 @click="submitAuditDecision(msg, 'reject')"
-              >{{ $t('chat.audit_reject') }}</el-button>
+              >{{ getConfirmationRejectLabel(msg) }}</el-button>
             </div>
           </div>
         </template>
@@ -333,6 +333,7 @@ const props = defineProps({
   currentSessionEnableMarkdown: { type: Boolean, default: false },
   currentSessionShowReasoning: { type: Boolean, default: true },
   currentSessionReadOnly: { type: Boolean, default: false },
+  confirmationBusy: { type: Boolean, default: false },
   activeCollapse: { type: Array, default: () => [] },
   historyLoading: { type: Boolean, default: false },
   initialHistoryLoaded: { type: Boolean, default: true },
@@ -363,6 +364,10 @@ const {
 const {
   getAuditConfirmation,
   isHighRiskAuditConfirmation,
+  isSystemConfirmation,
+  getConfirmationTitle,
+  getConfirmationApproveLabel,
+  getConfirmationRejectLabel,
   getAuditStatusLabel,
   getAuditExpiryLabel,
   isAuditDecisionPending,

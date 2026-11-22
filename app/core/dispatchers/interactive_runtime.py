@@ -170,6 +170,7 @@ async def dispatch_interactive(
         state = build_interactive_dispatch_state(
             db=db,
             uid=uid,
+            actor_uid=actor_uid,
             session_id=session_id,
             active_tasks=active_tasks,
             session_source=session_source,
@@ -401,6 +402,7 @@ async def dispatch_interactive(
                 state.tools, state.allowed_knowledge_base_ids = await get_tools_for_profile(
                     db,
                     profile,
+                    actor_uid=actor_uid,
                     goal_mode=state.goal_mode,
                     tool_workflow=state.tool_workflow,
                 )

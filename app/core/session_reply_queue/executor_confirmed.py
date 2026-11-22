@@ -5,20 +5,26 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from app.core.audit.confirmation import (
+from app.core.action_control.contracts import PreparedAction
+from app.core.action_control.service import validate_prepared_action
+from app.core.action_control.tools import get_tool_action_request
+from app.core.audit.integrity import verify_persisted_tool_round
+from app.core.audit.service import is_audit_configured
+from app.core.confirmation import (
     get_pending_tool_results,
     notify_confirmation_tool_results,
+    persist_pending_confirmation_bundle,
     replace_pending_tool_result,
     update_confirmation_message_status,
 )
-from app.core.audit.confirmation_results import _update_confirmation_tool_results
-from app.core.audit.integrity import verify_persisted_tool_round
-from app.core.audit.service import audit_tool_round, is_audit_configured
+from app.core.confirmation.results import _update_confirmation_tool_results
+from app.core.confirmation.service import prepare_tool_round
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     END_SESSION_SCOPE_FOREGROUND,
     ERR_AUDIT_EXECUTION_CLAIM_FAILED,
     ERR_AUDIT_SOURCE_MESSAGE_VERIFICATION_FAILED,
+    ERR_SYSTEM_ACTION_CONFIRMATION_REQUIRED,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     MSG_AUDIT_STATUS_CANCELLED,
     SHELL_TOOL_NAME,
@@ -28,6 +34,7 @@ from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.crud.session.reply_work_item import ensure_session_reply_work_claim, session_reply_work_item_crud
 from app.core.crud.session.session import session_crud
+from app.core.exceptions import BaseBusinessException
 from app.core.i18n import get_current_locale, t
 from app.core.prompts import AUDIT_SOURCE_MESSAGE_INVALID_PROMPT
 from app.core.session_reply_queue.executor_audit import (
@@ -55,7 +62,6 @@ from app.core.utils.dispatcher.process_single_tool import (
     prevalidate_tool_round_protocol,
     process_single_tool,
 )
-from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.session_todo_snapshot import persist_session_todo_snapshot_on_tool_results
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
@@ -84,6 +90,61 @@ def _resolve_confirmed_tool_model_scope(session) -> tuple[str | None, str | None
         model_id if isinstance(model_id, str) and model_id else None,
         protocol if isinstance(protocol, str) and protocol else None,
     )
+
+
+def _build_system_action_error(tool_name: str, error: str) -> str:
+    return json.dumps(
+        {
+            "status": "failed",
+            "tool_name": tool_name,
+            "error": error,
+        },
+        ensure_ascii=False,
+    )
+
+
+async def _prevalidate_system_actions(
+    db,
+    *,
+    details,
+    source_tool_calls: list[InternalToolCall],
+    confirmed_calls: list[InternalToolCall],
+    uid: str,
+    actor_uid: str | None,
+) -> dict[str, str]:
+    detail_by_original_id = {detail.original_tool_call_id: detail for detail in details}
+    errors: dict[str, str] = {}
+    for original_call, confirmed_call in zip(source_tool_calls, confirmed_calls, strict=True):
+        detail = detail_by_original_id.get(original_call.id)
+        action_request = get_tool_action_request(original_call.name, dict(original_call.arguments or {}))
+        if action_request is None and detail is not None and detail.decision_source != "system_rule":
+            continue
+        if action_request is not None and (detail is None or detail.decision_source != "system_rule"):
+            errors[confirmed_call.id] = _build_system_action_error(
+                confirmed_call.name,
+                t(ERR_SYSTEM_ACTION_CONFIRMATION_REQUIRED),
+            )
+            continue
+        if detail is None:
+            continue
+
+        try:
+            prepared = PreparedAction.from_dict(detail.action_request)
+            if action_request is None or prepared.action_id != action_request[0] or prepared.parameters != action_request[1]:
+                raise ValueError
+            await validate_prepared_action(
+                db,
+                prepared=prepared,
+                uid=uid,
+                actor_uid=actor_uid,
+            )
+        except Exception as exc:
+            if isinstance(exc, BaseBusinessException):
+                error = exc.render_message()
+            else:
+                error = t(ERR_SYSTEM_ACTION_CONFIRMATION_REQUIRED)
+            errors[confirmed_call.id] = _build_system_action_error(confirmed_call.name, error)
+    return errors
 
 
 async def _source_invalid_confirmed_tool_response(
@@ -334,13 +395,19 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
 
     reaudit_round = None
     if files_changed and is_audit_configured(cfg):
-        reaudit_round = await audit_tool_round(
+        prepared_action_requests: dict[str, Any] = {}
+        for detail in details:
+            if detail.decision_source == "system_rule":
+                prepared_action_requests[detail.original_tool_call_id] = detail.action_request
+        reaudit_round = await prepare_tool_round(
             db,
             cfg=cfg,
             tool_calls=source_tool_calls,
             source_assistant_message_id=source_message.id,
             uid=work.uid,
-            operator_username=actor_username,
+            operator_username=record.operator_username,
+            actor_uid=execution_state.get("actor_uid"),
+            prepared_action_requests=prepared_action_requests,
             session_id=work.session_id,
             source=record.source,
             language=get_current_locale(),
@@ -422,15 +489,14 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     await session_reply_work_item_crud.save_checkpoint(db, work.id, new_checkpoint)
             if reaudit_round.confirmation_payload is not None:
                 confirmation_content = json.dumps(reaudit_round.confirmation_payload, ensure_ascii=False)
-                await save_message(
+                await persist_pending_confirmation_bundle(
                     db,
-                    work.session_id,
-                    work.uid,
-                    MessageRole.ASSISTANT,
-                    MessageType.AUDIT_CONFIRMATION,
-                    reaudit_round.confirmation_payload,
-                    profile.id,
-                    is_processed=True,
+                    audit_record_id=reaudit_round.audit_record_id,
+                    uid=work.uid,
+                    session_id=work.session_id,
+                    profile_id=profile.id,
+                    tool_results=[],
+                    confirmation_payload=reaudit_round.confirmation_payload,
                     dedupe_key=_result_message_dedupe_key(work),
                 )
                 status_updated = await update_confirmation_message_status(db, audit_record_id=reaudit_round.audit_record_id)
@@ -484,6 +550,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         profile,
         allow_background=allow_background_submission,
         tool_workflow=tool_workflow,
+        actor_uid=execution_state.get("actor_uid"),
     )
     detail_by_original_id = {detail.original_tool_call_id: detail for detail in details}
     confirmed_calls = [InternalToolCall(id=f"call_{uuid.uuid4().hex}", name=item.name, arguments=dict(item.arguments or {})) for item in source_tool_calls]
@@ -523,6 +590,15 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
             tool_schemas=_tools,
             execution_scope=record.execution_scope,
             tool_workflow=tool_workflow,
+        )
+    if not precheck_errors:
+        precheck_errors = await _prevalidate_system_actions(
+            db,
+            details=details,
+            source_tool_calls=source_tool_calls,
+            confirmed_calls=confirmed_calls,
+            uid=work.uid,
+            actor_uid=execution_state.get("actor_uid"),
         )
     all_attempts_created = len(executions_by_original_call_id) == len(source_tool_calls)
     all_succeeded = all_attempts_created and not precheck_errors
@@ -594,6 +670,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     execution_scope=record.execution_scope,
                     tool_schemas=_tools,
                     tool_workflow=tool_workflow,
+                    actor_uid=execution_state.get("actor_uid"),
                 )
                 await _append_confirmed_tool_result(replacement_state, original_call.id, tool_result)
                 terminal_session_id = get_handed_off_terminal_session_id(tool_result.content) if confirmed_call.name == SHELL_TOOL_NAME else None

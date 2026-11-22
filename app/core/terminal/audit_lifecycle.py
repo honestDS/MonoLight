@@ -35,7 +35,7 @@ __all__ = [
 
 
 async def _update_terminal_confirmation_status(db: AsyncSession, *, audit_record_id: int) -> None:
-    from app.core.audit.confirmation import update_confirmation_message_status
+    from app.core.confirmation import update_confirmation_message_status
 
     await update_confirmation_message_status(db, audit_record_id=audit_record_id)
 

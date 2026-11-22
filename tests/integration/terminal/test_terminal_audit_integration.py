@@ -6,14 +6,14 @@ from types import SimpleNamespace
 import pytest
 from sqlmodel import select
 
-import app.core.audit.confirmation_events as confirmation_events_module
+import app.core.confirmation.events as confirmation_events_module
 import app.core.terminal.audit_lifecycle as terminal_audit_lifecycle_module
 import app.core.terminal.session_runtime_commands as terminal_runtime_commands_module
 import app.core.terminal.session_runtime_core as terminal_runtime_core_module
 import app.core.terminal.session_runtime_state as terminal_runtime_state_module
 import app.core.terminal.worker_coordinator as terminal_worker_module
-from app.core.audit.confirmation_lifecycle import stop_interactive_reply
 from app.core.audit.storage import write_audit_json
+from app.core.confirmation.lifecycle import stop_interactive_reply
 from app.core.crud.audit.audit import audit_crud
 from app.core.exceptions import ServerException
 from app.core.terminal.manager import cleanup_terminal_sessions_by_chat_session

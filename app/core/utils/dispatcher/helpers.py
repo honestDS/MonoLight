@@ -115,6 +115,7 @@ async def process_single_tool_with_isolated_db(
     execution_scope: str | None = None,
     tool_schemas: list[dict[str, Any]] | None = None,
     tool_workflow: str | None = None,
+    actor_uid: str | None = None,
 ) -> InternalMessage:
     dispatcher_module = import_module("app.core.dispatchers.dispatcher")
     async_session_local = getattr(dispatcher_module, "AsyncSessionLocal", AsyncSessionLocal)
@@ -144,6 +145,7 @@ async def process_single_tool_with_isolated_db(
             execution_scope=execution_scope,
             tool_schemas=tool_schemas,
             tool_workflow=tool_workflow,
+            actor_uid=actor_uid,
         )
 
 

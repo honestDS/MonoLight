@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import update
 from sqlmodel import select
 
-from app.core.audit.confirmation_lifecycle import stop_interactive_reply
+from app.core.confirmation.lifecycle import stop_interactive_reply
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.task.background import background_task_crud
 from app.core.tools.background_tasks import ManageBackgroundTasksExecutor

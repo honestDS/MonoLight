@@ -26,6 +26,7 @@ from app.models.knowledge_base import (
 from app.models.message import InternalMessage, MessageRole
 from app.models.profile import PROFILE_EXAMPLE, Profile, ToolConfig
 from app.models.prompt import PromptLibrary
+from app.models.user import User
 from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 
@@ -99,6 +100,7 @@ async def _add_knowledge_base(
 @pytest.fixture
 async def db_session(database_factory):
     tables = (
+        User.__table__,
         PromptLibrary.__table__,
         KnowledgeBase.__table__,
         KnowledgeBaseCollectionOwner.__table__,
@@ -108,6 +110,8 @@ async def db_session(database_factory):
     )
     async with database_factory(tables=tables, poolclass=StaticPool) as factory:
         async with factory() as session:
+            session.add(User(uid="user-1", username="knowledge_exposure_user"))
+            await session.commit()
             yield session
 
 

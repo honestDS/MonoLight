@@ -132,6 +132,7 @@
         :current-session-enable-markdown="currentSessionEnableMarkdown"
         :current-session-show-reasoning="currentSessionShowReasoning"
         :current-session-read-only="isCurrentSessionReadOnly"
+        :confirmation-busy="loading || agentSettingSubmitting"
         :history-loading="historyLoading"
         :initial-history-loaded="renderedInitialHistoryLoaded"
         :context-summarizing="isContextSummarizing"

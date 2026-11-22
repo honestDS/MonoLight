@@ -16,6 +16,11 @@ from tests.memory_recall_support import memory_recall_payload
 from tests.unit.response_test_support import knowledge_query_payload
 
 
+@pytest.fixture(autouse=True)
+def _isolate_tool_actor(monkeypatch):
+    monkeypatch.setattr("app.core.tools.resolve_action_actor", AsyncMock(return_value=None))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("locale", ["zh", "en"])
 async def test_process_single_tool_truncation_log_uses_localized_per_tool_budget(monkeypatch, tmp_path, locale):

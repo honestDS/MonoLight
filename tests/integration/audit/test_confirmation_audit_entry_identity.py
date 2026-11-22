@@ -13,7 +13,7 @@ from app.adapters.chat_web import web_chat_adapter
 from app.adapters.weixin_openclaw.adapter import WeixinOpenClawAdapter
 from app.adapters.weixin_openclaw.config import WeixinOpenClawConfig
 from app.api.v1 import chat as chat_api
-from app.core.audit import confirmation_events as confirmation_events_module
+from app.core.confirmation import events as confirmation_events_module
 from app.core.security import get_current_user
 from app.core.session.notifier import SessionNotifier
 from app.core.session_reply_queue import manager_submission as manager_submission_module

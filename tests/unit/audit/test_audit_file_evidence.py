@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import app.core.confirmation.service as confirmation_service_module
 from app.core.audit.context_budget import (
     AUDIT_READ_TEXT_FILE_TOOL_SCHEMA,
     build_read_tool_message,
@@ -806,14 +807,16 @@ async def test_audit_round_handles_unassociated_read_protocol_failure_by_thresho
         return True
 
     monkeypatch.setattr(service, "channel_crud", SimpleNamespace(get=get_channel))
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(confirmation_service_module, "cancel_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(confirmation_service_module.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist)
     monkeypatch.setattr(service.LLMClient, "generate", generate)
-    monkeypatch.setattr(service, "logger", FakeLogger())
+    fake_logger = FakeLogger()
+    monkeypatch.setattr(confirmation_service_module, "logger", fake_logger)
+    monkeypatch.setattr(service, "logger", fake_logger)
 
-    result = await service.audit_tool_round(
+    result = await confirmation_service_module.prepare_tool_round(
         FakeDb(),
         cfg=cfg,
         tool_calls=[
@@ -1010,13 +1013,13 @@ async def test_read_snapshot_is_bound_to_tool_detail_and_missing_check_requires_
         captured.update(kwargs)
         return True
 
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(confirmation_service_module, "cancel_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(confirmation_service_module.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", call_auditor)
     monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist)
 
-    result = await service.audit_tool_round(
+    result = await confirmation_service_module.prepare_tool_round(
         FakeDb(),
         cfg=cfg,
         tool_calls=[

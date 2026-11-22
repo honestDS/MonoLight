@@ -962,6 +962,7 @@ async def test_file_tool_large_grep_result_is_truncated_by_unified_tool_dispatch
         turn=1,
         uid="user-1",
         context_window_k=4,
+        tool_schemas=[FILE_TOOL_SCHEMA],
     )
 
     assert len(direct_result) > len(result.content or "")

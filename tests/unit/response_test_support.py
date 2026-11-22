@@ -116,6 +116,7 @@ def audit_confirmation_payload(
 ) -> dict:
     return {
         "type": "audit_confirmation",
+        "confirmation_kind": "audit",
         "audit_record_id": audit_record_id,
         "summary": summary,
         "risk": risk,

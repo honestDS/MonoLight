@@ -3,8 +3,8 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation import update_confirmation_message_status
-from app.core.audit.confirmation_results import replace_pending_tool_result
+from app.core.confirmation import update_confirmation_message_status
+from app.core.confirmation.results import replace_pending_tool_result
 from app.core.constants import (
     ERR_BACKGROUND_TASK_CANCELLED_BEFORE_EXECUTION,
     ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN,

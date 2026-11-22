@@ -6,7 +6,7 @@ import pytest
 
 from app.core import paths
 from app.core.constants import (
-    ERR_ONLY_ADMIN_ALLOWED,
+    ERR_SKILL_OPERATION_INVALID,
     SKILL_DESCRIPTION_MAX_CHARS,
     SKILL_METADATA_MAX_BYTES,
     SKILL_NAME_MAX_CHARS,
@@ -488,7 +488,7 @@ async def test_skill_executor_supports_list_and_browse(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("locale", ["zh", "en"], ids=["zh", "en"])
-async def test_skill_executor_rejects_uninstall_without_runtime_context(tmp_path, locale):
+async def test_skill_executor_does_not_execute_system_actions(tmp_path, locale):
     skills_root = tmp_path / SKILLS_DIRECTORY
     document_contents = "---\nname: Protected Package\n---\noriginal document body\n"
     package = _write_skill(skills_root, "protected-package", document_contents)
@@ -498,7 +498,7 @@ async def test_skill_executor_rejects_uninstall_without_runtime_context(tmp_path
     token = set_current_locale(locale)
     try:
         result = json.loads(await _executor(tmp_path).execute(operation="uninstall", skill_id="protected-package"))
-        expected_error = t(ERR_ONLY_ADMIN_ALLOWED)
+        expected_error = t(ERR_SKILL_OPERATION_INVALID)
     finally:
         reset_current_locale(token)
 

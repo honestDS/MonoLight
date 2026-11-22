@@ -15,7 +15,7 @@ import app.core.dispatchers.interactive_generation as interactive_generation_mod
 import app.core.dispatchers.interactive_runtime as interactive_runtime_module
 import app.core.dispatchers.memory.request as memory_request_module
 import app.providers.database as database_provider
-from app.core.audit import confirmation_events as confirmation_events_module
+from app.core.confirmation import events as confirmation_events_module
 from app.core.constants import (
     END_SESSION_TOOL_NAME,
     ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER,

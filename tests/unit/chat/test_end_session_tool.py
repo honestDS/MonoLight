@@ -76,10 +76,11 @@ def _message_with_tool_calls(
 
 
 @pytest.mark.asyncio
-async def test_goal_mode_exposes_end_session_and_parameterless_call_passes_prevalidation():
+async def test_goal_mode_exposes_end_session_and_parameterless_call_passes_prevalidation(monkeypatch):
     profile = _profile_without_configured_tools()
     original_configs = copy.deepcopy(profile.configs)
 
+    monkeypatch.setattr("app.core.tools.resolve_action_actor", AsyncMock(return_value=None))
     tools, whitelist = await get_tools_for_profile(None, profile, goal_mode=True)
 
     assert END_SESSION_TOOL_NAME in {tool["function"]["name"] for tool in tools}
@@ -124,7 +125,7 @@ async def test_goal_mode_exposes_end_session_and_parameterless_call_passes_preva
         "flat-goal-mode",
     ],
 )
-async def test_end_session_exposure_is_available_in_all_conversation_modes(configs, goal_mode, expected_exposed):
+async def test_end_session_exposure_is_available_in_all_conversation_modes(configs, goal_mode, expected_exposed, monkeypatch):
     original_configs = copy.deepcopy(configs)
     profile = Profile(
         id=None,
@@ -133,6 +134,7 @@ async def test_end_session_exposure_is_available_in_all_conversation_modes(confi
         configs=copy.deepcopy(configs),
     )
 
+    monkeypatch.setattr("app.core.tools.resolve_action_actor", AsyncMock(return_value=None))
     tools, _ = await get_tools_for_profile(None, profile, goal_mode=goal_mode)
 
     assert (END_SESSION_TOOL_NAME in {tool["function"]["name"] for tool in tools}) is expected_exposed

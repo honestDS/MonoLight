@@ -16,15 +16,15 @@ from app.core.i18n import t
 from app.models.audit import AuditRecordStatus
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
 
-from .confirmation_common import (
+from .common import (
     CONFIRMATION_DECISION_FIELD,
     REJECTION_SOURCE_FIELD,
     ConfirmationDecision,
     PendingConfirmationCancellation,
 )
-from .confirmation_events import broadcast_pending_confirmation_cancellation
-from .confirmation_projection import _sync_confirmation_message_status_projection
-from .confirmation_queries import _get_structured_tool_result_messages
+from .events import broadcast_pending_confirmation_cancellation
+from .projection import _sync_confirmation_message_status_projection
+from .queries import _get_structured_tool_result_messages
 
 __all__ = [
     "get_pending_tool_results",

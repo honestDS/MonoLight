@@ -4,9 +4,9 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation import update_confirmation_message_status
-from app.core.audit.confirmation_events import broadcast_pending_confirmation_cancellation
-from app.core.audit.confirmation_results import cancel_persisted_pending_confirmation_bundle
+from app.core.confirmation import update_confirmation_message_status
+from app.core.confirmation.events import broadcast_pending_confirmation_cancellation
+from app.core.confirmation.results import cancel_persisted_pending_confirmation_bundle
 from app.core.constants import (
     END_SESSION_SCOPE_TASK,
     ERR_SUBAGENT_CALL_CONFLICT,
@@ -427,9 +427,12 @@ async def _start_subagent_round(
     instruction_message = await message_crud.persist(db, message=instruction_message, commit=False)
     spec.instruction_message_id = instruction_message.id
 
+    parent_state = dict(parent.execution_state) if isinstance(parent.execution_state, dict) else {}
     child_state = dict(child_work.execution_state) if isinstance(child_work.execution_state, dict) else {}
     child_state["agent_work"] = spec.model_dump(mode="json")
     child_state["child_work_id"] = child_work.id
+    child_state["actor_uid"] = parent_state.get("actor_uid") or parent.uid
+    child_state["actor_username"] = parent_state.get("actor_username")
     child_work.execution_state = child_state
     db.add(child_work)
 
@@ -450,7 +453,6 @@ async def _start_subagent_round(
     subagent.latest_child_work_id = child_work.id
     db.add(subagent)
 
-    parent_state = dict(parent.execution_state) if isinstance(parent.execution_state, dict) else {}
     parent_state["has_child_work"] = True
     parent.execution_state = parent_state
     db.add(parent)

@@ -6,6 +6,7 @@ import pytest
 from sqlmodel import select
 
 import app.core.audit.service as audit_service_module
+import app.core.confirmation.service as confirmation_service_module
 from app.core import paths
 from app.core.crud.audit.audit import audit_crud
 from app.core.prompts import AUDIT_STANDARD_BATCH_PROMPT
@@ -428,7 +429,7 @@ async def test_user_temp_directory_policy_is_scoped_without_mutating_config(
         )
 
         async with audit_database() as db:
-            result = await audit_service_module.audit_tool_round(
+            result = await confirmation_service_module.prepare_tool_round(
                 db,
                 cfg=cfg,
                 tool_calls=[tool_call],

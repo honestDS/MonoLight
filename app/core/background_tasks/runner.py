@@ -5,9 +5,9 @@ import uuid
 from time import monotonic
 from typing import Any
 
-from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.background_tasks.external_work import resume_external_work_for_task
 from app.core.background_tasks.terminal_watch_coordinator import complete_terminal_watch_round
+from app.core.confirmation import update_confirmation_message_status
 from app.core.constants import BACKGROUND_TASK_CONTROL_POLL_INTERVAL_SECONDS, ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_TOOL_EXECUTION_TIMEOUT, ERR_TOOL_NOT_REGISTERED, TERMINAL_WATCH_TOOL_NAME
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.profile.profile import profile_crud

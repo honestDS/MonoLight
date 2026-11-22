@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation_lifecycle import expire_confirmation_by_session
+from app.core.confirmation.lifecycle import expire_confirmation_by_session
 from app.core.constants import ERR_SUBAGENT_CONTEXT_INVALID
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud as reply_work_crud
 from app.core.crud.session.subagent import subagent_crud

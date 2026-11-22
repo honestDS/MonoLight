@@ -8,8 +8,8 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation import persist_pending_confirmation_bundle, update_confirmation_message_status
-from app.core.audit.service import audit_tool_round
+from app.core.confirmation import persist_pending_confirmation_bundle, update_confirmation_message_status
+from app.core.confirmation.service import prepare_tool_round
 from app.core.constants import (
     END_SESSION_SCOPE_FOREGROUND,
     ERR_AUDIT_EXECUTION_CLAIM_FAILED,
@@ -554,7 +554,7 @@ class BackgroundDispatcherMixin:
                             turn_messages,
                         )
                     )
-                audit_round = await audit_tool_round(
+                audit_round = await prepare_tool_round(
                     db,
                     cfg=cfg,
                     tool_calls=executable_tool_calls,

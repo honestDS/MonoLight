@@ -9,8 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
 import app.core.audit.persistence as audit_persistence_module
-import app.core.audit.service as audit_service_module
 import app.core.background_tasks.scheduler as scheduler_module
+import app.core.confirmation.service as confirmation_service_module
 import app.core.crud.channel.cursor as channel_cursor_module
 import app.core.dispatchers.dispatcher as dispatcher_module
 import app.core.dispatchers.interactive_generation as interactive_generation_module
@@ -122,7 +122,7 @@ async def test_llm_workflow_creates_lists_and_deletes_scheduled_task(
     monkeypatch.setattr(channel_cursor_module, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(
-        audit_service_module,
+        confirmation_service_module,
         "persist_prepared_audit_round",
         partial(audit_persistence_module.persist_prepared_audit_round, audit_root=tmp_path / "audit"),
     )

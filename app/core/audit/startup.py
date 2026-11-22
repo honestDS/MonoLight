@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation import sync_expired_confirmation_messages, update_confirmation_message_status
+from app.core.confirmation import sync_expired_confirmation_messages, update_confirmation_message_status
 from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN
 from app.core.crud.audit.audit import audit_crud
 from app.core.crud.task.background import background_task_crud

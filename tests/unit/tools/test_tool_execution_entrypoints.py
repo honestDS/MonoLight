@@ -1,6 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -20,7 +21,7 @@ from app.models.profile import Profile, ProfileConfig
 
 def test_registered_tools_explicitly_declare_audit_requirement():
     assert all(isinstance(executor_class.requires_audit, bool) for executor_class in TOOL_EXECUTOR_MAP.values())
-    audited_tools = {"execute_shell", "file_tool", "terminal_tool", "manage_scheduled_tasks", "skill_tool"}
+    audited_tools = {"execute_shell", "file_tool", "terminal_tool", "manage_scheduled_tasks"}
     assert {tool_name for tool_name in TOOL_EXECUTOR_MAP if tool_requires_audit(tool_name)} == audited_tools
     assert tool_requires_audit("terminal_tool") is True
     assert "read_multimodal_file" in TOOL_EXECUTOR_MAP
@@ -72,18 +73,18 @@ def test_manage_scheduled_tasks_audit_requirement_depends_on_operation(arguments
     [
         ({"operation": "list"}, False),
         ({"operation": "browse"}, False),
-        ({"operation": "uninstall"}, True),
-        ({"operation": "read"}, True),
-        ({"operation": "resize"}, True),
-        ({"operation": "unknown"}, True),
-        (None, True),
-        ({}, True),
-        ({"operation": None}, True),
-        ({"operation": []}, True),
-        ({"operation": {}}, True),
+        ({"operation": "uninstall"}, False),
+        ({"operation": "read"}, False),
+        ({"operation": "resize"}, False),
+        ({"operation": "unknown"}, False),
+        (None, False),
+        ({}, False),
+        ({"operation": None}, False),
+        ({"operation": []}, False),
+        ({"operation": {}}, False),
     ],
 )
-def test_skill_tool_audit_requirement_depends_on_operation(arguments, expected_audit):
+def test_skill_tool_does_not_require_audit_for_any_operation(arguments, expected_audit):
     assert tool_requires_audit("skill_tool", arguments) is expected_audit
 
 
@@ -119,6 +120,7 @@ def test_confirmed_tool_result_budget_reuses_last_model_context_window():
 
 @pytest.fixture
 def _isolated_tool_dispatch(monkeypatch):
+    monkeypatch.setattr(tools, "resolve_action_actor", AsyncMock(return_value=None))
     monkeypatch.setattr(
         process_single_tool_module,
         "truncate_tool_messages_for_budget",

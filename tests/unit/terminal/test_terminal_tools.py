@@ -2,6 +2,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
@@ -408,7 +409,8 @@ async def test_watch_terminal_read_on_timeout_isolated_from_default(
 
 
 @pytest.mark.asyncio
-async def test_get_tools_for_profile_exposes_shell_companions_only_with_shell():
+async def test_get_tools_for_profile_exposes_shell_companions_only_with_shell(monkeypatch):
+    monkeypatch.setattr("app.core.tools.resolve_action_actor", AsyncMock(return_value=None))
     enabled_tools, _ = await get_tools_for_profile(None, _profile(["execute_shell"]))
     enabled_names = [tool["function"]["name"] for tool in enabled_tools if tool["function"]["name"] not in SYSTEM_BUILTIN_TOOL_NAMES]
 

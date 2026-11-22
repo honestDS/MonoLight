@@ -5,15 +5,16 @@ from types import SimpleNamespace
 
 import pytest
 
+import app.core.confirmation.service as confirmation_service_module
 from app.adapters.weixin_openclaw.response import extract_event_reply
-from app.core.audit.confirmation import ConfirmationDecision, is_confirmation_candidate, message_has_quote, parse_confirmation_decision
 from app.core.audit.service import (
     _parse_results,
     _summarize_pending,
-    audit_tool_round,
     classify_audit_score,
     is_audit_configured,
 )
+from app.core.confirmation import ConfirmationDecision, is_confirmation_candidate, message_has_quote, parse_confirmation_decision
+from app.core.confirmation.service import prepare_tool_round
 from app.core.constants import (
     DEFAULT_CHAT_MAX_TOKENS,
     MSG_AUDIT_CONFIRMATION_IM,
@@ -239,14 +240,14 @@ async def test_pending_audit_uses_configured_confirmation_timeout(monkeypatch):
         captured["expires_at"] = kwargs["expires_at"]
         return True
 
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(confirmation_service_module, "cancel_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(confirmation_service_module.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", call_auditor)
     monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
-    monkeypatch.setattr(service, "get_local_time", lambda: fixed_now)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist)
+    monkeypatch.setattr(confirmation_service_module, "get_local_time", lambda: fixed_now)
 
-    result = await audit_tool_round(
+    result = await prepare_tool_round(
         FakeDb(),
         cfg=cfg,
         tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "echo ok"})],
@@ -280,6 +281,7 @@ async def test_pending_audit_uses_configured_confirmation_timeout(monkeypatch):
         "risk": 5,
         "status": "pending",
         "confirmation_mode": "standard",
+        "confirmation_kind": "audit",
         "expires_at": expected_expires_at.isoformat(),
         "plain_text": t(
             MSG_AUDIT_CONFIRMATION_IM,
@@ -330,13 +332,13 @@ async def test_missing_audit_configuration_skips_round_without_side_effects(monk
     def unexpected_snapshot(*_args, **_kwargs):
         raise AssertionError("unconfigured audit must not collect evidence")
 
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", unexpected_call)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", unexpected_call)
+    monkeypatch.setattr(confirmation_service_module, "cancel_confirmation_by_session", unexpected_call)
+    monkeypatch.setattr(confirmation_service_module.audit_crud, "create_preparing", unexpected_call)
     monkeypatch.setattr(service, "_call_auditor", unexpected_call)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", unexpected_call)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", unexpected_call)
     monkeypatch.setattr(service, "_collect_file_mutation_snapshots", unexpected_snapshot)
 
-    result = await audit_tool_round(
+    result = await prepare_tool_round(
         FakeDb(),
         cfg=cfg,
         tool_calls=[
@@ -370,14 +372,14 @@ async def test_configured_audit_skips_safe_tool_round_without_side_effects(monke
     def unexpected_snapshot(*_args, **_kwargs):
         raise AssertionError("safe tools must not collect audit evidence")
 
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", unexpected_call)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", unexpected_call)
+    monkeypatch.setattr(confirmation_service_module, "cancel_confirmation_by_session", unexpected_call)
+    monkeypatch.setattr(confirmation_service_module.audit_crud, "create_preparing", unexpected_call)
     monkeypatch.setattr(service, "_call_auditor", unexpected_call)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", unexpected_call)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", unexpected_call)
     monkeypatch.setattr(service, "_collect_file_mutation_snapshots", unexpected_snapshot)
-    monkeypatch.setattr(service, "build_tool_round_integrity_snapshot", unexpected_snapshot)
+    monkeypatch.setattr(confirmation_service_module, "build_tool_round_integrity_snapshot", unexpected_snapshot)
 
-    result = await audit_tool_round(
+    result = await prepare_tool_round(
         FakeDb(),
         cfg=_profile_config(),
         tool_calls=[
@@ -420,13 +422,13 @@ async def test_shell_blacklist_blocks_audit_round_without_confirmation(monkeypat
         captured.update(kwargs)
         return True
 
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_cancellation)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(confirmation_service_module, "cancel_confirmation_by_session", no_cancellation)
+    monkeypatch.setattr(confirmation_service_module.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", unexpected_call)
     monkeypatch.setattr(service, "_summarize_pending", unexpected_call)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist)
 
-    result = await service.audit_tool_round(
+    result = await confirmation_service_module.prepare_tool_round(
         FakeDb(),
         cfg=_profile_config(),
         tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": 'powershell -NoProfile -Command "Write-Host ok"'})],
@@ -469,13 +471,13 @@ async def test_same_round_file_write_conflict_blocks_without_confirmation(monkey
         captured.update(kwargs)
         return True
 
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_cancellation)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(confirmation_service_module, "cancel_confirmation_by_session", no_cancellation)
+    monkeypatch.setattr(confirmation_service_module.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", unexpected_call)
     monkeypatch.setattr(service, "_summarize_pending", unexpected_call)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist)
 
-    result = await service.audit_tool_round(
+    result = await confirmation_service_module.prepare_tool_round(
         FakeDb(),
         cfg=_profile_config(),
         tool_calls=[
@@ -524,12 +526,12 @@ async def test_mixed_tool_round_audits_only_declared_calls_and_persists_full_rou
         captured.update(kwargs)
         return True
 
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_cancellation)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(confirmation_service_module, "cancel_confirmation_by_session", no_cancellation)
+    monkeypatch.setattr(confirmation_service_module.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", call_auditor)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist)
 
-    result = await audit_tool_round(
+    result = await prepare_tool_round(
         FakeDb(),
         cfg=cfg,
         tool_calls=[
@@ -606,13 +608,13 @@ async def test_configured_audit_runtime_failures_still_persist_audit_failed(monk
         captured.update(kwargs)
         return True
 
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+    monkeypatch.setattr(confirmation_service_module, "cancel_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(confirmation_service_module.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist)
     monkeypatch.setattr(service.channel_crud, "get", get_channel)
     monkeypatch.setattr(service.LLMClient, "generate", generate)
 
-    result = await audit_tool_round(
+    result = await prepare_tool_round(
         FakeDb(),
         cfg=cfg,
         tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "echo ok"})],
@@ -666,12 +668,12 @@ async def test_persistence_failure_does_not_reaccess_expired_record(monkeypatch,
         record.expired = True
         return False
 
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_cancellation)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(confirmation_service_module, "cancel_confirmation_by_session", no_cancellation)
+    monkeypatch.setattr(confirmation_service_module.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", call_auditor)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", fail_persistence)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", fail_persistence)
 
-    result = await audit_tool_round(
+    result = await prepare_tool_round(
         FakeDb(),
         cfg=cfg,
         tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "echo ok"})],
@@ -851,14 +853,14 @@ async def test_service_does_not_classify_dynamic_script_command_or_change_model_
         captured.update(kwargs)
         return True
 
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(confirmation_service_module, "cancel_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(confirmation_service_module.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", call_auditor)
     monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist)
 
     command = 'python "$SCRIPT"'
-    result = await service.audit_tool_round(
+    result = await confirmation_service_module.prepare_tool_round(
         FakeDb(),
         cfg=cfg,
         tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": command})],
@@ -892,6 +894,7 @@ async def test_service_does_not_classify_dynamic_script_command_or_change_model_
             "risk": model_score,
             "status": "pending",
             "confirmation_mode": expected_mode,
+            "confirmation_kind": "audit",
             "expires_at": expires_at,
             "plain_text": t(
                 MSG_AUDIT_HIGH_RISK_CONFIRMATION_IM if expected_mode == "high_risk_override" else MSG_AUDIT_CONFIRMATION_IM,
@@ -947,12 +950,12 @@ async def test_service_does_not_infer_missing_script_evidence_from_command_text(
         captured.update(kwargs)
         return True
 
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(confirmation_service_module, "cancel_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(confirmation_service_module.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", call_auditor)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist)
 
-    result = await service.audit_tool_round(
+    result = await confirmation_service_module.prepare_tool_round(
         FakeDb(),
         cfg=cfg,
         tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "python task.py"})],
@@ -1000,13 +1003,13 @@ async def test_zero_score_for_ordinary_command_stays_zero_without_summary_or_con
         captured.update(kwargs)
         return True
 
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(confirmation_service_module, "cancel_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(confirmation_service_module.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", call_auditor)
     monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+    monkeypatch.setattr(confirmation_service_module, "persist_prepared_audit_round", persist)
 
-    result = await service.audit_tool_round(
+    result = await confirmation_service_module.prepare_tool_round(
         FakeDb(),
         cfg=cfg,
         tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "echo ok"})],

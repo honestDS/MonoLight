@@ -13,6 +13,10 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
+from app.core.action_control.tools import (
+    execute_tool_action,
+    get_tool_action_request,
+)
 from app.core.constants import (
     AGENT_WORK_TOOL_NAME,
     CONTEXT_WINDOW_TOKENS_PER_K,
@@ -25,6 +29,8 @@ from app.core.constants import (
     ERR_TOOL_MISSING_REQUIRED_ARGUMENTS,
     ERR_TOOL_NOT_ENABLED,
     ERR_TOOL_NOT_REGISTERED,
+    ERR_TOOL_OPERATION_NOT_FOUND,
+    ERR_TOOL_OPERATION_PERMISSION_DENIED,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
     MSG_BACKGROUND_TASK_QUEUED,
@@ -182,6 +188,34 @@ def _build_tool_error_result(tool_name: str, error_message: str) -> str:
             "error": error_message,
         },
         ensure_ascii=False,
+    )
+
+
+def _get_tool_operation_error(
+    tool_name: str,
+    args: dict[str, Any],
+    parameters_schema: dict[str, Any],
+) -> str | None:
+    operation = args.get("operation")
+    if not isinstance(operation, str):
+        return None
+
+    registered_parameters_schema = get_tool_parameters_schema(tool_name, tool_workflow=None)
+    if registered_parameters_schema is None:
+        return None
+    registered_operations = registered_parameters_schema.get("properties", {}).get("operation", {}).get("enum")
+    if not isinstance(registered_operations, list):
+        return None
+    if operation not in registered_operations:
+        return t(ERR_TOOL_OPERATION_NOT_FOUND, tool_name=tool_name, operation=operation)
+
+    current_operations = parameters_schema.get("properties", {}).get("operation", {}).get("enum")
+    if not isinstance(current_operations, list) or operation in current_operations:
+        return None
+    return t(
+        ERR_TOOL_OPERATION_PERMISSION_DENIED,
+        tool_name=tool_name,
+        operation=operation,
     )
 
 
@@ -382,6 +416,8 @@ def prevalidate_tool_round(
         unsupported_arguments = sorted(argument_name for argument_name in args if parameters_schema is not None and argument_name not in declared_properties)
         if parameters_schema is None or not is_tool_enabled_for_config(tool_name, cfg):
             errors[tool_call.id] = _build_tool_disabled_result(tool_name)
+        elif parameters_schema is not None and (operation_error := _get_tool_operation_error(tool_name, args, parameters_schema)):
+            errors[tool_call.id] = _build_tool_error_result(tool_name, operation_error)
         elif missing_arguments:
             errors[tool_call.id] = _build_missing_required_arguments_result(
                 tool_name,
@@ -409,6 +445,31 @@ def prevalidate_tool_round(
     return errors
 
 
+async def _execute_tool_request(
+    instance: Any,
+    *,
+    tool_name: str,
+    args: dict[str, Any],
+    db: AsyncSession,
+    uid: str,
+    cfg: ProfileConfig,
+    tool_call_id: str,
+    actor_uid: str | None,
+) -> str:
+    if get_tool_action_request(tool_name, args) is not None:
+        result = await execute_tool_action(
+            db,
+            tool_name=tool_name,
+            arguments=args,
+            uid=uid,
+            cfg=cfg,
+            tool_call_id=tool_call_id,
+            actor_uid=actor_uid,
+        )
+        return json.dumps(result, ensure_ascii=False)
+    return await instance.execute(**args)
+
+
 async def process_single_tool(
     tool_call: Any,
     db: AsyncSession,
@@ -434,6 +495,7 @@ async def process_single_tool(
     execution_scope: str | None = None,
     tool_schemas: list[dict[str, Any]] | None = None,
     tool_workflow: str | None = None,
+    actor_uid: str | None = None,
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
@@ -451,13 +513,15 @@ async def process_single_tool(
             execution_scope=execution_scope,
             tool_workflow=tool_workflow,
         )
-    if tool_schemas is None:
+    is_system_action = get_tool_action_request(tool_name, args) is not None
+    if tool_schemas is None or is_system_action:
         tool_schemas, _ = await get_tools_for_profile(
             db,
             profile,
             allow_background=allow_background_submission,
             goal_mode=goal_mode,
             tool_workflow=resolved_tool_workflow,
+            actor_uid=actor_uid,
         )
 
     precheck_errors = prevalidate_tool_round(
@@ -526,7 +590,18 @@ async def process_single_tool(
                     )
                     instance.set_runtime_context(dispatch_context=dispatch_context)
 
-                task = asyncio.create_task(instance.execute(**args))
+                task = asyncio.create_task(
+                    _execute_tool_request(
+                        instance,
+                        tool_name=tool_name,
+                        args=args,
+                        db=db,
+                        uid=uid,
+                        cfg=cfg,
+                        tool_call_id=tool_call.id,
+                        actor_uid=actor_uid,
+                    )
+                )
                 if active_tasks is not None:
                     active_tasks.add(task)
 

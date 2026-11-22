@@ -20,6 +20,7 @@ from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus
 from app.models.message import InternalToolCall, MessageRole
 from app.models.profile import Profile, ProfileConfig
+from app.models.user import User
 
 OLD_TOOL_NAMES = (
     "firecrawl_search",
@@ -65,13 +66,15 @@ def _task(
 @pytest_asyncio.fixture
 async def background_task_session_factory(database_factory) -> AsyncGenerator[async_sessionmaker[AsyncSession]]:
     async with database_factory(
-        tables=[BackgroundTask.__table__],
+        tables=[User.__table__, BackgroundTask.__table__],
         name="background-task-tool.sqlite3",
     ) as session_factory:
         created_at = datetime(2024, 1, 1)
         async with session_factory() as db:
             db.add_all(
                 [
+                    User(uid="owner", username="background_owner"),
+                    User(uid="peer", username="background_peer"),
                     _task(task_id=1, uid="owner", session_id="owner-main", status=BackgroundTaskStatus.PENDING, created_at=created_at),
                     _task(task_id=2, uid="owner", session_id="owner-main", status=BackgroundTaskStatus.RUNNING, created_at=created_at + timedelta(seconds=1)),
                     _task(task_id=3, uid="owner", session_id="owner-main", status=BackgroundTaskStatus.SUCCEEDED, created_at=created_at + timedelta(seconds=2)),

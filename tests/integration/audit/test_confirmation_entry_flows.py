@@ -16,7 +16,7 @@ from app.adapters.weixin_openclaw.adapter import WeixinOpenClawAdapter
 from app.adapters.weixin_openclaw.config import WeixinOpenClawConfig
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawMessage
 from app.api.v1 import chat as chat_api
-from app.core.audit import confirmation
+from app.core import confirmation
 from app.core.constants import (
     ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER,
     ERR_AUDIT_ROUND_BLOCKED,
@@ -145,7 +145,7 @@ def entry_dependencies(monkeypatch):
         monkeypatch.setattr(f"{module_name}.ChatDispatcher.validate_initial_message_before_save", validate)
     monkeypatch.setattr("app.adapters.chat_web.ensure_web_session_writable", ensure_writable)
     monkeypatch.setattr("app.core.session_reply_queue.manager_enqueue.session_crud.upsert_profile", upsert_profile)
-    monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
+    monkeypatch.setattr("app.core.confirmation.events.send_session_event", send_event)
     monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.generate_session_title_for_selected_profile", generate_title)
     return profile
 
@@ -876,7 +876,7 @@ async def test_weixin_platform_flushes_old_batch_before_independent_decision(
         monkeypatch.setattr(app.core.crypto, "get_channel_encryption_key", lambda: system_secrets.channel_encryption_key)
         monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.AsyncSessionLocal", factory)
         monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.generate_session_title_for_selected_profile", _noop_async)
-        monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", _noop_async)
+        monkeypatch.setattr("app.core.confirmation.events.send_session_event", _noop_async)
 
         data = await _seed_platform_data(
             factory,

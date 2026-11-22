@@ -64,6 +64,7 @@ async def test_process_single_tool_truncates_large_result_to_half_context_window
         turn=1,
         uid="user-1",
         context_window_k=context_window_k,
+        tool_schemas=[SHELL_TOOL_SCHEMA],
     )
 
     payload = json.loads(result.content)
@@ -109,6 +110,7 @@ async def test_process_single_tool_spills_large_result_and_returns_absolute_path
         turn=1,
         uid="user-1",
         context_window_k=1,
+        tool_schemas=[SHELL_TOOL_SCHEMA],
     )
 
     payload = json.loads(result.content)
@@ -157,6 +159,7 @@ async def test_process_single_tool_moves_result_post_processing_off_event_loop(m
             session_id="session-1",
             turn=1,
             uid="user-1",
+            tool_schemas=[SHELL_TOOL_SCHEMA],
         )
     )
     await asyncio.sleep(0.02)
@@ -204,6 +207,7 @@ async def test_process_single_tool_returns_failure_for_missing_required_argument
         session_id="session-1",
         turn=1,
         uid="user-1",
+        tool_schemas=[SHELL_TOOL_SCHEMA],
     )
 
     payload = json.loads(result.content)
