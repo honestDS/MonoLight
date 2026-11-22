@@ -35,7 +35,16 @@ READ_MULTIMODAL_FILE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": READ_MULTIMODAL_FILE_TOOL_NAME,
-        "description": ("Read an existing multimodal file from the hard drive. After success, the system appends the tool artifact to the next model request; it is not new user input. Images and audio are sent to the model. Video explicitly reports that local reading is not implemented."),
+        "description": (
+            "Read an existing multimodal file from the hard drive. "
+            "After success, the system appends the tool artifact to the next model request; it is not new user input. "
+            "Images and audio are sent to the model. "
+            "Video explicitly reports that local reading is not implemented. "
+            "After receiving an image in the next request, "
+            "extract the task-relevant information and write it in the assistant response body, "
+            "not only in private reasoning or tool arguments, "
+            "so it can be reread in later turns when the image is no longer attached."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
