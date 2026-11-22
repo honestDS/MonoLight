@@ -78,6 +78,7 @@ from .interactive_helpers import (
     _handle_stream_reasoning,
     _save_execution_checkpoint,
     build_pending_multimodal_input_message,
+    collect_current_resume_message_ids,
     collect_pending_multimodal_file_inputs,
 )
 
@@ -105,6 +106,7 @@ async def generate_interactive_turn(
     tool_choice: str = "auto",
     response_id: str,
     cache_key: str | None = None,
+    preserve_resume_context: bool = False,
 ) -> InteractiveGenerationResult:
     if cache_key is None:
         cache_key = build_session_cache_key(uid=state.uid, session_id=state.session_id)
@@ -214,6 +216,9 @@ async def generate_interactive_turn(
     _refresh_goal_mode_messages()
 
     pending_resume_ids = set(getattr(state.checkpoint_state, "pending_resume_message_ids", []))
+    protected_resume_ids = set(pending_resume_ids)
+    if preserve_resume_context:
+        protected_resume_ids.update(collect_current_resume_message_ids(state.messages, state.turn_messages))
     if pending_resume_ids:
         resume_messages: list[InternalMessage] = []
         other_messages: list[InternalMessage] = []
@@ -289,6 +294,7 @@ async def generate_interactive_turn(
                     cfg=state.cfg,
                     messages=state.messages,
                     protected_tool_call_ids={item["tool_call_id"] for item in collect_pending_multimodal_file_inputs(state.messages)},
+                    protected_message_ids=protected_resume_ids,
                     trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
                     fixed_upper_message_id=state.checkpoint_state.upper_message_id,
                     context_window_k=state.chat_params["context_window_k"],
@@ -568,6 +574,7 @@ async def generate_interactive_turn(
                         cfg=state.cfg,
                         messages=state.messages,
                         protected_tool_call_ids={item["tool_call_id"] for item in collect_pending_multimodal_file_inputs(state.messages)},
+                        protected_message_ids=protected_resume_ids,
                         trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
                         fixed_upper_message_id=state.checkpoint_state.upper_message_id,
                         context_window_k=state.chat_params["context_window_k"],

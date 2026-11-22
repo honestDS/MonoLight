@@ -23,8 +23,29 @@ from app.core.utils.dispatcher.helpers import process_single_tool_with_isolated_
 from app.core.utils.dispatcher.markdown_instruction import ensure_user_runtime_instructions
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.message_assembler import MessageAssembler
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.profile import ToolConfig
+
+
+def collect_current_resume_message_ids(
+    messages: list[InternalMessage],
+    turn_messages: list[InternalMessage],
+) -> list[int]:
+    turn_message_ids = {message.id for message in turn_messages if message.role in {MessageRole.ASSISTANT, MessageRole.TOOL} and isinstance(message.id, int) and not isinstance(message.id, bool) and message.id > 0}
+    notification_types = {MessageType.SUBAGENT_RESULT, MessageType.BACKGROUND_TASK_RESULT}
+    message_ids: list[int] = []
+    for message in reversed(messages):
+        is_resume_notification = message.role == MessageRole.USER and message.type in notification_types
+        if is_resume_notification and isinstance(message.id, int) and not isinstance(message.id, bool) and message.id > 0:
+            message_ids.append(message.id)
+            continue
+        if is_resume_notification:
+            continue
+        if message.role in {MessageRole.ASSISTANT, MessageRole.TOOL} and isinstance(message.id, int) and not isinstance(message.id, bool) and message.id > 0 and message.id in turn_message_ids:
+            continue
+        break
+    message_ids.reverse()
+    return message_ids
 
 
 def collect_pending_multimodal_file_inputs(messages: list[InternalMessage]) -> list[dict[str, str]]:

@@ -10,6 +10,7 @@ from app.core.constants import (
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_SESSION_REPLY_LEASE_LOST,
     ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT,
+    GOAL_EXECUTION_PHASE_RUNNING,
     SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
 )
 from app.core.crud.profile.profile import profile_crud
@@ -22,6 +23,7 @@ from app.core.crud.session.reply_work_item import (
 from app.core.crud.session.session import session_crud
 from app.core.crud.session.subagent import subagent_crud
 from app.core.dispatchers.dispatcher import ChatDispatcher
+from app.core.dispatchers.interactive_helpers import collect_current_resume_message_ids
 from app.core.i18n import t
 from app.core.message_platforms.notifier import send_session_stream_event
 from app.core.prompts import SUBAGENT_BOARD_REVIEW_INSTRUCTION_PROMPT, SUBAGENT_EXECUTION_GUIDANCE_PROMPT
@@ -543,6 +545,41 @@ async def _finalize_interactive_work_response_metadata(
     return response
 
 
+def _prepare_subagent_board_review_resume_state(
+    checkpoint: dict[str, Any],
+) -> dict[str, Any]:
+    if checkpoint.get("pending_generation") is not None and checkpoint.get("yield_to_user_pending") is not True:
+        return checkpoint
+
+    prepared_checkpoint = dict(checkpoint)
+    prepared_checkpoint["reload_history"] = True
+    if prepared_checkpoint.get("yield_to_user_pending") is not True:
+        return prepared_checkpoint
+
+    messages = [InternalMessage.model_validate(item) for item in checkpoint.get("messages", [])]
+    turn_messages = [InternalMessage.model_validate(item) for item in checkpoint.get("turn_messages", [])]
+    current_resume_message_ids = collect_current_resume_message_ids(messages, turn_messages)
+
+    pending_resume_message_ids: list[int] = []
+    seen_message_ids: set[int] = set()
+    for message_id in checkpoint.get("pending_resume_message_ids", []):
+        if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0 or message_id in seen_message_ids:
+            continue
+        seen_message_ids.add(message_id)
+        pending_resume_message_ids.append(message_id)
+    for message_id in current_resume_message_ids:
+        if message_id in seen_message_ids:
+            continue
+        seen_message_ids.add(message_id)
+        pending_resume_message_ids.append(message_id)
+
+    prepared_checkpoint["pending_resume_message_ids"] = pending_resume_message_ids
+    prepared_checkpoint.pop("pending_generation", None)
+    prepared_checkpoint["current_turn"] = 0
+    prepared_checkpoint["execution_phase"] = GOAL_EXECUTION_PHASE_RUNNING
+    return prepared_checkpoint
+
+
 async def _dispatch_interactive_work(
     db,
     *,
@@ -572,6 +609,8 @@ async def _dispatch_interactive_work(
     if scheduled_task_work:
         request_purpose = ProviderUsageType.SCHEDULED_TASK
     is_independent_work = (await session_reply_work_item_crud.get_message_work_id(db, work)) is not None
+    if is_subagent_board_review and work.subagent_id is None and not is_independent_work and execution_resume_state is not None:
+        execution_resume_state = _prepare_subagent_board_review_resume_state(execution_resume_state)
     update_session_context = not scheduled_task_work and not is_independent_work and frozen_context_messages is None
     stream_requested = False if is_independent_work else bool((work.execution_state or {}).get("stream_requested"))
     context_summary_events_requested = False if is_independent_work else bool((work.execution_state or {}).get("context_summary_events_requested"))
@@ -715,18 +754,27 @@ async def _dispatch_interactive_work(
         )
 
     response = None
+    buffered_generation_events: list[dict[str, Any]] = []
     async for event in ChatDispatcher.dispatch_stream(
         **dispatch_kwargs,
         context_summary_events_requested=context_summary_events_requested,
         raise_errors=True,
     ):
         event_type = event.get("type")
+        if is_subagent_board_review and event_type in {"content", "reasoning", "agent_loop_output"}:
+            buffered_generation_events.append(event)
+            continue
         if event_type == "error":
             error_message = str(event.get("message") or t(ERR_LLM_UNEXPECTED_ERROR))
             raise RuntimeError(error_message)
+        if event_type == "turn_end":
+            for buffered_event in buffered_generation_events:
+                await _publish_interactive_work_stream_event(stream_state, buffered_event)
+            buffered_generation_events.clear()
         response_id = event.get("response_id")
         if event_type in {"done", "external_wait", "execution_yield"}:
             response = event.get("response")
+            buffered_generation_events.clear()
         if event_type == "done" and isinstance(response, dict) and isinstance(response_id, str) and response_id:
             response = {**response, "response_id": response_id}
         if event_type in {"done", "external_wait", "execution_yield"}:

@@ -86,6 +86,56 @@ __all__ = [
 logger = get_logger(__name__)
 
 
+async def _restore_pending_resume_messages(
+    db: AsyncSession,
+    messages: list[InternalMessage],
+    pending_message_ids: list[Any],
+    uid: str,
+    session_id: str,
+    profile_id: int,
+    execution_scope: str | None,
+    frozen_context_messages: list[InternalMessage] | None,
+    upper_message_id: int | None,
+) -> int | None:
+    existing_message_ids = {item.id for item in messages if isinstance(item.id, int) and not isinstance(item.id, bool) and item.id > 0}
+    pending_rows = []
+    for pending_message_id in pending_message_ids:
+        if not isinstance(pending_message_id, int) or isinstance(pending_message_id, bool) or pending_message_id <= 0:
+            continue
+        if pending_message_id in existing_message_ids:
+            continue
+        pending_row = await message_crud.get(db, pending_message_id)
+        if pending_row is None:
+            continue
+        if pending_row.uid != uid or pending_row.session_id != session_id or pending_row.profile_id != profile_id:
+            continue
+        if pending_row.type not in {MessageType.BACKGROUND_TASK_RESULT, MessageType.SUBAGENT_RESULT}:
+            continue
+        pending_rows.append(pending_row)
+        existing_message_ids.add(pending_message_id)
+
+    if pending_rows:
+        messages.extend(parse_db_messages_to_internal(pending_rows))
+
+    if execution_scope != END_SESSION_SCOPE_FOREGROUND or frozen_context_messages is not None:
+        return upper_message_id
+
+    latest_user_message_id = None
+    for item in messages:
+        if item.role != MessageRole.USER:
+            continue
+        if not isinstance(item.id, int) or isinstance(item.id, bool) or item.id <= 0:
+            continue
+        if latest_user_message_id is None or item.id > latest_user_message_id:
+            latest_user_message_id = item.id
+
+    if latest_user_message_id is None:
+        return upper_message_id
+    if isinstance(upper_message_id, int) and not isinstance(upper_message_id, bool) and upper_message_id > latest_user_message_id:
+        return upper_message_id
+    return latest_user_message_id
+
+
 async def dispatch_interactive(
     db: AsyncSession,
     message: str | list[dict[str, Any]],
@@ -468,19 +518,17 @@ async def dispatch_interactive(
                                 )
                         else:
                             state.messages = [InternalMessage.model_validate(item) for item in resume_state.get("messages", [])]
-                        if frozen_context_messages is not None:
-                            existing_message_ids = {item.id for item in state.messages if isinstance(item.id, int) and not isinstance(item.id, bool) and item.id > 0}
-                            pending_rows = []
-                            for pending_message_id in resume_state.get("pending_resume_message_ids", []):
-                                if not isinstance(pending_message_id, int) or isinstance(pending_message_id, bool) or pending_message_id <= 0 or pending_message_id in existing_message_ids:
-                                    continue
-                                pending_row = await message_crud.get(db, pending_message_id)
-                                if pending_row is None or pending_row.uid != uid or pending_row.session_id != session_id or pending_row.profile_id != profile.id or pending_row.type != MessageType.BACKGROUND_TASK_RESULT:
-                                    continue
-                                pending_rows.append(pending_row)
-                                existing_message_ids.add(pending_message_id)
-                            if pending_rows:
-                                state.messages.extend(parse_db_messages_to_internal(pending_rows))
+                        state.checkpoint_state.upper_message_id = await _restore_pending_resume_messages(
+                            db,
+                            state.messages,
+                            state.checkpoint_state.pending_resume_message_ids,
+                            uid,
+                            session_id,
+                            profile.id,
+                            state.execution_scope,
+                            frozen_context_messages,
+                            state.checkpoint_state.upper_message_id,
+                        )
                     else:
                         state.messages = [InternalMessage.model_validate(item) for item in resume_state.get("messages", [])]
                     state.current_turn = int(resume_state.get("current_turn", 0))
@@ -635,6 +683,7 @@ async def dispatch_interactive(
                             tool_choice="auto",
                             response_id=response_id,
                             cache_key=cache_key,
+                            preserve_resume_context=execution_yield_checker is not None,
                         )
                         if await _yield_after_generation_if_requested(response_id, generation_result):
                             return {"status": "yielded_to_user"}

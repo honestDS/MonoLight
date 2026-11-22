@@ -921,13 +921,18 @@ async def test_board_post_during_parent_review_is_reconciled_without_duplicate_d
                 )
             )
             review_provider_start = len(runtime.provider_payloads)
-            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[review_call]))
+            runtime.outputs.extend(
+                [
+                    InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[board_read_call]),
+                    InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[review_call]),
+                ]
+            )
             parent_review_result = await runtime.run_next(independent_only=False)
             assert parent_review_result is not None
             assert parent_review_result.id == case.origin_work_id
             assert parent_review_result.status == SessionReplyWorkStatus.READY_FOR_LLM
             review_provider_payloads = runtime.provider_payloads[review_provider_start:]
-            assert len(review_provider_payloads) == 1
+            assert len(review_provider_payloads) == 2
             assert not runtime.outputs
 
             async with runtime.factory() as db:
@@ -955,7 +960,6 @@ async def test_board_post_during_parent_review_is_reconciled_without_duplicate_d
                 after_duplicate_delivery = await _notification_snapshot(db, session_id=runtime.session_id)
                 assert after_duplicate_delivery == before_duplicate_delivery
 
-            parent_review_payloads = [*yielded_parent_payloads, *review_provider_payloads]
             board_read_outputs = _provider_function_call_output_payloads(
                 review_provider_payloads[-1],
                 name=board_read_call.name,
@@ -976,7 +980,9 @@ async def test_board_post_during_parent_review_is_reconciled_without_duplicate_d
                     },
                 ]
             }
-            assert user_message not in json.dumps(parent_review_payloads, ensure_ascii=False)
+            assert user_message not in json.dumps(yielded_parent_payloads, ensure_ascii=False)
+            assert user_message in json.dumps(review_provider_payloads, ensure_ascii=False)
+            assert user_final in json.dumps(review_provider_payloads, ensure_ascii=False)
 
             runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=child_final))
             release_second_post.set()

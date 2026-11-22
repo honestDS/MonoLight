@@ -88,7 +88,9 @@ async def apply_context_summary_checkpoint(
     reserved_tokens: int = 0,
     force: bool = False,
     protected_tool_call_ids: set[str] | None = None,
+    protected_message_ids: set[int] | None = None,
 ) -> list[InternalMessage]:
+    protected_ids = set(protected_message_ids or set())
     effective_trigger_mode = trigger_mode
     effective_fixed_upper_message_id = fixed_upper_message_id
     if trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE:
@@ -107,10 +109,13 @@ async def apply_context_summary_checkpoint(
         for message in messages
         if message.role != MessageRole.SYSTEM
         and not is_context_summary_message(message)
-        and _is_after_fixed_upper(
-            message,
-            trigger_mode=effective_trigger_mode,
-            fixed_upper_message_id=effective_fixed_upper_message_id,
+        and (
+            _is_after_fixed_upper(
+                message,
+                trigger_mode=effective_trigger_mode,
+                fixed_upper_message_id=effective_fixed_upper_message_id,
+            )
+            or message.id in protected_ids
         )
     ]
     fixed_request_messages = [*system_messages, *uncovered_messages]
@@ -177,7 +182,7 @@ async def apply_context_summary_checkpoint(
             continue
         if message.id in state.late_cancelled_result_ids:
             continue
-        if message.id is not None and message.id <= (state.message_id or 0):
+        if message.id is not None and message.id <= (state.message_id or 0) and message.id not in protected_ids:
             continue
         retained_messages.append(message)
     return [

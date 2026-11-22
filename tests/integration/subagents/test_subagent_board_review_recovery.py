@@ -28,7 +28,7 @@ from tests.integration.subagents.subagent_board_workflow_support import (
 @pytest.mark.parametrize("with_send_message", [False, True], ids=["original-parent", "send-message-parent"])
 @pytest.mark.parametrize("recover_before_release", [False, True], ids=["release", "recover-expired"])
 @pytest.mark.asyncio
-async def test_board_review_final_text_yields_to_user_and_resumes_without_extra_model_call(
+async def test_board_review_final_text_yields_to_user_and_resumes_with_fresh_model_call(
     image_chat_runtime,
     monkeypatch: pytest.MonkeyPatch,
     protocol: str,
@@ -40,6 +40,7 @@ async def test_board_review_final_text_yields_to_user_and_resumes_without_extra_
 
     case_suffix = f"{protocol}-{stream_delivery}-{with_send_message}-{recover_before_release}"
     child_final = f"inspection-board-yield-child-final-{case_suffix}"
+    stale_parent_final = f"inspection-board-yield-stale-parent-final-{case_suffix}"
     parent_final = f"inspection-board-yield-parent-final-{case_suffix}"
     user_message = f"inspection-board-yield-user-message-{case_suffix}"
     second_user_message = f"inspection-board-yield-second-user-message-{case_suffix}"
@@ -157,7 +158,7 @@ async def test_board_review_final_text_yields_to_user_and_resumes_without_extra_
                     delivered_event_sequence_by_work_id=delivered_event_sequence_by_work_id,
                 )
             ) as session_stream:
-                runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_final))
+                runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=stale_parent_final))
                 parent_provider_start = len(runtime.provider_payloads)
                 parent_task = asyncio.create_task(runtime.run_next(independent_only=False))
                 await asyncio.wait_for(parent_request_started.wait(), timeout=5)
@@ -211,7 +212,7 @@ async def test_board_review_final_text_yields_to_user_and_resumes_without_extra_
                         assert isinstance(interrupted_pending_result, dict), f"work.error={interrupted_parent.error!r}"
                         interrupted_pending_message = interrupted_pending_result.get("message")
                         assert isinstance(interrupted_pending_message, dict), f"work.error={interrupted_parent.error!r}"
-                        assert interrupted_pending_message.get("content") == parent_final, f"work.error={interrupted_parent.error!r}"
+                        assert interrupted_pending_message.get("content") == stale_parent_final, f"work.error={interrupted_parent.error!r}"
 
                         interrupted_parent.lock_until = 0
                         await db.commit()
@@ -271,7 +272,7 @@ async def test_board_review_final_text_yields_to_user_and_resumes_without_extra_
                     assert isinstance(pending_result, dict)
                     pending_message = pending_result.get("message")
                     assert isinstance(pending_message, dict)
-                    assert pending_message.get("content") == parent_final
+                    assert pending_message.get("content") == stale_parent_final
                     assert user_message not in json.dumps(checkpoint, ensure_ascii=False)
                     pending_generation_before_second = deepcopy(pending_generation)
 
@@ -284,7 +285,7 @@ async def test_board_review_final_text_yields_to_user_and_resumes_without_extra_
                                     Message.profile_id == runtime.profile.id,
                                     Message.role == MessageRole.ASSISTANT,
                                     Message.type == MessageType.TEXT,
-                                    Message.content == parent_final,
+                                    Message.content == stale_parent_final,
                                 )
                             )
                         )
@@ -297,6 +298,7 @@ async def test_board_review_final_text_yields_to_user_and_resumes_without_extra_
                     assert not any(event[2].get("type") == "done" and event[2].get("work_id") == review_parent_work_id for event in session_events)
                     parent_stream_rows = (await db.execute(select(SessionReplyStreamEvent).where(SessionReplyStreamEvent.work_id == review_parent_work_id))).scalars().all()
                     assert not any(row.event.get("type") == "done" and row.work_id == review_parent_work_id for row in parent_stream_rows)
+                    assert not any(row.work_id == review_parent_work_id and stale_parent_final in json.dumps(row.event, ensure_ascii=False) for row in parent_stream_rows)
 
                 if stream_delivery:
                     await session_stream.aclose()
@@ -383,13 +385,20 @@ async def test_board_review_final_text_yields_to_user_and_resumes_without_extra_
                     assert user_message not in json.dumps(checkpoint, ensure_ascii=False)
                     assert second_user_message not in json.dumps(checkpoint, ensure_ascii=False)
 
-                provider_count = len(runtime.provider_payloads)
                 assert not runtime.outputs
+                parent_provider_start = len(runtime.provider_payloads)
+                runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_final))
                 parent_done = await asyncio.wait_for(runtime.run_next(independent_only=False), timeout=5)
                 assert parent_done is not None
                 assert parent_done.id == review_parent_work_id
                 assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED, f"work.error={parent_done.error!r}"
-                assert len(runtime.provider_payloads) == provider_count
+                parent_provider_payloads = runtime.provider_payloads[parent_provider_start:]
+                assert len(parent_provider_payloads) == 1
+                parent_provider_dump = json.dumps(parent_provider_payloads, ensure_ascii=False)
+                assert user_message in parent_provider_dump
+                assert second_user_message in parent_provider_dump
+                assert user_final in parent_provider_dump
+                assert child_final in parent_provider_dump
                 assert not runtime.outputs
 
                 parent_status = await asyncio.wait_for(runtime.client.get(f"/api/v1/chat/reply-works/{review_parent_work_id}"), timeout=5)
@@ -413,14 +422,14 @@ async def test_board_review_final_text_yields_to_user_and_resumes_without_extra_
                                     Message.profile_id == runtime.profile.id,
                                     Message.role == MessageRole.ASSISTANT,
                                     Message.type == MessageType.TEXT,
-                                    Message.content == parent_final,
+                                    Message.content.in_([parent_final, stale_parent_final]),
                                 )
                             )
                         )
                         .scalars()
                         .all()
                     )
-                    assert len(final_messages) == 1
+                    assert [message.content for message in final_messages] == [parent_final]
 
                 if stream_delivery:
                     assert user_stream_task is not None
@@ -448,6 +457,7 @@ async def test_board_review_final_text_yields_to_user_and_resumes_without_extra_
                     event_sequences = [event["event_sequence_no"] for event in consumed_events if event.get("work_id") == work_id and type(event.get("event_sequence_no")) is int]
                     assert event_sequences == sorted(event_sequences)
                     assert len(event_sequences) == len(set(event_sequences))
+                assert stale_parent_final not in json.dumps(consumed_events, ensure_ascii=False)
         finally:
             release_parent_request.set()
             monkeypatch.setattr(transformer, "_post_json", fixture_post_json)
@@ -844,7 +854,7 @@ async def test_subagent_board_review_resume_clears_yield_marker_before_audit_and
                     assert parent.execution_state.get("subagent_board_review_pending") is True
                     checkpoint = await session_reply_work_item_crud.get_checkpoint(recovery_db, case.origin_work_id)
                     assert isinstance(checkpoint, dict)
-                    assert isinstance(checkpoint.get("pending_generation"), dict)
+                    assert "pending_generation" not in checkpoint
                     assert checkpoint.get("yield_to_user_pending") is not True
                     stream_events = (await recovery_db.execute(select(SessionReplyStreamEvent).where(SessionReplyStreamEvent.work_id == case.origin_work_id).order_by(SessionReplyStreamEvent.sequence_no))).scalars().all()
                     assert any(event.event.get("type") != "work_suspended" for event in stream_events)
@@ -880,14 +890,19 @@ async def test_subagent_board_review_resume_clears_yield_marker_before_audit_and
 
             monkeypatch.setattr(interactive_tools_module, "prepare_tool_round", observe_audit)
             parent_resume_provider_start = len(runtime.provider_payloads)
+            runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[write_call]))
             runtime.outputs.append(InternalMessage(role=MessageRole.ASSISTANT, content=parent_final))
             parent_done = await asyncio.wait_for(runtime.run_next(independent_only=False), timeout=5)
             assert parent_done is not None
             assert parent_done.id == case.origin_work_id
             assert parent_done.status == SessionReplyWorkStatus.SUCCEEDED
-            assert len(runtime.provider_payloads[parent_resume_provider_start:]) == 1
+            resumed_provider_payloads = runtime.provider_payloads[parent_resume_provider_start:]
+            assert len(resumed_provider_payloads) == 2
+            resumed_provider_dump = json.dumps(resumed_provider_payloads[0], ensure_ascii=False)
+            assert user_message in resumed_provider_dump
+            assert user_final in resumed_provider_dump
             assert parent_resume_provider_start == user_provider_start + 1
-            assert len(runtime.provider_payloads[parent_provider_start:]) == 3
+            assert len(runtime.provider_payloads[parent_provider_start:]) == 4
             assert not runtime.outputs
             assert len(observed_audits) == 1
             assert write_path.read_text(encoding="utf-8") == write_content
