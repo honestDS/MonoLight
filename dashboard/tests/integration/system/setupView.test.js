@@ -24,7 +24,7 @@ import {
   refreshSetupStatus,
   setupStatusState,
 } from '../../../src/router/setupGuard.js'
-import { defaultModelEntry } from '../../../src/constants/index.js'
+import { defaultModelEntry, defaultProfileConfigs } from '../../../src/constants/index.js'
 
 const setupViewSource = readFileSync(new URL('../../../src/views/SetupView.vue', import.meta.url), 'utf8')
 const setupViewScriptMatch = setupViewSource.match(/<script\s+setup(?:\s[^>]*)?>([\s\S]*?)<\/script>/)
@@ -196,6 +196,9 @@ globalThis.__module = {
   modelEntryStates,
   modelTestResults,
   profileGuideResource,
+  profileGuideForm,
+  profileGuideReady,
+  profileGuideStep,
   profileGuideAuditModelOptions,
   profileGuideActive,
   channelFormRef,
@@ -208,6 +211,8 @@ globalThis.__module = {
   removeModelEntry,
   handleModelIdInput,
   handleAdvancedSettingsInput,
+  loadProfileGuide,
+  saveProfileGuideStep,
   validateStep,
   testChatModel,
   detectModelMetadata,
@@ -226,6 +231,8 @@ globalThis.__module = {
     apiState,
     module,
     messages,
+    profileApi,
+    promptApi,
     router,
     storage,
     async flush() {
@@ -748,4 +755,68 @@ test('builds audit candidates from the complete request snapshot', async t => {
       model_id: 'submitted-b',
     },
   ])
+})
+
+test('loads the setup profile guide prompt, saves edits, and reloads them', async t => {
+  const harness = createHarness(t)
+  const { module, profileApi, promptApi } = harness
+  const profileId = 47
+  const promptId = 53
+  const defaultPromptContent = '  backend default template\nwith preserved spacing  \n'
+  const editedPromptContent = ' \n  edited prompt text\nwith preserved spacing  \n'
+  const profileUpdates = []
+  const promptUpdates = []
+  let storedPrompt = {
+    id: promptId,
+    name: 'default',
+    content: defaultPromptContent,
+  }
+
+  module.profileGuideResource.profile_id = profileId
+  profileApi.list = async () => ({
+    data: {
+      data: {
+        items: [{
+          id: profileId,
+          prompt_id: promptId,
+          configs: normalize(defaultProfileConfigs()),
+        }],
+        meta: { tool_options: [] },
+      },
+    },
+  })
+  profileApi.update = async (id, payload) => {
+    profileUpdates.push({ id, payload })
+    return { data: { data: { configs: payload.configs } } }
+  }
+  promptApi.list = async () => ({
+    data: { data: { items: [{ ...storedPrompt }] } },
+  })
+  promptApi.update = async (id, payload) => {
+    promptUpdates.push({ id, payload: { ...payload } })
+    storedPrompt = { ...storedPrompt, ...payload }
+    return { data: { data: { ...storedPrompt } } }
+  }
+
+  await module.loadProfileGuide()
+
+  assert.equal(module.profileGuideReady.value, true)
+  assert.equal(module.profileGuideForm.prompt.id, promptId)
+  assert.equal(module.profileGuideForm.prompt.content, defaultPromptContent)
+  assert.equal(module.profileGuideStep.value, 0)
+
+  module.profileGuideForm.prompt.content = editedPromptContent
+  await module.saveProfileGuideStep()
+
+  assert.equal(profileUpdates.length, 1)
+  assert.equal(profileUpdates[0].id, profileId)
+  assert.deepEqual(normalize(profileUpdates[0].payload.configs), normalize(defaultProfileConfigs()))
+  assert.deepEqual(promptUpdates, [{ id: promptId, payload: { content: editedPromptContent } }])
+  assert.equal(module.profileGuideStep.value, 1)
+
+  await module.loadProfileGuide()
+
+  assert.equal(module.profileGuideReady.value, true)
+  assert.equal(module.profileGuideForm.prompt.id, promptId)
+  assert.equal(module.profileGuideForm.prompt.content, editedPromptContent)
 })

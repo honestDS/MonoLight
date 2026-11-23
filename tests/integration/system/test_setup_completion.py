@@ -33,6 +33,7 @@ from app.core.constants import (
 )
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
+from app.core.prompts import DEFAULT_PROMPT_CONTENT
 from app.core.security import verify_password
 from app.core.system_secrets import SystemSecrets, SystemSecretsError
 from app.models.channel import ENCRYPTED_API_KEY_PREFIX, ModelChannel, ModelProtocol, ModelUsage
@@ -488,6 +489,7 @@ async def test_setup_complete_returns_token_data_and_creates_initial_records(
     prompts = database["prompts"]
     assert len(prompts) == 1
     assert prompts[0].name == "default"
+    assert prompts[0].content == DEFAULT_PROMPT_CONTENT
 
     profiles = database["profiles"]
     assert len(profiles) == 1

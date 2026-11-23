@@ -22,6 +22,7 @@ from app.core.crud.profile.profile import profile_crud
 from app.core.crud.profile.prompt import prompt_crud
 from app.core.crud.system.setting import system_setting_crud
 from app.core.i18n import t
+from app.core.prompts import DEFAULT_PROMPT_CONTENT
 from app.models.profile import (
     ProfileConfig,
 )
@@ -59,7 +60,7 @@ async def ensure_default_profile_for_user(session: AsyncSession, uid: str | None
     if prompt_obj:
         prompt_obj = await prompt_crud.get_visible(session, prompt_obj.id, uid=uid, lock_for_reference_write=True)
     if not prompt_obj:
-        prompt_obj = await prompt_crud.create(session, obj_in={"name": "default", "content": "", "uid": uid}, commit=False)
+        prompt_obj = await prompt_crud.create(session, obj_in={"name": "default", "content": DEFAULT_PROMPT_CONTENT, "uid": uid}, commit=False)
 
     await profile_crud.create(
         session,

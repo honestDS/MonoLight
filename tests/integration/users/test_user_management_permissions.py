@@ -31,6 +31,7 @@ from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.knowledge_jobs.executor import KnowledgeJobExecutionContext, KnowledgeJobLeaseLostError
 from app.core.memory_jobs.executor import MemoryJobExecutionContext, MemoryJobLeaseLostError
+from app.core.prompts import DEFAULT_PROMPT_CONTENT
 from app.handler import register_handlers
 from app.models.audit import AuditRecord, AuditRecordStatus
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus
@@ -394,6 +395,7 @@ async def test_superuser_can_manage_accounts_and_protect_own_identity(
         assert profiles[0].is_default is True
         assert len(prompts) == 1
         assert prompts[0].uid == managed_uid
+        assert prompts[0].content == DEFAULT_PROMPT_CONTENT
         assert profiles[0].prompt_id == prompts[0].id
 
         updated = await client.post(

@@ -15,6 +15,7 @@ from app.core.crud.profile.prompt import prompt_crud
 from app.core.crud.system.setting import system_setting_crud
 from app.core.exceptions import ParameterException, ServerException
 from app.core.profile.validation import validate_channel_configs
+from app.core.prompts import DEFAULT_PROMPT_CONTENT
 from app.core.security import create_access_token, get_password_hash
 from app.models.channel import (
     ChannelCreate,
@@ -77,7 +78,7 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
         if prompt is None:
             prompt = await prompt_crud.create(
                 db,
-                obj_in={"name": "default", "content": "", "uid": admin.uid},
+                obj_in={"name": "default", "content": DEFAULT_PROMPT_CONTENT, "uid": admin.uid},
                 commit=False,
             )
 
