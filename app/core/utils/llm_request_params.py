@@ -9,6 +9,7 @@ from app.core.constants import (
     MEMORY_RECALL_PRECHECK_TOP_P,
     SESSION_TITLE_TOP_P,
 )
+from app.models.channel import get_model_tool_call_placeholder
 
 
 def build_session_cache_key(*, uid: str, session_id: str, subagent_id: str | None = None) -> str:
@@ -29,6 +30,8 @@ def clean_generation_params(
     """清理内部任务生成参数；思考等级由具体任务策略控制。"""
     cleaned = {key: value for key, value in params.items() if value is not None and key != "reasoning_effort"}
     normalized_protocol = protocol.strip().lower()
+    if normalized_protocol == "openai" and get_model_tool_call_placeholder(model_entry or {}):
+        cleaned["tool_call_placeholder"] = True
     configured_reasoning = (model_entry or {}).get("reasoning_effort")
 
     if configured_reasoning is not None and normalized_protocol in {"openai", "openai_responses"}:

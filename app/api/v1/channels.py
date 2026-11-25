@@ -417,6 +417,7 @@ async def test_channel_chat(
         "timeout": payload.timeout,
         "http_proxy": payload.http_proxy,
         "custom_headers": payload.advanced_settings.custom_headers,
+        "tool_call_placeholder": payload.advanced_settings.tool_call_placeholder,
     }
     first_char_latency_ms = None
     request_start = 0.0

@@ -143,7 +143,12 @@ class BaseTransformer(ABC):
         pass
 
     @classmethod
-    def to_internal_response(cls, provider_response: Any, default_model: str) -> InternalResponse:
+    def to_internal_response(
+        cls,
+        provider_response: Any,
+        default_model: str,
+        **kwargs: Any,
+    ) -> InternalResponse:
         """将厂商响应封装为内部标准响应，子类可覆写以保留协议细节。"""
         message = cls.from_provider(provider_response)
         if isinstance(provider_response, dict):

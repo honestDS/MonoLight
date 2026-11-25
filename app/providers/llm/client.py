@@ -10,6 +10,7 @@ from app.core.constants import (
     ERR_CHANNEL_MODEL_LIST_UNSUPPORTED,
     ERR_LLM_STREAM_TOOL_CALL_AMBIGUOUS,
     ERR_LLM_UNSUPPORTED_PROTOCOL,
+    TOOL_CALL_PLACEHOLDER,
 )
 from app.core.exceptions import LLMException
 from app.core.log import get_logger
@@ -532,7 +533,8 @@ class LLMClient:
         reasoning_chunks: list[str] = []
         generated_images_by_id: dict[str, InternalGeneratedImage] = {}
         normalized_protocol = protocol.lower()
-        content_callbacks_released = normalized_protocol != "openai"
+        preserve_tool_call_placeholder = kwargs.get("tool_call_placeholder") is True
+        content_callbacks_released = preserve_tool_call_placeholder or normalized_protocol != "openai"
         tool_call_assembler = _StreamToolCallAssembler(normalized_protocol)
         model = model_id
         usage: dict[str, Any] = {}
@@ -604,7 +606,7 @@ class LLMClient:
                 if normalized_protocol == "openai" and not content_callbacks_released:
                     deferred_content_chunks.append(content)
                     accumulated_content = "".join(content_chunks).strip()
-                    if not OpenAIChatCompletionsTransformer._TOOL_CALL_PLACEHOLDER.startswith(accumulated_content):
+                    if not TOOL_CALL_PLACEHOLDER.startswith(accumulated_content):
                         for deferred_content in deferred_content_chunks:
                             await on_content(deferred_content)
                         deferred_content_chunks.clear()
@@ -619,7 +621,7 @@ class LLMClient:
 
         tool_calls = tool_call_assembler.build()
         content = "".join(content_chunks)
-        is_tool_call_placeholder = normalized_protocol == "openai" and bool(tool_calls) and content.strip() == OpenAIChatCompletionsTransformer._TOOL_CALL_PLACEHOLDER
+        is_tool_call_placeholder = not preserve_tool_call_placeholder and normalized_protocol == "openai" and bool(tool_calls) and content.strip() == TOOL_CALL_PLACEHOLDER
         if deferred_content_chunks and not is_tool_call_placeholder:
             for deferred_content in deferred_content_chunks:
                 await on_content(deferred_content)
@@ -697,7 +699,11 @@ class LLMClient:
             **kwargs,
         )
 
-        internal_response = transformer.to_internal_response(raw_response, default_model=model_id)
+        internal_response = transformer.to_internal_response(
+            raw_response,
+            default_model=model_id,
+            tool_call_placeholder=kwargs.get("tool_call_placeholder") is True,
+        )
         normalized_message = internal_response.message.model_copy(
             update={"tool_calls": cls.normalize_tool_calls(internal_response.message.tool_calls)},
             deep=True,

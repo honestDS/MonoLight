@@ -97,7 +97,7 @@ def _has_content(value: Any) -> bool:
 def is_valid_recall_call(message: InternalMessage | None) -> bool:
     if message is None or message.role != MessageRole.ASSISTANT:
         return False
-    if _has_content(message.content) or _has_content(message.refusal):
+    if _has_content(message.content_without_tool_call_placeholder()) or _has_content(message.refusal):
         return False
     if len(message.tool_calls or []) != 1:
         return False

@@ -149,13 +149,22 @@ def _context(*, messages=None, turn_messages=None, boundary=42):
 
 @pytest.mark.parametrize(
     ("content", "refusal"),
-    [(None, None), ("", None), (" ", None), (None, ""), (None, " ")],
+    [
+        (None, None),
+        ("", None),
+        (" ", None),
+        (None, ""),
+        (None, " "),
+        ("[tool_call]", None),
+        (" \n[tool_call]\t", None),
+    ],
 )
-def test_recall_validators_accept_only_empty_text_and_one_valid_recall_call(content, refusal):
+def test_recall_validators_accept_empty_text_or_tool_placeholder_and_one_valid_recall_call(content, refusal):
     message = _assistant(content=content, refusal=refusal)
 
     assert precheck_module.response_is_valid(_response(message))
     assert persistence_module.is_valid_recall_call(message)
+    assert message.content == content
 
 
 def test_live_precheck_requires_knowledge_query_but_persisted_legacy_recall_remains_valid():
@@ -169,8 +178,17 @@ def test_live_precheck_requires_knowledge_query_but_persisted_legacy_recall_rema
     "message",
     [
         _assistant(content="assistant body"),
+        _assistant(content="before [tool_call] after"),
         _assistant(refusal="refused"),
+        _assistant(content="[tool_call]", refusal="refused"),
         _assistant(),
+        InternalMessage(role=MessageRole.ASSISTANT, content="[tool_call]", tool_calls=[]),
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            content="[tool_call]",
+            tool_calls=[_call("call-1"), _call("call-2")],
+        ),
+        _assistant(content="[tool_call]", name="unrelated_tool"),
         _assistant(
             arguments={
                 "operation": "create",

@@ -109,6 +109,8 @@ export default {
   description: '描述',
   description_placeholder: '可选描述',
   advanced_settings: '高级设置',
+  tool_call_placeholder: '工具调用占位符兼容',
+  tool_call_placeholder_hint: '模型输出不符预期可尝试开启此选项',
   custom_request_headers: '自定义请求头',
   fill_headers_template: '填入模板',
   custom_headers_json_object_error: '自定义请求头必须是有效的 JSON 对象。',

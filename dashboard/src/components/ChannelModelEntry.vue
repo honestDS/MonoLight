@@ -188,6 +188,17 @@
             <span>{{ $t('channels.advanced_settings') }}</span>
           </div>
         </template>
+        <el-form-item v-if="props.entry.usage === 'CHAT' && props.entry.protocol === 'OPENAI'">
+          <template #label>
+            {{ $t('channels.tool_call_placeholder') }}
+            <HelpTooltip :content="$t('channels.tool_call_placeholder_hint')" />
+          </template>
+          <el-switch
+            :model-value="props.entry.advanced_settings.tool_call_placeholder === true"
+            :aria-label="$t('channels.tool_call_placeholder')"
+            :disabled="props.locked"
+            @update:model-value="handleToolCallPlaceholderChange" />
+        </el-form-item>
         <div class="custom-request-headers-heading">
           <span class="custom-request-headers-title">{{ $t('channels.custom_request_headers') }}</span>
           <el-button size="small" type="primary" plain :disabled="props.locked" @click="emit('fill-headers-template')">
@@ -334,6 +345,11 @@ const handleReasoningEffortsChange = (values) => {
 
 const handleAdvancedSettingsInput = () => {
   emit('advanced-settings-input')
+  emit('test-config-change')
+}
+
+const handleToolCallPlaceholderChange = (value) => {
+  props.entry.advanced_settings.tool_call_placeholder = value
   emit('test-config-change')
 }
 

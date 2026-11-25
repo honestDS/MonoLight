@@ -26,7 +26,7 @@ from app.core.utils.request_token_baseline import (
     build_provider_request_usage_metadata,
     extract_provider_token_metrics,
 )
-from app.models.channel import ChannelConfig, ChannelRule, ModelChannel, resolve_model_protocol
+from app.models.channel import ChannelConfig, ChannelRule, ModelChannel, get_model_tool_call_placeholder, resolve_model_protocol
 from app.models.message import InternalMessage, InternalResponse
 from app.models.provider_usage import ProviderUsageType
 from app.providers.llm.client import LLMClient
@@ -103,6 +103,7 @@ async def generate_chat_with_fallback(
                 max_tokens=chat_params["max_tokens"],
                 tools=tools,
                 tool_choice=tool_choice,
+                tool_call_placeholder=get_model_tool_call_placeholder(model_entry),
                 protocol=protocol,
                 timeout=chat_params["chat_timeout"],
                 http_proxy=get_channel_http_proxy(chat_channel_obj),

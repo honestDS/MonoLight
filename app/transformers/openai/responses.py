@@ -203,7 +203,7 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
                 )
                 continue
 
-            content = cls._content_as_input(message.content)
+            content = cls._content_as_input(message.content_without_tool_call_placeholder())
             if content or (role != MessageRole.ASSISTANT.value and not message.tool_calls):
                 provider_items.append({"role": role, "content": content})
 
@@ -337,9 +337,9 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
         )
 
     @classmethod
-    def to_internal_response(cls, provider_response: Any, default_model: str) -> InternalResponse:
+    def to_internal_response(cls, provider_response: Any, default_model: str, **kwargs: Any) -> InternalResponse:
         if not isinstance(provider_response, dict):
-            return super().to_internal_response(provider_response, default_model)
+            return super().to_internal_response(provider_response, default_model, **kwargs)
         if provider_response.get("status") == "failed" or provider_response.get("error"):
             cls._raise_response_error(provider_response)
 

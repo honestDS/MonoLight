@@ -367,7 +367,7 @@ def response_is_valid(response: Any) -> bool:
     message = getattr(response, "message", None)
     if not isinstance(message, InternalMessage) or message.role != MessageRole.ASSISTANT:
         return False
-    if _has_content(message.content) or _has_content(message.refusal) or len(message.tool_calls or []) != 1:
+    if _has_content(message.content_without_tool_call_placeholder()) or _has_content(message.refusal) or len(message.tool_calls or []) != 1:
         return False
     tool_call = message.tool_calls[0]
     operation, error = validate_longterm_memory_arguments(tool_call.arguments)

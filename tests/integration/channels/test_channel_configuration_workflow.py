@@ -18,7 +18,7 @@ from app.core.crud.memory.store import memory_store_crud
 from app.core.i18n import t
 from app.core.security import get_current_user
 from app.handler import register_handlers
-from app.models.channel import ModelChannel
+from app.models.channel import ModelChannel, get_model_tool_call_placeholder
 from app.models.knowledge_base import KnowledgeBase
 from app.models.memory import (
     LongTermMemoryEmbeddingRevision,
@@ -193,6 +193,111 @@ async def test_channel_configuration_enforces_usage_protocol_contract(
             ("CHAT", protocol),
             ("IMAGE_GENERATION", "OPENAI_IMAGE"),
         ]
+
+
+@pytest.mark.asyncio
+async def test_channel_configuration_persists_model_tool_call_placeholder_setting(
+    channel_config_app: FastAPI,
+    channel_config_db: AsyncSession,
+) -> None:
+    first_model = _chat_model("placeholder-chat")
+    first_model["advanced_settings"] = {"custom_headers": {"X-Test": " preserved "}}
+    second_model = _chat_model("ordinary-chat")
+    source_models = [first_model, second_model]
+    stable_fields = (
+        "model_id",
+        "usage",
+        "protocol",
+        "context_window_k",
+        "max_tokens",
+        "temperature",
+        "top_p",
+        "is_enabled",
+        "description",
+    )
+    expected_stable_values = [{field: model[field] for field in stable_fields} for model in source_models]
+
+    def _assert_model_settings(model_ids: list[dict], *, first_enabled: bool) -> None:
+        assert len(model_ids) == 2
+        assert [{field: model[field] for field in stable_fields} for model in model_ids] == expected_stable_values
+        assert get_model_tool_call_placeholder(model_ids[0]) is first_enabled
+        assert get_model_tool_call_placeholder(model_ids[1]) is False
+        assert model_ids[0]["advanced_settings"]["custom_headers"] == {"x-test": "preserved"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=channel_config_app),
+        base_url="http://test",
+    ) as client:
+        created = _assert_standard(
+            await client.post(
+                "/api/v1/channels/create",
+                json={
+                    "name": "placeholder-channel",
+                    "api_key": "placeholder-api-key",
+                    "base_url": "https://llm.example/v1",
+                    "is_active": True,
+                    "model_ids": source_models,
+                },
+            ),
+            200,
+        )
+        channel_id = created["data"]["id"]
+        _assert_model_settings(created["data"]["model_ids"], first_enabled=False)
+
+        initial_get = _assert_standard(
+            await client.get("/api/v1/channels/get", params={"channel_id": channel_id}),
+            200,
+        )
+        persisted_channel = await channel_crud.get(channel_config_db, channel_id)
+        assert persisted_channel is not None
+        assert initial_get["data"]["model_ids"] == created["data"]["model_ids"]
+        assert persisted_channel.model_ids == initial_get["data"]["model_ids"]
+        _assert_model_settings(initial_get["data"]["model_ids"], first_enabled=False)
+
+        latest_model_ids = initial_get["data"]["model_ids"]
+        for enabled in (True, False):
+            update_models = deepcopy(source_models)
+            update_models[0]["advanced_settings"]["tool_call_placeholder"] = enabled
+            updated = _assert_standard(
+                await client.post(
+                    "/api/v1/channels/update",
+                    params={"channel_id": channel_id},
+                    json={"model_ids": update_models},
+                ),
+                200,
+            )
+            fetched = _assert_standard(
+                await client.get("/api/v1/channels/get", params={"channel_id": channel_id}),
+                200,
+            )
+            persisted_channel = await channel_crud.get(channel_config_db, channel_id)
+            assert persisted_channel is not None
+            latest_model_ids = fetched["data"]["model_ids"]
+            assert updated["data"]["channel"]["model_ids"] == latest_model_ids
+            assert persisted_channel.model_ids == latest_model_ids
+            _assert_model_settings(latest_model_ids, first_enabled=enabled)
+
+        invalid_models = deepcopy(source_models)
+        invalid_models[0]["advanced_settings"]["tool_call_placeholder"] = "true"
+        invalid_response = await client.post(
+            "/api/v1/channels/update",
+            params={"channel_id": channel_id},
+            json={"model_ids": invalid_models},
+        )
+        assert invalid_response.status_code == 200
+        invalid_payload = invalid_response.json()
+        assert invalid_payload["code"] == 422
+        assert invalid_payload["data"] is None
+
+        unchanged = _assert_standard(
+            await client.get("/api/v1/channels/get", params={"channel_id": channel_id}),
+            200,
+        )
+        persisted_channel = await channel_crud.get(channel_config_db, channel_id)
+        assert persisted_channel is not None
+        assert unchanged["data"]["model_ids"] == latest_model_ids
+        assert persisted_channel.model_ids == latest_model_ids
+        _assert_model_settings(unchanged["data"]["model_ids"], first_enabled=False)
 
 
 @pytest.mark.asyncio

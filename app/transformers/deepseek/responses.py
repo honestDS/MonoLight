@@ -527,7 +527,7 @@ class DeepSeekResponsesTransformer(BaseTransformer):
                 )
                 continue
 
-            content = cls._content_as_input(message.content)
+            content = cls._content_as_input(message.content_without_tool_call_placeholder())
             tool_calls = message.tool_calls if role == MessageRole.ASSISTANT.value else None
             if role != MessageRole.ASSISTANT.value or content:
                 provider_items.append({"role": role, "content": content})
@@ -617,7 +617,7 @@ class DeepSeekResponsesTransformer(BaseTransformer):
         )
 
     @classmethod
-    def to_internal_response(cls, provider_response: Any, default_model: str) -> InternalResponse:
+    def to_internal_response(cls, provider_response: Any, default_model: str, **kwargs: Any) -> InternalResponse:
         if not isinstance(provider_response, dict):
             raise LLMException(ERR_LLM_API_RESPONSE_ERROR, detail=provider_response)
         cls._raise_response_error_if_needed(provider_response)

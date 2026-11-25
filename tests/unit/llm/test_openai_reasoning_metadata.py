@@ -312,7 +312,7 @@ def test_responses_stream_separates_distinct_reasoning_summary_parts() -> None:
             [InternalToolCall(id="call_1", name="lookup", arguments={})],
             {
                 "role": "assistant",
-                "content": "[tool_call]",
+                "content": None,
                 "reasoning_content": "",
                 "tool_calls": [
                     {

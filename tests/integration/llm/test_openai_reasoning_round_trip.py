@@ -16,7 +16,7 @@ from app.core.utils.dispatcher.save_assistant_message import save_assistant_mess
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.llm_request_params import build_session_cache_key
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.models.message import InternalMessage, InternalResponse, Message, MessageResponse, MessageRole, MessageType
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, Message, MessageResponse, MessageRole, MessageType
 from app.models.profile import OtherConfig, Profile, ToolConfig
 from app.models.session import ChatSession
 from app.providers.llm.client import LLMClient
@@ -156,6 +156,7 @@ async def _ignore_content(_content: str) -> None:
 @pytest.mark.parametrize("with_tools", [False, True])
 @pytest.mark.parametrize("reasoning", ["Think carefully.", ""])
 @pytest.mark.parametrize("cache_key", [None, "stable-request-cache-key"])
+@pytest.mark.parametrize("tool_call_placeholder", [False, True])
 @pytest.mark.asyncio
 async def test_openai_reasoning_round_trip(
     db_session: AsyncSession,
@@ -165,6 +166,7 @@ async def test_openai_reasoning_round_trip(
     with_tools: bool,
     reasoning: str,
     cache_key: str | None,
+    tool_call_placeholder: bool,
 ) -> None:
     db_session.add(ChatSession(session_id=SESSION_ID, uid=UID, profile_id=PROFILE_ID))
     await db_session.commit()
@@ -209,6 +211,7 @@ async def test_openai_reasoning_round_trip(
         "protocol": protocol,
         "channel_id": 1,
         "cache_key": cache_key,
+        "tool_call_placeholder": tool_call_placeholder,
     }
     if stream:
         call_kwargs["on_content"] = _ignore_content
@@ -223,7 +226,8 @@ async def test_openai_reasoning_round_trip(
     expected_reasoning = reasoning if protocol == "openai" and not stream else reasoning or None
     assert first_response.message.reasoning_content == expected_reasoning
     if with_tools:
-        assert first_response.message.content is None
+        expected_tool_call_content = "[tool_call]" if protocol == "openai" and tool_call_placeholder else None
+        assert first_response.message.content == expected_tool_call_content
         assert first_response.message.tool_calls and len(first_response.message.tool_calls) == 1
         normalized_tool_id = first_response.message.tool_calls[0].id
         assert normalized_tool_id.startswith("call_")
@@ -248,7 +252,7 @@ async def test_openai_reasoning_round_trip(
     if with_tools:
         stored_body = json.loads(stored_assistant.content or "{}")
         assert "provider_metadata" not in stored_body
-        assert stored_body.get("content") is None
+        assert stored_body.get("content") == expected_tool_call_content
     else:
         assert stored_assistant.content == "Answer"
         assert public_message["content"] == "Answer"
@@ -260,6 +264,7 @@ async def test_openai_reasoning_round_trip(
     history_assistant = next(message for message in history if message.role == MessageRole.ASSISTANT)
     assert history_assistant.reasoning_content == expected_reasoning
     if with_tools:
+        assert history_assistant.content == expected_tool_call_content
         assert history_assistant.tool_calls and history_assistant.tool_calls[0].id == normalized_tool_id
         history_tool = next(message for message in history if message.role == MessageRole.TOOL)
         assert history_tool.tool_call_id == normalized_tool_id
@@ -269,6 +274,7 @@ async def test_openai_reasoning_round_trip(
     assert len(captured_payloads) == 2
     for payload in captured_payloads:
         assert "cache_key" not in payload
+        assert "tool_call_placeholder" not in payload
         if cache_key is None:
             assert "prompt_cache_key" not in payload
         else:
@@ -304,7 +310,7 @@ async def test_openai_reasoning_round_trip(
         assert assistant_item["reasoning_content"] == reasoning
         assert "provider_metadata" not in assistant_item
         if with_tools:
-            assert assistant_item["content"] == "[tool_call]"
+            assert assistant_item["content"] == ("[tool_call]" if tool_call_placeholder else None)
             provider_tool_call = assistant_item["tool_calls"][0]
             assert provider_tool_call["id"] == normalized_tool_id
             assert provider_tool_call["function"]["name"] == TOOL_NAME
@@ -313,6 +319,25 @@ async def test_openai_reasoning_round_trip(
             assert tool_item["tool_call_id"] == normalized_tool_id
         else:
             assert assistant_item["content"] == "Answer"
+
+    if protocol == "openai" and with_tools:
+        original_tool_call_content = "[tool_call]" if tool_call_placeholder else None
+        call_kwargs["tool_call_placeholder"] = not tool_call_placeholder
+        await generate(**call_kwargs)
+        assert len(captured_payloads) == 3
+        third_payload = captured_payloads[2]
+        assert "tool_call_placeholder" not in third_payload
+        third_assistant_item = next(item for item in third_payload["messages"] if item.get("role") == "assistant")
+        assert third_assistant_item["content"] == ("[tool_call]" if not tool_call_placeholder else None)
+        third_tool_call = third_assistant_item["tool_calls"][0]
+        assert third_tool_call["id"] == normalized_tool_id
+        assert third_tool_call["function"]["name"] == TOOL_NAME
+        assert json.loads(third_tool_call["function"]["arguments"]) == TOOL_ARGUMENTS
+        assert history_assistant.content == original_tool_call_content
+        db_session.expire_all()
+        persisted_assistant = await db_session.get(Message, assistant_id)
+        assert persisted_assistant is not None
+        assert json.loads(persisted_assistant.content or "{}") == stored_body
 
 
 LEGACY_MESSAGE_METADATA = {"legacy_message": "kept"}
@@ -512,7 +537,7 @@ async def test_persisted_provider_state_is_preserved_across_source_changes(
     assert target_user["content"] == "Question"
     if new_protocol == "openai":
         target_assistant = next(item for item in target_payload if item.get("role") == "assistant")
-        assert target_assistant["content"] == "[tool_call]"
+        assert target_assistant["content"] is None
         target_tool_call = target_assistant["tool_calls"][0]
         assert target_tool_call["id"] == normalized_tool_id
         assert target_tool_call["function"]["name"] == TOOL_NAME
@@ -959,6 +984,176 @@ def _assert_reasoning_effort_payload(
         assert payload["reasoning"] == expected_reasoning
 
 
+@pytest.mark.parametrize("mode", ["non_stream", "stream", "background"])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.asyncio
+async def test_model_tool_call_placeholder_reaches_openai_payload(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    enabled: bool,
+) -> None:
+    session_id = f"{SESSION_ID}-placeholder-{mode}-{enabled}"
+    uid = f"{UID}-placeholder-{mode}-{enabled}"
+    profile = Profile(id=PROFILE_ID, uid=uid, name="tool-call-placeholder", configs={})
+    db_session.add(ChatSession(session_id=session_id, uid=uid, profile_id=PROFILE_ID))
+    await db_session.commit()
+    user_message = await save_message(
+        db_session,
+        session_id,
+        uid,
+        MessageRole.USER,
+        MessageType.TEXT,
+        InternalMessage(role=MessageRole.USER, content="Question"),
+        PROFILE_ID,
+    )
+    await save_assistant_message(
+        db_session,
+        session_id,
+        uid,
+        PROFILE_ID,
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            content=None,
+            tool_calls=[InternalToolCall(id="persisted-call", name=TOOL_NAME, arguments=TOOL_ARGUMENTS)],
+        ),
+    )
+    await save_message(
+        db_session,
+        session_id,
+        uid,
+        MessageRole.TOOL,
+        MessageType.TOOL_RESULT,
+        InternalMessage(role=MessageRole.TOOL, content="tool output", tool_call_id="persisted-call"),
+        PROFILE_ID,
+    )
+
+    model_entry = _reasoning_effort_model_entry("openai", None, reasoning_efforts=[])
+    model_entry["advanced_settings"] = {"tool_call_placeholder": enabled}
+    channel = SimpleNamespace(
+        id=1,
+        name="placeholder-channel",
+        usage_key="00000000000000000000000000000006",
+        api_key=API_KEY,
+        base_url=BASE_URL,
+        http_proxy=None,
+        get_decrypted_api_key=lambda: API_KEY,
+    )
+    channel_rule = SimpleNamespace(priority=1)
+    chat_channel = SimpleNamespace(chat_timeout=60.0, rules=[channel_rule])
+    request_histories: list[list[InternalMessage]] = []
+
+    async def _request_builder(
+        _chat_params: dict[str, Any],
+        _channel_obj: Any,
+        _model_entry: dict[str, Any],
+    ) -> list[InternalMessage]:
+        history = await ContextManager.get_messages(
+            db_session,
+            session_id,
+            uid,
+            profile=profile,
+            current_message="Follow-up",
+        )
+        request_histories.append(history)
+        return history
+
+    raw_response = _chat_response("", False)
+    raw_response["model"] = "provider-real-model"
+    stream_events = _chat_stream_events(raw_response)
+    captured_payloads: list[dict[str, Any]] = []
+
+    async def _fake_post(_self: BaseOpenAITransformer, *, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        captured_payloads.append(deepcopy(payload))
+        return deepcopy(raw_response)
+
+    async def _fake_stream(_self: BaseOpenAITransformer, *, payload: dict[str, Any], normalize_event, **_kwargs: Any):
+        captured_payloads.append(deepcopy(payload))
+        for raw_event in stream_events:
+            normalized, _ = normalize_event(deepcopy(raw_event))
+            if normalized is not None:
+                yield normalized
+
+    monkeypatch.setattr(BaseOpenAITransformer, "_post_json", _fake_post)
+    monkeypatch.setattr(BaseOpenAITransformer, "_stream_sse_json", _fake_stream)
+
+    if mode == "background":
+
+        async def _fake_select_channel(_db: AsyncSession, _chat_channel: Any, _expected_usage: str, **_kwargs: Any):
+            return channel, deepcopy(model_entry), channel_rule
+
+        monkeypatch.setattr(channel_call, "select_channel", _fake_select_channel)
+        response, _, _, _, _ = await channel_call.generate_chat_with_fallback(
+            db_session,
+            chat_channel=chat_channel,
+            request_builder=_request_builder,
+            call_context="test_tool_call_placeholder",
+            cursor_key=None,
+            uid=uid,
+            session_id=session_id,
+            cache_key=build_session_cache_key(uid=uid, session_id=session_id),
+        )
+    else:
+
+        async def _fake_select_channel(*_args: Any, **_kwargs: Any):
+            return channel, deepcopy(model_entry), channel_rule
+
+        monkeypatch.setattr(interactive_generation_module, "select_channel", _fake_select_channel)
+        history = await _request_builder({}, channel, model_entry)
+        state, _stream_events = _build_reasoning_effort_state(
+            db_session=db_session,
+            uid=uid,
+            session_id=session_id,
+            profile=profile,
+            messages=history,
+            initial_message=user_message,
+            model_entry=deepcopy(model_entry),
+            channel=channel,
+            channel_rule=channel_rule,
+            chat_channel=chat_channel,
+            mode=mode,
+        )
+        response = await interactive_generation_module.generate_interactive_turn(
+            state,
+            current_tools=[],
+            response_id=f"tool-call-placeholder-{mode}",
+        )
+
+    assert response.message.content == "Answer"
+    assert len(captured_payloads) == 1
+    payload = captured_payloads[0]
+    assert "tool_call_placeholder" not in payload
+    assistant_payload = next(item for item in payload["messages"] if item.get("role") == "assistant")
+    assert assistant_payload["content"] == ("[tool_call]" if enabled else None)
+    provider_tool_call = assistant_payload["tool_calls"][0]
+    assert provider_tool_call["id"] == "persisted-call"
+    assert provider_tool_call["function"]["name"] == TOOL_NAME
+    assert json.loads(provider_tool_call["function"]["arguments"]) == TOOL_ARGUMENTS
+    tool_payload = next(item for item in payload["messages"] if item.get("role") == "tool")
+    assert tool_payload["tool_call_id"] == "persisted-call"
+    if mode == "background":
+        assert tool_payload["content"] == "tool output"
+    else:
+        assert json.loads(tool_payload["content"]) == {"tool_result": "tool output"}
+
+    history_assistant = next(message for message in request_histories[0] if message.role == MessageRole.ASSISTANT)
+    assert history_assistant.content is None
+    assert history_assistant.tool_calls and history_assistant.tool_calls[0].id == "persisted-call"
+    db_session.expire_all()
+    stored_assistant = await db_session.get(Message, history_assistant.id)
+    assert stored_assistant is not None
+    assert json.loads(stored_assistant.content or "{}").get("content") is None
+    reloaded_history = await ContextManager.get_messages(
+        db_session,
+        session_id,
+        uid,
+        profile=profile,
+        current_message="Follow-up",
+    )
+    reloaded_assistant = next(message for message in reloaded_history if message.role == MessageRole.ASSISTANT)
+    assert reloaded_assistant.content is None
+
+
 @pytest.mark.parametrize("protocol", ["openai", "openai_responses"])
 @pytest.mark.parametrize("mode", ["non_stream", "stream", "background"])
 @pytest.mark.asyncio
@@ -1289,3 +1484,156 @@ async def test_deepseek_ignores_neutral_cache_key(
     assert len(captured_payloads) == 1
     assert "prompt_cache_key" not in captured_payloads[0]
     assert "cache_key" not in captured_payloads[0]
+
+
+@pytest.mark.parametrize("target_protocol", ["openai", "openai_responses", "deepseek", "deepseek_responses"])
+@pytest.mark.parametrize("target_enabled", [False, True])
+@pytest.mark.asyncio
+async def test_saved_tool_call_placeholder_uses_target_protocol_and_setting(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    target_protocol: str,
+    target_enabled: bool,
+) -> None:
+    session_id = f"{SESSION_ID}-target-{target_protocol}-{target_enabled}"
+    uid = f"{UID}-target-{target_protocol}-{target_enabled}"
+    profile = Profile(id=PROFILE_ID, uid=uid, name="tool-call-placeholder-round-trip", configs={})
+    db_session.add(ChatSession(session_id=session_id, uid=uid, profile_id=PROFILE_ID))
+    await db_session.commit()
+    user_message = await save_message(
+        db_session,
+        session_id,
+        uid,
+        MessageRole.USER,
+        MessageType.TEXT,
+        InternalMessage(role=MessageRole.USER, content="Question"),
+        PROFILE_ID,
+    )
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": TOOL_NAME,
+                "description": "Look up a city.",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            },
+        }
+    ]
+    target_response = _chat_response("", False) if target_protocol in {"openai", "deepseek"} else _responses_response("", False)
+    target_response["model"] = "target-provider-model"
+    upstream_responses = [_chat_response("", True), target_response]
+    upstream_responses[0]["model"] = "source-provider-model"
+    captured_payloads: list[dict[str, Any]] = []
+
+    async def _fake_openai_post(
+        _self: BaseOpenAITransformer,
+        *,
+        payload: dict[str, Any],
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        captured_payloads.append(deepcopy(payload))
+        return deepcopy(upstream_responses.pop(0))
+
+    async def _fake_transport_post(*, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        captured_payloads.append(deepcopy(payload))
+        return deepcopy(upstream_responses.pop(0))
+
+    monkeypatch.setattr(BaseOpenAITransformer, "_post_json", _fake_openai_post)
+    monkeypatch.setattr(http_transport, "post_json", _fake_transport_post)
+
+    source_response = await LLMClient.generate(
+        api_key=API_KEY,
+        base_url=BASE_URL,
+        model_id=MODEL_ID,
+        messages=[user_message],
+        tools=tools,
+        protocol="openai",
+        channel_id=1,
+        tool_call_placeholder=True,
+    )
+    assert source_response.message.content == "[tool_call]"
+    assert source_response.message.tool_calls and len(source_response.message.tool_calls) == 1
+    tool_call = source_response.message.tool_calls[0]
+    normalized_tool_id = tool_call.id
+    assert tool_call.name == TOOL_NAME
+    assert tool_call.arguments == TOOL_ARGUMENTS
+
+    saved_assistant = await save_assistant_message(db_session, session_id, uid, PROFILE_ID, source_response.message)
+    assistant_id = saved_assistant.id
+    await save_message(
+        db_session,
+        session_id,
+        uid,
+        MessageRole.TOOL,
+        MessageType.TOOL_RESULT,
+        InternalMessage(role=MessageRole.TOOL, content="tool output", tool_call_id=normalized_tool_id),
+        PROFILE_ID,
+    )
+    db_session.expire_all()
+    stored_assistant = await db_session.get(Message, assistant_id)
+    assert stored_assistant is not None
+    assert json.loads(stored_assistant.content or "{}")["content"] == "[tool_call]"
+
+    history = await ContextManager.get_messages(
+        db_session,
+        session_id,
+        uid,
+        profile=profile,
+        current_message="Follow-up",
+    )
+    history_assistant = next(message for message in history if message.role == MessageRole.ASSISTANT)
+    history_tool = next(message for message in history if message.role == MessageRole.TOOL)
+    assert history_assistant.content == "[tool_call]"
+    assert history_assistant.tool_calls and history_assistant.tool_calls[0].id == normalized_tool_id
+    assert history_assistant.tool_calls[0].name == TOOL_NAME
+    assert history_assistant.tool_calls[0].arguments == TOOL_ARGUMENTS
+    assert history_tool.tool_call_id == normalized_tool_id
+    assert history_tool.content == "tool output"
+
+    target_response = await LLMClient.generate(
+        api_key=API_KEY,
+        base_url=BASE_URL,
+        model_id="target-model",
+        messages=history,
+        tools=tools,
+        protocol=target_protocol,
+        channel_id=2,
+        tool_call_placeholder=target_enabled,
+    )
+    assert target_response.message.content == "Answer"
+    assert target_response.message.tool_calls is None
+    assert len(captured_payloads) == 2
+    assert not upstream_responses
+    source_payload, target_payload = captured_payloads
+    assert source_payload["model"] == MODEL_ID
+    assert target_payload["model"] == "target-model"
+    assert all("tool_call_placeholder" not in payload for payload in captured_payloads)
+
+    if target_protocol in {"openai", "deepseek"}:
+        target_messages = target_payload["messages"]
+        assistant_item = next(item for item in target_messages if item.get("role") == "assistant")
+        expected_content = "[tool_call]" if target_protocol == "openai" and target_enabled else None
+        assert assistant_item["content"] == expected_content
+        provider_tool_call = assistant_item["tool_calls"][0]
+        assert provider_tool_call["id"] == normalized_tool_id
+        assert provider_tool_call["function"]["name"] == TOOL_NAME
+        assert json.loads(provider_tool_call["function"]["arguments"]) == TOOL_ARGUMENTS
+        provider_tool_result = next(item for item in target_messages if item.get("role") == "tool")
+        assert provider_tool_result["tool_call_id"] == normalized_tool_id
+        assert provider_tool_result["content"] == "tool output"
+    else:
+        target_input = target_payload["input"]
+        function_call = next(item for item in target_input if item.get("type") == "function_call")
+        assert function_call["call_id"] == normalized_tool_id
+        assert function_call["name"] == TOOL_NAME
+        assert json.loads(function_call["arguments"]) == TOOL_ARGUMENTS
+        function_output = next(item for item in target_input if item.get("type") == "function_call_output")
+        assert function_output["call_id"] == normalized_tool_id
+        assert function_output["output"] == "tool output"
+        assert not any(item.get("role") == "assistant" for item in target_input)
+
+    db_session.expire_all()
+    reloaded_assistant = await db_session.get(Message, assistant_id)
+    assert reloaded_assistant is not None
+    assert json.loads(reloaded_assistant.content or "{}")["content"] == "[tool_call]"

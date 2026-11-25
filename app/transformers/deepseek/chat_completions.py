@@ -199,7 +199,7 @@ class DeepSeekChatCompletionsTransformer(BaseTransformer):
 
         for message in internal_messages:
             role = cls._role_value(message)
-            content = cls._provider_content(message.content)
+            content = cls._provider_content(message.content_without_tool_call_placeholder())
             item: dict[str, Any] = {"role": role, "content": content}
             tool_calls = message.tool_calls or []
 
@@ -489,7 +489,7 @@ class DeepSeekChatCompletionsTransformer(BaseTransformer):
         )
 
     @classmethod
-    def to_internal_response(cls, provider_response: Any, default_model: str) -> InternalResponse:
+    def to_internal_response(cls, provider_response: Any, default_model: str, **kwargs: Any) -> InternalResponse:
         choice, message = cls._first_choice_and_message(provider_response)
         internal_message = cls.from_provider(provider_response)
         finish_reason, finish_details = cls._normalize_finish_reason(choice.get("finish_reason"))

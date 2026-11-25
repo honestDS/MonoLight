@@ -923,7 +923,7 @@ async def test_memory_recall_retries_invalid_response_before_recall_and_persiste
         invalid_tool_call_id = actual_invalid_tool_call_id
         invalid_assistant = {
             "role": "assistant",
-            "content": "[tool_call]" if protocol == "openai" else None,
+            "content": None,
             "tool_calls": [
                 {
                     "id": actual_invalid_tool_call_id,
@@ -967,6 +967,235 @@ async def test_memory_recall_retries_invalid_response_before_recall_and_persiste
         recalled_record = await db.get(LongTermMemoryRecord, memory_id)
         assert recalled_record is not None and recalled_record.last_recalled_at is not None
         assert recalled_record.content == "The user's preferred Python editor is VS Code."
+
+
+@pytest.mark.parametrize("dispatcher_mode", ["non_stream", "stream"])
+@pytest.mark.parametrize("placeholder", ["[tool_call]", " \n[tool_call]\t"])
+@pytest.mark.asyncio
+async def test_memory_recall_placeholder_response_executes_and_deduplicates(
+    memory_recall_session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    dispatcher_mode: str,
+    placeholder: str,
+) -> None:
+    profile, cfg, current_user_id, memory_id, vector_item_id = await _seed_memory_recall_workflow(
+        memory_recall_session_factory,
+    )
+    assert current_user_id is not None
+    assert memory_id is not None
+    assert vector_item_id is not None
+
+    monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", memory_recall_session_factory)
+    monkeypatch.setattr(longterm_memory_module, "AsyncSessionLocal", memory_recall_session_factory)
+    monkeypatch.setattr(ModelChannel, "get_decrypted_api_key", lambda _channel: "chat-key")
+
+    async def _set_tool_call_placeholder(enabled: bool) -> None:
+        async with memory_recall_session_factory() as db:
+            channel = await db.get(ModelChannel, 1)
+            assert channel is not None
+            model_ids = deepcopy(channel.model_ids)
+            chat_model = next(item for item in model_ids if item["model_id"] == "chat-model")
+            advanced_settings = deepcopy(chat_model.get("advanced_settings") or {})
+            advanced_settings["tool_call_placeholder"] = enabled
+            chat_model["advanced_settings"] = advanced_settings
+            channel.model_ids = model_ids
+            await db.commit()
+
+    await _set_tool_call_placeholder(True)
+
+    calls = {"upstream": 0, "embedding": 0, "hybrid": 0}
+
+    async def _fake_embedding_runtime(*_args, **_kwargs):
+        return object()
+
+    async def _fake_embed(_config, texts, **kwargs):
+        calls["embedding"] += 1
+        assert texts == ["VS Code editor preference"]
+        assert kwargs["dimensions"] == 2
+        return [[0.2, 0.8]]
+
+    async def _fake_hybrid_query(collection_name, vector, query, limit):
+        calls["hybrid"] += 1
+        assert collection_name == "memory-owner-active"
+        assert vector == [0.2, 0.8]
+        assert query == "VS Code editor preference"
+        assert limit == 4
+        return [
+            RetrievalHit(
+                id=vector_item_id,
+                content="ignored vector payload",
+                metadata={
+                    "uid": "owner",
+                    "memory_id": memory_id,
+                    "version": 1,
+                    "embedding_revision": 1,
+                },
+                fusion_score=0.95,
+            )
+        ]
+
+    monkeypatch.setattr(memory_service_recall_module, "load_embedding_runtime_config", _fake_embedding_runtime)
+    monkeypatch.setattr(memory_service_recall_module, "embed_texts_with_config", _fake_embed)
+    monkeypatch.setattr(memory_service_recall_module, "_hybrid_query_collection", _fake_hybrid_query)
+
+    recall_arguments = {
+        "operation": "recall",
+        "query": "VS Code editor preference",
+        "knowledge_query": "VS Code editor preference",
+        "top_k": 2,
+    }
+    raw_tool_call = {
+        "id": "recall-placeholder-call",
+        "type": "function",
+        "function": {
+            "name": MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
+            "arguments": json.dumps(recall_arguments),
+        },
+    }
+    captured_payloads: list[dict[str, Any]] = []
+
+    async def _capture_post_json(*_args, payload, **_kwargs):
+        calls["upstream"] += 1
+        captured_payloads.append(deepcopy(payload))
+        return {
+            "id": "chatcmpl-memory-placeholder",
+            "object": "chat.completion",
+            "model": "chat-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": placeholder,
+                        "tool_calls": [raw_tool_call],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 12, "total_tokens": 132},
+        }
+
+    async def _capture_stream(*_args, payload, **kwargs):
+        calls["upstream"] += 1
+        captured_payloads.append(deepcopy(payload))
+        split_at = max(1, len(placeholder) // 2)
+        events = [
+            {
+                "id": "chatcmpl-memory-placeholder",
+                "model": "chat-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": placeholder[:split_at]},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl-memory-placeholder",
+                "model": "chat-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": placeholder[split_at:],
+                            "tool_calls": [{"index": 0, **raw_tool_call}],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 120, "completion_tokens": 12, "total_tokens": 132},
+            },
+        ]
+        for raw_event in events:
+            normalized, _has_payload = kwargs["normalize_event"](raw_event)
+            if normalized is not None:
+                yield normalized
+
+    monkeypatch.setattr(OpenAIChatCompletionsTransformer, "_post_json", _capture_post_json)
+    monkeypatch.setattr(OpenAIChatCompletionsTransformer, "_stream_sse_json", _capture_stream)
+
+    chat_params = {
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 1024,
+        "chat_timeout": 60,
+        "context_window_k": 32,
+    }
+
+    async def _build_context(db: AsyncSession) -> MemoryRecallContext:
+        channel = await db.get(ModelChannel, 1)
+        assert channel is not None
+        model_entry = deepcopy(next(item for item in channel.model_ids if item["model_id"] == "chat-model"))
+        return MemoryRecallContext(
+            db=db,
+            uid="owner",
+            session_id="session-recall",
+            profile=profile,
+            cfg=cfg,
+            username="owner",
+            messages=[InternalMessage(role=MessageRole.USER, content="Which editor do I prefer?")],
+            turn_messages=[],
+            current_user_boundary_message_id=current_user_id,
+            upper_message_id=current_user_id,
+            chat_channel=cfg.channel.chat_channel,
+            chat_cursor_key="1:CHAT",
+            chat_channel_obj=channel,
+            model_entry=model_entry,
+            channel_rule=cfg.channel.chat_channel.rules[0],
+            chat_params=dict(chat_params),
+            dispatcher_mode=dispatcher_mode,
+        )
+
+    async with memory_recall_session_factory() as db:
+        first_context = await _build_context(db)
+        first = await run_memory_recall_precheck(first_context)
+        assert first.status == "completed"
+        assert [message.role for message in first.turn_messages] == [MessageRole.ASSISTANT, MessageRole.TOOL]
+        assert first.turn_messages[0].content == placeholder
+        assert len(first.turn_messages[0].tool_calls or []) == 1
+        assert first.turn_messages[0].tool_calls[0].arguments == recall_arguments
+        tool_payload = json.loads(first.turn_messages[-1].content)
+        assert tool_payload["memories"][0]["memory_id"] == memory_id
+        assert tool_payload["memories"][0]["content"] == "The user's preferred Python editor is VS Code."
+        assert first_context.auxiliary_channel_obj.id == 1
+        assert first_context.auxiliary_model_entry["advanced_settings"]["tool_call_placeholder"] is True
+
+    assert len(captured_payloads) == 1
+    assert captured_payloads[0]["model"] == "chat-model"
+    assert captured_payloads[0]["stream"] is (dispatcher_mode == "stream")
+    assert captured_payloads[0]["tool_choice"] == "auto"
+    assert captured_payloads[0]["messages"][-1] == {"role": "user", "content": "Which editor do I prefer?"}
+
+    async with memory_recall_session_factory() as db:
+        rows = list((await db.execute(select(Message).where(Message.session_id == "session-recall").order_by(Message.id))).scalars().all())
+        recall_rows = [row for row in rows if row.dedupe_key and row.dedupe_key.startswith("memory-recall-")]
+        assert [row.type for row in recall_rows] == [MessageType.TOOL_CALL, MessageType.TOOL_RESULT]
+        persisted_assistant = InternalMessage.model_validate_json(recall_rows[0].content)
+        assert persisted_assistant.content == placeholder
+        assert persisted_assistant.tool_calls[0].arguments == recall_arguments
+        persisted_tool = InternalMessage.model_validate_json(recall_rows[1].content)
+        assert json.loads(persisted_tool.content) == tool_payload
+        persisted_count = len(rows)
+
+    await _set_tool_call_placeholder(False)
+
+    async with memory_recall_session_factory() as db:
+        repeated_context = await _build_context(db)
+        repeated = await run_memory_recall_precheck(repeated_context)
+        assert repeated.status == "completed"
+        assert [message.role for message in repeated.turn_messages] == [MessageRole.ASSISTANT, MessageRole.TOOL]
+        assert repeated.turn_messages[0].content == placeholder
+        assert json.loads(repeated.turn_messages[-1].content) == tool_payload
+
+    async with memory_recall_session_factory() as db:
+        rows = list((await db.execute(select(Message).where(Message.session_id == "session-recall"))).scalars().all())
+        channel = await db.get(ModelChannel, 1)
+        assert channel is not None
+        model_entry = next(item for item in channel.model_ids if item["model_id"] == "chat-model")
+        assert model_entry["advanced_settings"]["tool_call_placeholder"] is False
+    assert len(rows) == persisted_count
+    assert calls == {"upstream": 1, "embedding": 1, "hybrid": 1}
 
 
 def _build_reasoning_provider_metadata(

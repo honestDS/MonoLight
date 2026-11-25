@@ -22,6 +22,7 @@ from app.core.constants import (
     DEFAULT_SESSION_GOAL_MODE,
     DEFAULT_SESSION_MAX_TURNS,
     SESSION_MAX_TURNS_UPPER_BOUND,
+    TOOL_CALL_PLACEHOLDER,
 )
 from app.core.utils.time import get_local_time
 
@@ -197,6 +198,13 @@ class InternalMessage(BaseModel):
             assembled_attachment_part_count=0,
             **kwargs,
         )
+
+    def content_without_tool_call_placeholder(
+        self,
+    ) -> str | list[VoiceTextPart | TextPart | ImagePart | AudioPart | FilePart | MessagePart] | None:
+        if self.role == MessageRole.ASSISTANT and self.tool_calls and isinstance(self.content, str) and self.content.strip() == TOOL_CALL_PLACEHOLDER:
+            return None
+        return self.content
 
     def discard_provider_state(self) -> None:
         self.reasoning_content = None

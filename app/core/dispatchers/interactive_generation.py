@@ -65,7 +65,7 @@ from app.core.utils.request_token_baseline import (
     merge_session_cache_token_totals,
 )
 from app.core.utils.time import get_local_time
-from app.models.channel import resolve_model_protocol
+from app.models.channel import get_model_tool_call_placeholder, resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole, MessageType
 from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 
@@ -354,6 +354,7 @@ async def generate_interactive_turn(
                 "reasoning_effort": effective_reasoning_effort,
                 "max_tokens": state.chat_params["max_tokens"],
                 "tools": current_tools,
+                "tool_call_placeholder": get_model_tool_call_placeholder(state.model_entry),
                 "tool_choice": tool_choice,
                 "protocol": protocol,
                 "timeout": state.chat_params["chat_timeout"],

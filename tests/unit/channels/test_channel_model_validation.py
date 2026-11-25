@@ -26,6 +26,7 @@ from app.models.channel import (
     ModelProtocol,
     ModelUsage,
     get_model_reasoning_efforts,
+    get_model_tool_call_placeholder,
     normalize_channel_model_ids,
     resolve_model_protocol,
     validate_channel_model_ids,
@@ -516,6 +517,77 @@ def test_model_advanced_settings_normalize_custom_headers_and_preserve_extension
     assert settings.custom_headers == expected_settings["custom_headers"]
     assert settings.model_dump(mode="json") == expected_settings
     assert model_ids[0]["advanced_settings"] == expected_settings
+
+
+def test_model_advanced_settings_tool_call_placeholder_defaults_to_false() -> None:
+    settings = ChannelModelAdvancedSettings.model_validate({})
+    model_ids = normalize_channel_model_ids([{"model_id": "model"}])
+
+    assert settings.tool_call_placeholder is False
+    assert settings.model_dump(mode="json") == {}
+    assert model_ids[0]["advanced_settings"] == {}
+    assert get_model_tool_call_placeholder(model_ids[0]) is False
+
+
+@pytest.mark.parametrize(
+    ("tool_call_placeholder", "expected_settings"),
+    [
+        (
+            False,
+            {
+                "custom_headers": {"user-agent": "MyClient/1.0"},
+                "future_extension": {"enabled": True},
+            },
+        ),
+        (
+            True,
+            {
+                "tool_call_placeholder": True,
+                "custom_headers": {"user-agent": "MyClient/1.0"},
+                "future_extension": {"enabled": True},
+            },
+        ),
+    ],
+)
+def test_model_advanced_settings_normalize_tool_call_placeholder(
+    tool_call_placeholder: bool,
+    expected_settings: dict,
+) -> None:
+    advanced_settings = {
+        "tool_call_placeholder": tool_call_placeholder,
+        "custom_headers": {"User-Agent": "  MyClient/1.0  "},
+        "future_extension": {"enabled": True},
+    }
+    model_ids = [{"model_id": "model", "advanced_settings": advanced_settings}]
+
+    settings = ChannelModelAdvancedSettings.model_validate(advanced_settings)
+    normalized = normalize_channel_model_ids(model_ids)
+
+    assert settings.model_dump(mode="json") == expected_settings
+    assert normalized[0]["advanced_settings"] == expected_settings
+    assert settings.tool_call_placeholder is tool_call_placeholder
+    assert get_model_tool_call_placeholder(normalized[0]) is tool_call_placeholder
+    assert model_ids == [
+        {
+            "model_id": "model",
+            "advanced_settings": {
+                "tool_call_placeholder": tool_call_placeholder,
+                "custom_headers": {"User-Agent": "  MyClient/1.0  "},
+                "future_extension": {"enabled": True},
+            },
+        }
+    ]
+
+
+@pytest.mark.parametrize("value", [None, "true", "false", 0, 1, {}])
+def test_model_advanced_settings_rejects_non_boolean_tool_call_placeholder(value: object) -> None:
+    advanced_settings = {"tool_call_placeholder": value}
+
+    with pytest.raises(ValidationError):
+        ChannelModelAdvancedSettings.model_validate(advanced_settings)
+
+    with pytest.raises(ChannelModelIdsNormalizationError):
+        normalize_channel_model_ids([{"model_id": "model", "advanced_settings": advanced_settings}])
 
 
 def test_model_advanced_settings_migrates_legacy_user_agent() -> None:

@@ -111,6 +111,12 @@ class ChannelModelAdvancedSettings(BaseModel):
 
     model_config = ConfigDict(extra="allow")
     custom_headers: dict[str, str] = PydanticField(default_factory=dict, exclude_if=lambda value: not value)
+    tool_call_placeholder: bool = PydanticField(
+        False,
+        strict=True,
+        exclude_if=lambda value: not value,
+        description="工具调用占位符兼容模式，仅适用于 OpenAI Chat Completions",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -314,6 +320,12 @@ class ChannelModelItem(BaseModel):
 def resolve_model_protocol(model_entry: dict) -> str:
     """严格解析模型条目的客户端注册协议值。"""
     return ModelProtocol(model_entry["protocol"]).value.lower()
+
+
+def get_model_tool_call_placeholder(model_entry: dict) -> bool:
+    """读取模型条目的工具调用占位符兼容开关。"""
+    advanced_settings = model_entry.get("advanced_settings") or {}
+    return advanced_settings.get("tool_call_placeholder") is True
 
 
 def get_model_reasoning_efforts(model_entry: dict) -> list[str]:

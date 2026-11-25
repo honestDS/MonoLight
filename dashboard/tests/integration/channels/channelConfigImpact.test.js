@@ -105,6 +105,7 @@ const createHarness = async ({
   updateResponses = [],
   confirmationActions = [],
   alertAction = true,
+  channel = createEditChannel(),
 } = {}) => {
   const t = createTranslate(locale)
   const messages = []
@@ -114,7 +115,7 @@ const createHarness = async ({
   const typesCalls = []
   const remainingUpdates = [...updateResponses]
   const remainingConfirmations = [...confirmationActions]
-  const props = reactive({ visible: true, channel: createEditChannel() })
+  const props = reactive({ visible: true, channel })
   const emitted = []
   const lifecycleCallbacks = []
 
@@ -212,6 +213,7 @@ const createHarness = async ({
     defineEmits: () => emit,
     onBeforeUnmount: callback => lifecycleCallbacks.push(callback),
     console,
+    JSON,
   })
 
   const scope = effectScope()
@@ -257,6 +259,75 @@ const createTrackedHarness = async (t, options) => {
   t.after(() => harness.stop())
   return harness
 }
+
+test('tool call placeholder loads missing as off and stored true as on', async t => {
+  const missingSetting = await createTrackedHarness(t)
+  assert.equal(
+    missingSetting.module.form.model_ids[0].advanced_settings.tool_call_placeholder === true,
+    false,
+  )
+
+  const channel = createEditChannel()
+  channel.model_ids[0].advanced_settings = { tool_call_placeholder: true }
+  const enabledSetting = await createTrackedHarness(t, { channel })
+  assert.equal(
+    enabledSetting.module.form.model_ids[0].advanced_settings.tool_call_placeholder === true,
+    true,
+  )
+})
+
+test('tool call placeholder saves and reloads independently from custom headers', async t => {
+  const baseModel = createEditChannel().model_ids[0]
+  const channel = {
+    ...createEditChannel(),
+    model_ids: [
+      {
+        ...baseModel,
+        model_id: 'chat-model-one',
+        advanced_settings: {
+          custom_headers: { 'X-Model': ' first ' },
+          future_extension: { source: 'first-model' },
+        },
+      },
+      {
+        ...baseModel,
+        model_id: 'chat-model-two',
+        advanced_settings: {
+          custom_headers: { 'X-Model': ' second ' },
+          future_extension: { source: 'second-model' },
+        },
+      },
+    ],
+  }
+  const harness = await createTrackedHarness(t, { channel })
+  harness.module.form.model_ids[0].advanced_settings.tool_call_placeholder = true
+  harness.module.form.model_ids[1].advanced_settings.tool_call_placeholder = false
+
+  await harness.module.submitForm()
+
+  assert.equal(harness.updates.length, 1)
+  const savedModels = harness.updates[0].payload.model_ids
+  assert.deepEqual(savedModels.map(model => model.advanced_settings), [
+    {
+      tool_call_placeholder: true,
+      custom_headers: { 'x-model': 'first' },
+      future_extension: { source: 'first-model' },
+    },
+    {
+      tool_call_placeholder: false,
+      custom_headers: { 'x-model': 'second' },
+      future_extension: { source: 'second-model' },
+    },
+  ])
+
+  const reloaded = await createTrackedHarness(t, {
+    channel: { ...channel, model_ids: savedModels },
+  })
+  assert.deepEqual(
+    reloaded.module.form.model_ids.map(model => model.advanced_settings.tool_call_placeholder),
+    [true, false],
+  )
+})
 
 const impactCases = [
   { field: 'synced_memory_organization_settings', messageKey: 'memory_organization_synced' },

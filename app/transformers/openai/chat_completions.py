@@ -6,6 +6,7 @@ from typing import (
 
 from app.core.constants import (
     ERR_LLM_EMPTY_RESPONSE,
+    TOOL_CALL_PLACEHOLDER,
 )
 from app.core.exceptions import LLMContextLengthException, LLMException
 from app.core.i18n import t
@@ -30,7 +31,6 @@ logger = get_logger(__name__)
 
 class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
     _PROTOCOL_METADATA = "openai_chat_completions"
-    _TOOL_CALL_PLACEHOLDER = "[tool_call]"
     _CONTEXT_LENGTH_ERROR_CODE = "context_length_exceeded"
 
     @classmethod
@@ -155,12 +155,18 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         tools: list[dict[str, Any]] | None,
         tool_choice: str,
         top_p: Any,
+        tool_call_placeholder: bool = False,
         reasoning_effort: Any = None,
         cache_key: str | None = None,
     ) -> dict[str, Any]:
         payload = {
             "model": model_id,
-            "messages": cls.to_provider(messages, model_id=model_id, channel_id=channel_id),
+            "messages": cls.to_provider(
+                messages,
+                model_id=model_id,
+                channel_id=channel_id,
+                tool_call_placeholder=tool_call_placeholder,
+            ),
             "stream": stream,
         }
         if stream:
@@ -208,6 +214,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             tools=tools,
             tool_choice=tool_choice,
             top_p=kwargs.get("top_p"),
+            tool_call_placeholder=kwargs.get("tool_call_placeholder") is True,
             reasoning_effort=kwargs.get("reasoning_effort"),
             cache_key=kwargs.get("cache_key"),
         )
@@ -254,6 +261,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             tools=tools,
             tool_choice=tool_choice,
             top_p=kwargs.get("top_p"),
+            tool_call_placeholder=kwargs.get("tool_call_placeholder") is True,
             reasoning_effort=kwargs.get("reasoning_effort"),
             cache_key=kwargs.get("cache_key"),
         )
@@ -320,6 +328,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
 
     @classmethod
     def to_provider(cls, internal_messages: list[InternalMessage], **kwargs) -> list[dict[str, Any]]:
+        tool_call_placeholder = kwargs.get("tool_call_placeholder") is True
         source = build_provider_source(
             channel_id=kwargs.get("channel_id"),
             model_id=kwargs.get("model_id"),
@@ -328,6 +337,8 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         provider_msgs = []
         for original_msg in internal_messages:
             msg = original_msg.for_provider(source)
+            if not tool_call_placeholder:
+                msg.content = msg.content_without_tool_call_placeholder()
             if isinstance(msg.content, list):
                 # 转换 InternalMessage content 列表 为 OpenAI 官方多模态格式
                 content = []
@@ -366,10 +377,9 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
                             reasoning_content = cls._reasoning_content(metadata_message)
                 if isinstance(reasoning_content, str):
                     item["reasoning_content"] = reasoning_content
+            if msg.tool_calls and msg.role == MessageRole.ASSISTANT and tool_call_placeholder and (msg.content is None or (isinstance(msg.content, str) and not msg.content.strip()) or (isinstance(msg.content, list) and not msg.content)):
+                item["content"] = TOOL_CALL_PLACEHOLDER
             if msg.tool_calls:
-                # 兼容严格要求 assistant content 非空的提供商，仅修改发送给上游的副本。
-                if msg.role.value == "assistant" and (msg.content is None or (isinstance(msg.content, str) and not msg.content.strip()) or (isinstance(msg.content, list) and not msg.content)):
-                    item["content"] = cls._TOOL_CALL_PLACEHOLDER
                 tool_calls = []
                 for tool_call in msg.tool_calls:
                     provider_metadata = tool_call.provider_metadata or {}
@@ -400,7 +410,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         return provider_msgs
 
     @classmethod
-    def from_provider(cls, provider_response: Any) -> InternalMessage:
+    def from_provider(cls, provider_response: Any, *, tool_call_placeholder: bool = False) -> InternalMessage:
         choices = provider_response.get("choices") if isinstance(provider_response, dict) else None
         if not choices:
             raise LLMException(ERR_LLM_EMPTY_RESPONSE)
@@ -434,7 +444,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         refusal = message.get("refusal") if isinstance(message.get("refusal"), str) else None
         reasoning_content = cls._reasoning_content(message)
         content = message.get("content")
-        if tool_calls and isinstance(content, str) and content.strip() == cls._TOOL_CALL_PLACEHOLDER:
+        if not tool_call_placeholder and tool_calls and isinstance(content, str) and content.strip() == TOOL_CALL_PLACEHOLDER:
             content = None
         if not content and refusal:
             content = refusal
@@ -449,9 +459,9 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         )
 
     @classmethod
-    def to_internal_response(cls, provider_response: Any, default_model: str) -> InternalResponse:
+    def to_internal_response(cls, provider_response: Any, default_model: str, **kwargs: Any) -> InternalResponse:
         if not isinstance(provider_response, dict):
-            return super().to_internal_response(provider_response, default_model)
+            return super().to_internal_response(provider_response, default_model, **kwargs)
 
         choices = provider_response.get("choices")
         first_choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
@@ -459,7 +469,7 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
         if not isinstance(first_choice, dict) or not isinstance(message, dict):
             raise LLMException(ERR_LLM_EMPTY_RESPONSE)
 
-        internal_message = cls.from_provider(provider_response)
+        internal_message = cls.from_provider(provider_response, tool_call_placeholder=kwargs.get("tool_call_placeholder") is True)
         finish_reason, finish_details = cls._normalize_finish_reason(first_choice.get("finish_reason"))
         if internal_message.refusal and finish_reason in {None, "stop"}:
             finish_reason = "refusal"

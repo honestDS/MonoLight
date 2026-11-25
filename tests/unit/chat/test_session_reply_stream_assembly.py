@@ -242,7 +242,20 @@ async def test_generate_with_stream_callback_does_not_share_usage_between_reques
 
 
 @pytest.mark.asyncio
-async def test_generate_with_stream_callback_hides_split_tool_call_placeholder(monkeypatch):
+@pytest.mark.parametrize(
+    ("tool_call_placeholder", "expected_emitted", "expected_content"),
+    [
+        pytest.param(None, [], None, id="default"),
+        pytest.param(False, [], None, id="disabled"),
+        pytest.param(True, ["  [tool", "_call]  "], "  [tool_call]  ", id="enabled"),
+    ],
+)
+async def test_generate_with_stream_callback_handles_split_tool_call_placeholder(
+    monkeypatch,
+    tool_call_placeholder,
+    expected_emitted,
+    expected_content,
+):
     chunks = [
         {"choices": [{"delta": {"content": "  [tool"}}]},
         {"choices": [{"delta": {"content": "_call]  "}}]},
@@ -277,6 +290,7 @@ async def test_generate_with_stream_callback_hides_split_tool_call_placeholder(m
 
     monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
 
+    placeholder_option = {} if tool_call_placeholder is None else {"tool_call_placeholder": tool_call_placeholder}
     response = await LLMClient.generate_with_stream_callback(
         api_key="key",
         base_url="https://example.invalid",
@@ -284,18 +298,23 @@ async def test_generate_with_stream_callback_hides_split_tool_call_placeholder(m
         messages=[InternalMessage(role=MessageRole.USER, content="test")],
         on_content=on_content,
         protocol="openai",
+        **placeholder_option,
     )
 
-    assert emitted == []
-    assert response.message.content is None
+    assert emitted == expected_emitted
+    assert response.message.content == expected_content
     assert response.message.tool_calls is not None
+    assert len(response.message.tool_calls) == 1
     assert response.message.tool_calls[0].name == "search"
     assert response.message.tool_calls[0].arguments == {"query": "MonoLight"}
     stored_content = _to_storable_content(response.message, MessageType.TOOL_CALL)
-    assert "[tool_call]" not in stored_content
     stored_payload = json.loads(stored_content)
-    assert "content" not in stored_payload
     assert "tool_calls" in stored_payload
+    if expected_content is None:
+        assert "[tool_call]" not in stored_content
+        assert "content" not in stored_payload
+    else:
+        assert stored_payload["content"] == "  [tool_call]  "
 
 
 @pytest.mark.asyncio
@@ -818,7 +837,7 @@ async def test_generate_replaces_provider_tool_call_ids(monkeypatch):
         async def generate(self, **_kwargs):
             return {"model": "model-final"}
 
-        def to_internal_response(self, _raw_response, default_model):
+        def to_internal_response(self, _raw_response, default_model, **_kwargs):
             return InternalResponse(
                 message=InternalMessage(
                     role=MessageRole.ASSISTANT,

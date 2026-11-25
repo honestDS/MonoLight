@@ -65,7 +65,7 @@ from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.operation_directories import get_allowed_operation_dirs, get_write_protected_dirs, is_path_write_protected, normalize_allowed_operation_dirs
 from app.models.audit import AuditToolConclusion
-from app.models.channel import ModelUsage, resolve_model_protocol
+from app.models.channel import ModelUsage, get_model_tool_call_placeholder, resolve_model_protocol
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import ProfileConfig
 from app.models.provider_usage import ProviderUsageType
@@ -609,6 +609,7 @@ async def _run_audit_model(
             request_context_tokens=request_context_tokens,
             http_proxy=get_channel_http_proxy(channel),
             custom_headers=get_model_custom_headers(model_entry),
+            tool_call_placeholder=get_model_tool_call_placeholder(model_entry),
         )
         await record_provider_response_usage(
             response,

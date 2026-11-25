@@ -109,6 +109,8 @@ export default {
   description: 'Description',
   description_placeholder: 'Optional description',
   advanced_settings: 'Advanced Settings',
+  tool_call_placeholder: 'Tool-call Placeholder Compatibility',
+  tool_call_placeholder_hint: 'Try enabling this option if the model output is not as expected.',
   custom_request_headers: 'Custom Request Headers',
   fill_headers_template: 'Fill Template',
   custom_headers_json_object_error: 'Custom request headers must be a valid JSON object.',

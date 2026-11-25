@@ -348,30 +348,71 @@ async def test_openai_generate_materializes_audio_into_request_payload(
     assert source.content[0].data is None
 
 
-def test_chat_completions_to_provider_fills_empty_tool_call_content_without_mutating_messages() -> None:
-    contents = [None, "", "  \n", [], "Keep this content"]
+@pytest.mark.parametrize(
+    ("tool_call_placeholder", "expected_contents"),
+    [
+        pytest.param(
+            None,
+            [None, "", "  \n", [], "Keep this content", None, None, None],
+            id="omitted",
+        ),
+        pytest.param(
+            False,
+            [None, "", "  \n", [], "Keep this content", None, None, None],
+            id="disabled",
+        ),
+        pytest.param(
+            True,
+            [
+                "[tool_call]",
+                "[tool_call]",
+                "[tool_call]",
+                "[tool_call]",
+                "Keep this content",
+                "[tool_call]",
+                " [tool_call] ",
+                "\t[tool_call]\n",
+            ],
+            id="enabled",
+        ),
+    ],
+)
+def test_chat_completions_to_provider_fills_empty_tool_call_content_without_mutating_messages(
+    tool_call_placeholder,
+    expected_contents,
+) -> None:
+    contents = [None, "", "  \n", [], "Keep this content", "[tool_call]", " [tool_call] ", "\t[tool_call]\n"]
+    original_contents = [content.copy() if isinstance(content, list) else content for content in contents]
+    expected_arguments = [{"query": f"value_{index}"} for index in range(len(contents))]
     messages = [
         InternalMessage(
             role=MessageRole.ASSISTANT,
             content=content,
-            tool_calls=[InternalToolCall(id=f"call_{index}", name="lookup", arguments={})],
+            tool_calls=[InternalToolCall(id=f"call_{index}", name="lookup", arguments=arguments.copy())],
         )
-        for index, content in enumerate(contents)
+        for index, (content, arguments) in enumerate(zip(contents, expected_arguments))
     ]
 
-    provider_messages = OpenAIChatCompletionsTransformer.to_provider(messages)
+    options = {} if tool_call_placeholder is None else {"tool_call_placeholder": tool_call_placeholder}
+    provider_messages = OpenAIChatCompletionsTransformer.to_provider(messages, **options)
 
-    assert [message["content"] for message in provider_messages] == [
-        "[tool_call]",
-        "[tool_call]",
-        "[tool_call]",
-        "[tool_call]",
-        "Keep this content",
-    ]
-    assert [message.content for message in messages] == contents
+    assert [message["content"] for message in provider_messages] == expected_contents
+    assert [message.content for message in messages] == original_contents
+    assert [[(tool_call.id, tool_call.name, tool_call.arguments) for tool_call in message.tool_calls or []] for message in messages] == [[(f"call_{index}", "lookup", arguments)] for index, arguments in enumerate(expected_arguments)]
+    provider_tool_calls = [tool_call for message in provider_messages for tool_call in message.get("tool_calls", [])]
+    assert [tool_call["id"] for tool_call in provider_tool_calls] == [f"call_{index}" for index in range(len(contents))]
+    assert [json.loads(tool_call["function"]["arguments"]) for tool_call in provider_tool_calls] == expected_arguments
 
 
-def test_chat_completions_from_provider_clears_tool_call_placeholder() -> None:
+@pytest.mark.parametrize(
+    ("tool_call_placeholder", "expected_content"),
+    [(False, None), (True, "[tool_call]")],
+    ids=["disabled", "enabled"],
+)
+def test_chat_completions_from_provider_applies_tool_call_placeholder_option(
+    tool_call_placeholder,
+    expected_content,
+) -> None:
     message = OpenAIChatCompletionsTransformer.from_provider(
         {
             "choices": [
@@ -389,11 +430,12 @@ def test_chat_completions_from_provider_clears_tool_call_placeholder() -> None:
                     }
                 }
             ]
-        }
+        },
+        tool_call_placeholder=tool_call_placeholder,
     )
 
     assert message.role == MessageRole.ASSISTANT
-    assert message.content is None
+    assert message.content == expected_content
     assert message.tool_calls == [
         InternalToolCall(
             id="call_1",
@@ -407,7 +449,10 @@ def test_chat_completions_from_provider_clears_tool_call_placeholder() -> None:
     ]
 
 
-def test_chat_completions_from_provider_preserves_text_around_tool_call_placeholder() -> None:
+@pytest.mark.parametrize("tool_call_placeholder", [False, True], ids=["disabled", "enabled"])
+def test_chat_completions_from_provider_preserves_text_around_tool_call_placeholder(
+    tool_call_placeholder,
+) -> None:
     message = OpenAIChatCompletionsTransformer.from_provider(
         {
             "choices": [
@@ -425,7 +470,8 @@ def test_chat_completions_from_provider_preserves_text_around_tool_call_placehol
                     }
                 }
             ]
-        }
+        },
+        tool_call_placeholder=tool_call_placeholder,
     )
 
     assert message.content == "I will call [tool_call]"
@@ -440,6 +486,28 @@ def test_chat_completions_from_provider_preserves_text_around_tool_call_placehol
             },
         )
     ]
+
+
+@pytest.mark.parametrize("tool_call_placeholder", [False, True], ids=["disabled", "enabled"])
+def test_chat_completions_from_provider_preserves_placeholder_without_tool_calls(
+    tool_call_placeholder,
+) -> None:
+    message = OpenAIChatCompletionsTransformer.from_provider(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "[tool_call]",
+                    }
+                }
+            ]
+        },
+        tool_call_placeholder=tool_call_placeholder,
+    )
+
+    assert message.content == "[tool_call]"
+    assert message.tool_calls is None
 
 
 def test_chat_completions_from_provider_uses_refusal_for_tool_call_placeholder() -> None:
