@@ -145,11 +145,18 @@ class InternalGeneratedImage(BaseModel):
     mime_type: str | None = None
 
 
+class InternalConversationSummary(BaseModel):
+    through_message_id: int = PyField(ge=0)
+    content: str
+    covered_user_message_id: int | None = PyField(default=None, gt=0)
+
+
 class InternalMessage(BaseModel):
     id: int | None = None
     role: MessageRole
     type: MessageType | None = None
     content: str | list[VoiceTextPart | TextPart | ImagePart | AudioPart | FilePart | MessagePart] | None = None
+    conversation_summary: InternalConversationSummary | None = None
     reasoning_content: str | None = None
     refusal: str | None = None
     provider_metadata: dict[str, Any] | None = None

@@ -24,6 +24,7 @@ from app.core.tools.longterm_memory import (
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.context_messages import is_context_summary_message
 from app.core.utils.dispatcher.helpers import resolve_chat_params
+from app.core.utils.dispatcher.markdown_instruction import materialize_user_environment_prompts
 from app.core.utils.dispatcher.session_todo_snapshot import (
     load_current_session_todo_snapshot,
     parse_session_todo_snapshot,
@@ -39,7 +40,7 @@ from app.core.utils.request_token_baseline import (
     merge_session_cache_token_totals,
 )
 from app.models.channel import resolve_model_protocol
-from app.models.message import InternalMessage, MessageRole, TextPart
+from app.models.message import InternalConversationSummary, InternalMessage, MessageRole, TextPart
 from app.providers.llm.client import LLMClient
 
 from .types import MemoryRecallContext
@@ -103,17 +104,23 @@ def build_precheck_request_messages(
         return []
     current_index, current_user_text = precheck_user_input
 
-    latest_summary_content: str | None = None
+    latest_summary: InternalConversationSummary | None = None
+    latest_summary_user_text: str | None = None
     latest_embedded_todo: dict[str, object] | None = None
     for message in messages[: current_index + 1]:
         if is_context_summary_message(message):
-            summary_content = message.content
+            summary = message.conversation_summary.model_copy(deep=True)
+            summary_content = summary.content
             embedded_todo, stripped_content = _extract_precheck_todo(summary_content)
             if embedded_todo is not None:
                 latest_embedded_todo = embedded_todo
                 if stripped_content is not None:
                     summary_content = stripped_content
-            latest_summary_content = summary_content
+            summary.content = summary_content
+            latest_summary = summary
+            latest_summary_user_text = None
+            if message.content is not None:
+                latest_summary_user_text = _precheck_message_text(message)
         elif message.role == MessageRole.TOOL:
             embedded_todo, _ = _extract_precheck_todo(message.content)
             if embedded_todo is not None:
@@ -127,7 +134,13 @@ def build_precheck_request_messages(
         role=MessageRole.USER,
         content=current_user_text,
     )
-    summary_message = InternalMessage(role=MessageRole.USER, content=latest_summary_content) if latest_summary_content is not None else None
+    summary_message = None
+    if latest_summary is not None:
+        summary_message = InternalMessage(
+            role=MessageRole.USER,
+            content=latest_summary_user_text,
+            conversation_summary=latest_summary,
+        )
     todo_message = (
         InternalMessage(
             role=MessageRole.USER,
@@ -238,7 +251,12 @@ async def prepare_request_messages(
             InternalMessage(role=MessageRole.SYSTEM, content=LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT),
             *precheck_messages,
         ]
-    request_messages = [message.model_copy(deep=True) for message in precheck_messages]
+    request_messages = []
+    for message in precheck_messages:
+        if message.conversation_summary is not None:
+            request_messages.append(materialize_user_environment_prompts([message])[0])
+        else:
+            request_messages.append(message.model_copy(deep=True))
     model_entry = context.auxiliary_model_entry
     auxiliary_params = context.auxiliary_params
     protocol = resolve_model_protocol(model_entry)

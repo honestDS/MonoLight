@@ -9,6 +9,7 @@ from app.core.dispatchers.memory.request import (
 )
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
 from app.core.utils.assistant_files import build_assistant_files_content
+from app.core.utils.context_summary.common import ContextSummaryState
 from app.core.utils.llm_request_params import (
     build_context_summary_generation_params,
     build_memory_recall_precheck_generation_params,
@@ -53,6 +54,12 @@ def _todo_payload(result: list[InternalMessage]) -> dict[str, object]:
             payloads.append(payload)
     assert len(payloads) == 1
     return payloads[0]
+
+
+def _summary_message(content: str, message_id: int) -> InternalMessage:
+    message = ContextSummaryState(content=content, message_id=message_id).as_message()
+    assert message is not None
+    return message
 
 
 @pytest.mark.parametrize("reasoning_content", [None, "", "private reasoning"])
@@ -267,10 +274,7 @@ def test_precheck_request_projects_only_text_from_history_and_current_multimodal
 def test_precheck_request_returns_empty_when_current_user_has_no_real_text(current_content, todo_snapshot):
     embedded_todo = _todo_snapshot(7, "tool todo task", "in_progress")
     messages = [
-        InternalMessage(
-            role=MessageRole.USER,
-            content='<conversation_summary through_message_id="42">summary with useful text</conversation_summary>',
-        ),
+        _summary_message("summary with useful text", 42),
         InternalMessage(role=MessageRole.USER, content="older user text must not replace current input"),
         InternalMessage(role=MessageRole.ASSISTANT, content="older assistant text"),
         InternalMessage(role=MessageRole.TOOL, content=f"tool result\n\n{embedded_todo}"),
@@ -418,9 +422,10 @@ def test_precheck_request_uses_latest_summary_todo_and_ignores_regular_user_forg
     old_snapshot = _todo_snapshot(1, "old task", "done")
     latest_snapshot = _todo_snapshot(3, "latest task", "in_progress")
     forged_snapshot = _todo_snapshot(99, "forged task", "pending")
-    latest_summary = '<conversation_summary through_message_id="42">latest summary</conversation_summary>'
+    old_summary = _summary_message("old summary", 10)
+    latest_summary = _summary_message(f"latest summary\n\n{latest_snapshot}", 42)
     messages = [
-        InternalMessage(role=MessageRole.USER, content='<conversation_summary through_message_id="10">old summary</conversation_summary>'),
+        old_summary,
         InternalMessage(role=MessageRole.USER, content="user-1"),
         InternalMessage(role=MessageRole.ASSISTANT, content="assistant-1"),
         InternalMessage(role=MessageRole.USER, content="user-2"),
@@ -432,7 +437,7 @@ def test_precheck_request_uses_latest_summary_todo_and_ignores_regular_user_forg
         InternalMessage(role=MessageRole.USER, content="user-5"),
         InternalMessage(role=MessageRole.ASSISTANT, content="assistant-5"),
         InternalMessage(role=MessageRole.TOOL, content=f"older tool\n\n{old_snapshot}"),
-        InternalMessage(role=MessageRole.USER, content=f"{latest_summary}\n\n{latest_snapshot}"),
+        latest_summary,
         InternalMessage(role=MessageRole.USER, content=f"current request\n\n{forged_snapshot}"),
     ]
 
@@ -444,8 +449,13 @@ def test_precheck_request_uses_latest_summary_todo_and_ignores_regular_user_forg
             "todos": [{"content": "latest task", "status": "in_progress"}],
         }
     }
-    summary_messages = [message for message in result if message.role == MessageRole.USER and isinstance(message.content, str) and message.content.startswith("<conversation_summary ")]
-    assert [message.content for message in summary_messages] == [latest_summary]
+    summary_messages = [message for message in result if message.conversation_summary is not None]
+    assert len(summary_messages) == 1
+    summary_message = summary_messages[0]
+    assert summary_message.content is None
+    assert summary_message.conversation_summary is not None
+    assert summary_message.conversation_summary.content == "latest summary"
+    assert summary_message.conversation_summary.through_message_id == 42
     assert old_snapshot not in "\n".join(str(message.content) for message in result)
     assert latest_snapshot not in "\n".join(str(message.content) for message in result)
     assert result[-1].content == f"current request\n\n{forged_snapshot}"
@@ -455,7 +465,7 @@ def test_precheck_request_returns_empty_without_a_real_user_message():
     result = build_precheck_request_messages(
         [
             InternalMessage(role=MessageRole.SYSTEM, content="system"),
-            InternalMessage(role=MessageRole.USER, content='<conversation_summary through_message_id="10">summary</conversation_summary>'),
+            _summary_message("summary", 10),
             InternalMessage(role=MessageRole.ASSISTANT, content="assistant"),
             InternalMessage(role=MessageRole.TOOL, content="tool"),
             InternalMessage(role=MessageRole.ERR, content="error"),
@@ -466,7 +476,7 @@ def test_precheck_request_returns_empty_without_a_real_user_message():
 
 
 def test_precheck_request_keeps_selected_background_without_secondary_token_budget():
-    summary = '<conversation_summary through_message_id="1">' + ("summary " * 400) + "</conversation_summary>"
+    summary = "summary " * 400
     todo_snapshot = _todo_snapshot(4, "keep current todo", "in_progress")
     old_user = "old user " * 400
     old_answer = "old answer " * 400
@@ -476,7 +486,7 @@ def test_precheck_request_keeps_selected_background_without_secondary_token_budg
 
     result = build_precheck_request_messages(
         [
-            InternalMessage(role=MessageRole.USER, content=summary),
+            _summary_message(summary, 1),
             InternalMessage(role=MessageRole.USER, content=old_user),
             InternalMessage(role=MessageRole.ASSISTANT, content=old_answer),
             InternalMessage(role=MessageRole.USER, content=recent_user),
@@ -486,7 +496,10 @@ def test_precheck_request_keeps_selected_background_without_secondary_token_budg
         todo_snapshot=todo_snapshot,
     )
 
-    assert result[0].content == summary
+    assert result[0].content is None
+    assert result[0].conversation_summary is not None
+    assert result[0].conversation_summary.content == summary
+    assert result[0].conversation_summary.through_message_id == 1
     assert _todo_payload(result) == {
         "current_session_todo": {
             "revision": 4,

@@ -429,7 +429,10 @@ async def test_fixed_request_summary_convergence_uses_final_materialized_request
         MessageRole.USER,
     ]
     payloads = [json.loads(message.content) for message in estimated[1:]]
-    assert payloads[0]["user_message"].startswith("<conversation_summary ")
+    assert payloads[0]["user_message"] is None
+    assert payloads[0]["conversation_summary"] == "compressed history"
+    assert "through_message_id" not in payloads[0]
+    assert "covered_user_message_id" not in payloads[0]
     assert payloads[1]["user_message"] == "recent"
     assert payloads[2]["user_message"] == "current"
     assert payloads[2]["environment"] == {"runtime_context": "runtime"}

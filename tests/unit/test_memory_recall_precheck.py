@@ -11,7 +11,14 @@ from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.exceptions import LLMException
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
 from app.core.tools.longterm_memory import MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME
-from app.models.message import ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole
+from app.models.message import (
+    ImagePart,
+    InternalConversationSummary,
+    InternalMessage,
+    InternalResponse,
+    InternalToolCall,
+    MessageRole,
+)
 from app.models.profile import ProfileConfig
 
 
@@ -331,7 +338,8 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
             InternalMessage(
                 id=2,
                 role=MessageRole.USER,
-                content='<conversation_summary through_message_id="1">existing summary</conversation_summary>',
+                content=None,
+                conversation_summary=InternalConversationSummary(through_message_id=1, content="existing summary"),
             ),
             InternalMessage(
                 id=3,
@@ -427,7 +435,27 @@ async def test_precheck_retry_reuses_clean_request_prefix_before_appending_corre
     assert historical_assistant.reasoning_content == "THOUGHT_PRIVATE_MARKER"
     assert historical_assistant.provider_metadata == {"protocol": "OPENAI", "source": "provider"}
     assert any(message.role == MessageRole.USER and isinstance(message.content, str) and "Magic9询图" in message.content for message in first_request)
-    assert any(message.role == MessageRole.USER and isinstance(message.content, str) and message.content.startswith("<conversation_summary ") for message in first_request)
+    summary_payload = None
+    for message in first_request:
+        if message.role != MessageRole.USER:
+            continue
+        if not isinstance(message.content, str):
+            continue
+        try:
+            payload = json.loads(message.content)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if "conversation_summary" not in payload:
+            continue
+        summary_payload = payload
+        break
+    assert summary_payload is not None
+    assert summary_payload["conversation_summary"] == "existing summary"
+    assert summary_payload["user_message"] is None
+    assert "through_message_id" not in summary_payload
+    assert "covered_user_message_id" not in summary_payload
     todo_messages = [message for message in first_request if message.role == MessageRole.USER and isinstance(message.content, str) and "current_session_todo" in message.content]
     assert len(todo_messages) == 1
     assert json.loads(todo_messages[0].content) == {

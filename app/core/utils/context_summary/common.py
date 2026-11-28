@@ -9,10 +9,11 @@ from app.core.constants import (
 )
 from app.core.exceptions import LLMException
 from app.core.i18n import t
-from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
+from app.core.utils import context_messages
 from app.core.utils.assistant_files import model_visible_message_content
+from app.core.utils.context_summary.user_message_block import split_covered_user_message
 from app.core.utils.tokenizer import estimate_tokens
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalConversationSummary, InternalMessage, MessageRole
 
 ContextSummaryWorkValidityChecker = Callable[[], Awaitable[bool]]
 
@@ -67,11 +68,14 @@ class ContextSummaryState:
     def as_message(self) -> InternalMessage | None:
         if not self.content or self.message_id is None:
             return None
+        model_summary, covered = split_covered_user_message(self.content)
         message = InternalMessage(
             role=MessageRole.USER,
-            content=CONTEXT_SUMMARY_WRAPPER.format(
+            content=covered.content if covered is not None else None,
+            conversation_summary=InternalConversationSummary(
                 through_message_id=self.message_id,
-                content=self.content,
+                content=model_summary or "",
+                covered_user_message_id=covered.message_id if covered is not None else None,
             ),
         )
         if self.covered_user_request is not None:
@@ -85,9 +89,18 @@ def serialize_message(message: InternalMessage) -> str:
     serializable_message = message.model_copy(update={"content": model_visible_message_content(message)})
     payload = serializable_message.model_dump(
         mode="json",
-        exclude={"id", "attachments", "created_at", "assembled_attachment_part_count"},
+        exclude={
+            "id",
+            "attachments",
+            "created_at",
+            "assembled_attachment_part_count",
+            "conversation_summary",
+        },
         exclude_none=True,
     )
+    if message.conversation_summary is not None:
+        payload["user_message"] = payload.pop("content", None)
+        payload["conversation_summary"] = message.conversation_summary.content
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -105,11 +118,9 @@ def estimate_summary_tokens(
 ) -> int:
     if not content:
         return 0
+    message = ContextSummaryState(content=content, message_id=0).as_message()
     return estimate_tokens(
-        CONTEXT_SUMMARY_WRAPPER.format(
-            through_message_id=0,
-            content=content,
-        ),
+        context_messages.message_token_text(message),
         model_id=model_id,
         protocol=protocol,
     )

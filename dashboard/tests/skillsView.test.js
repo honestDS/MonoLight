@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import vm from 'node:vm'
-import { reactive, ref } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import { createI18n } from 'vue-i18n'
 import { renderToString } from 'vue/server-renderer'
 
@@ -107,6 +107,7 @@ const createHarness = ({ permission, locale = 'zh', token = 'initial-token' } = 
   }
   const context = vm.createContext({
     ref,
+    watch,
     onMounted: callback => lifecycle.mounted.push(callback),
     onUnmounted: callback => lifecycle.unmounted.push(callback),
     useI18n: () => ({ t }),
@@ -235,6 +236,122 @@ test('SkillsView paginates, ignores stale results, reports errors, and ignores r
   await flushPromises()
 
   assert.equal(harness.view.skills.value, previousSkills)
+  assert.equal(harness.view.total.value, previousTotal)
+})
+
+test('SkillsView reloads the latest pagination choice when superuser permission returns', async () => {
+  const scenarios = [
+    {
+      name: 'page change',
+      apply: view => view.handlePageChange(4),
+      expected: { page: 4, size: 10 }
+    },
+    {
+      name: 'page size change',
+      apply: view => view.handleSizeChange(25),
+      expected: { page: 1, size: 25 }
+    },
+    {
+      name: 'refresh',
+      apply: view => {
+        view.handlePageChange(4)
+        view.handleRefresh()
+      },
+      expected: { page: 1, size: 10 }
+    }
+  ]
+
+  for (const scenario of scenarios) {
+    const harness = createHarness({ permission: true })
+    harness.setListHandler(async ({ page, size }) => apiResponse([
+      { id: `page-${page}-size-${size}` }
+    ], 1000))
+    harness.mount()
+    await flushPromises()
+
+    harness.permissions.isSuperuser = false
+    await flushPromises()
+    scenario.apply(harness.view)
+    await flushPromises()
+
+    assert.deepEqual(harness.apiCalls.list, [{ page: 1, size: 10 }], scenario.name)
+    assert.equal(
+      await harness.view.handleDelete({ id: `blocked-${scenario.name}`, name: 'blocked' }),
+      false,
+      scenario.name
+    )
+    assert.deepEqual(harness.apiCalls.delete, [], scenario.name)
+
+    harness.permissions.isSuperuser = true
+    await flushPromises()
+
+    assert.deepEqual(harness.apiCalls.list, [
+      { page: 1, size: 10 },
+      scenario.expected
+    ], scenario.name)
+    assert.deepEqual(harness.view.skills.value, [
+      { id: `page-${scenario.expected.page}-size-${scenario.expected.size}` }
+    ], scenario.name)
+    assert.equal(harness.view.total.value, 1000, scenario.name)
+    assert.equal(harness.view.currentPage.value, scenario.expected.page, scenario.name)
+    assert.equal(harness.view.pageSize.value, scenario.expected.size, scenario.name)
+  }
+})
+
+test('SkillsView ignores an in-flight result during permission recheck and reloads the current choice', async () => {
+  const harness = createHarness({ permission: true })
+  const oldRequest = deferred()
+  const resumedRequest = deferred()
+  let requestCount = 0
+  harness.setListHandler(() => {
+    requestCount += 1
+    return requestCount === 1 ? oldRequest.promise : resumedRequest.promise
+  })
+  harness.mount()
+  await flushPromises()
+
+  harness.permissions.isSuperuser = false
+  await flushPromises()
+  harness.view.handlePageChange(3)
+  await flushPromises()
+  assert.deepEqual(harness.apiCalls.list, [{ page: 1, size: 10 }])
+
+  oldRequest.resolve(apiResponse([{ id: 'stale-result' }], 1000))
+  await flushPromises()
+  assert.equal(harness.view.skills.value.length, 0)
+  assert.equal(harness.view.total.value, 0)
+
+  harness.permissions.isSuperuser = true
+  await flushPromises()
+  assert.deepEqual(harness.apiCalls.list, [
+    { page: 1, size: 10 },
+    { page: 3, size: 10 }
+  ])
+
+  resumedRequest.resolve(apiResponse([{ id: 'fresh-result' }], 1000))
+  await flushPromises()
+  assert.deepEqual(harness.view.skills.value, [{ id: 'fresh-result' }])
+  assert.equal(harness.view.total.value, 1000)
+  assert.equal(harness.view.currentPage.value, 3)
+})
+
+test('SkillsView does not reload or replace data after unmount when permission returns', async () => {
+  const harness = createHarness({ permission: true })
+  const items = [{ id: 'existing-result' }]
+  harness.setListHandler(async () => apiResponse(items, 1000))
+  harness.mount()
+  await flushPromises()
+
+  const previousSkills = harness.view.skills.value
+  const previousTotal = harness.view.total.value
+  harness.unmount()
+  harness.permissions.isSuperuser = false
+  await flushPromises()
+  harness.permissions.isSuperuser = true
+  await flushPromises()
+
+  assert.deepEqual(harness.apiCalls.list, [{ page: 1, size: 10 }])
+  assert.strictEqual(harness.view.skills.value, previousSkills)
   assert.equal(harness.view.total.value, previousTotal)
 })
 

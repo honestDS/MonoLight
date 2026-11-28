@@ -7,7 +7,6 @@ from app.core.context import ContextManager
 from app.core.prompts import (
     CONTEXT_SUMMARY_COMPRESS_PROMPT,
     CONTEXT_SUMMARY_PROMPT,
-    CONTEXT_SUMMARY_WRAPPER,
 )
 from app.core.utils.context_summary.common import (
     ContextSummaryState,
@@ -22,8 +21,16 @@ from app.core.utils.context_summary.common import (
     serialize_message as _serialize_message,
 )
 from app.core.utils.context_summary.stage import GeneratedSummaryResult
+from app.core.utils.context_summary.user_message_block import append_covered_user_message
 from app.core.utils.dispatcher import frozen_context as frozen_context_module
-from app.models.message import ImagePart, InternalMessage, InternalToolCall, MessageRole, TextPart
+from app.models.message import (
+    ImagePart,
+    InternalConversationSummary,
+    InternalMessage,
+    InternalToolCall,
+    MessageRole,
+    TextPart,
+)
 from app.models.profile import ProfileConfig
 
 
@@ -212,17 +219,21 @@ def test_frozen_compaction_segment_never_splits_pending_tool_chain():
     ],
 )
 def test_frozen_compaction_segment_protects_latest_raw_user_boundary(raw_content, attachments, has_old_history):
-    old_history = [
-        InternalMessage(id=1, role=MessageRole.USER, content="old question"),
-        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
-        InternalMessage(id=3, role=MessageRole.USER, content="old tool request"),
-        InternalMessage(
-            id=4,
-            role=MessageRole.ASSISTANT,
-            tool_calls=[InternalToolCall(id="old-call", name="shell", arguments={"command": "echo old"})],
-        ),
-        InternalMessage(id=5, role=MessageRole.TOOL, tool_call_id="old-call", content="old result"),
-    ] if has_old_history else []
+    old_history = (
+        [
+            InternalMessage(id=1, role=MessageRole.USER, content="old question"),
+            InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
+            InternalMessage(id=3, role=MessageRole.USER, content="old tool request"),
+            InternalMessage(
+                id=4,
+                role=MessageRole.ASSISTANT,
+                tool_calls=[InternalToolCall(id="old-call", name="shell", arguments={"command": "echo old"})],
+            ),
+            InternalMessage(id=5, role=MessageRole.TOOL, tool_call_id="old-call", content="old result"),
+        ]
+        if has_old_history
+        else []
+    )
     raw_user = InternalMessage(
         id=6 if has_old_history else 1,
         role=MessageRole.USER,
@@ -306,17 +317,16 @@ async def test_frozen_context_compaction_summarizes_completed_prefix_only(monkey
     )
 
     assert len(snapshots) == 1
-    snapshot_tool_call_ids = [
-        tool_call.id
-        for round_messages in snapshots[0].frozen_rounds
-        for message in round_messages
-        for tool_call in message.tool_calls or []
-    ]
+    snapshot_tool_call_ids = [tool_call.id for round_messages in snapshots[0].frozen_rounds for message in round_messages for tool_call in message.tool_calls or []]
     assert "call-1" in snapshot_tool_call_ids
     assert "call-2" not in snapshot_tool_call_ids
     assert compacted[0].role == MessageRole.SYSTEM
     assert compacted[1].role == MessageRole.USER
-    assert compacted[1].content.startswith("<conversation_summary ")
+    assert compacted[1].content == messages[1].content
+    assert compacted[1].conversation_summary is not None
+    assert compacted[1].conversation_summary.content == "compressed completed work"
+    assert compacted[1].conversation_summary.through_message_id == 3
+    assert compacted[1].conversation_summary.covered_user_message_id == 1
     assert compacted[2:] == messages[4:]
     covered_message_id, covered_content = frozen_context_module._covered_user_from_segment(compacted)
     assert covered_message_id == 1
@@ -344,27 +354,61 @@ def test_serialize_message_supports_multimodal_content():
     assert "created_at" not in serialized
 
 
-def test_summary_state_builds_bounded_user_message():
-    state = ContextSummaryState(content="The user selected option A.", message_id=12)
+@pytest.mark.parametrize(
+    ("content", "expected_content", "expected_summary", "expected_covered_message_id"),
+    [
+        pytest.param(
+            "The user selected option A.",
+            None,
+            "The user selected option A.",
+            None,
+            id="without-covered-user-message",
+        ),
+        pytest.param(
+            append_covered_user_message(
+                "The user selected option A.",
+                message_id=11,
+                content="Please select option A.",
+            ),
+            "Please select option A.",
+            "The user selected option A.",
+            11,
+            id="with-covered-user-message",
+        ),
+    ],
+)
+def test_summary_state_builds_bounded_user_message(
+    content,
+    expected_content,
+    expected_summary,
+    expected_covered_message_id,
+):
+    state = ContextSummaryState(content=content, message_id=12)
 
     message = state.as_message()
 
     assert message is not None
     assert message.role == MessageRole.USER
-    assert message.content == CONTEXT_SUMMARY_WRAPPER.format(
-        through_message_id=12,
-        content=state.content,
-    )
+    assert message.content == expected_content
+    assert message.conversation_summary is not None
+    assert message.conversation_summary.through_message_id == 12
+    assert message.conversation_summary.content == expected_summary
+    assert message.conversation_summary.covered_user_message_id == expected_covered_message_id
 
 
 def test_summary_request_validation_preserves_full_message_sequence():
-    summary_content = CONTEXT_SUMMARY_WRAPPER.format(
-        through_message_id=20,
-        content="compressed old turns",
+    summary_message = InternalMessage(
+        role=MessageRole.USER,
+        content="old covered request",
+        conversation_summary=InternalConversationSummary(
+            through_message_id=20,
+            content="compressed old turns",
+            covered_user_message_id=19,
+        ),
     )
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="stable prompt"),
-        InternalMessage(role=MessageRole.USER, content=summary_content),
+        summary_message,
         InternalMessage(id=21, role=MessageRole.USER, content="old recent question " * 40),
         InternalMessage(id=22, role=MessageRole.ASSISTANT, content="old recent answer " * 40),
         InternalMessage(id=23, role=MessageRole.USER, content="latest question"),
@@ -379,7 +423,10 @@ def test_summary_request_validation_preserves_full_message_sequence():
 
     assert request[0].role == MessageRole.SYSTEM
     assert request[1].role == MessageRole.USER
-    assert request[1].content == summary_content
+    assert request[1] is not summary_message
+    assert request[1].content == summary_message.content
+    assert request[1].conversation_summary == summary_message.conversation_summary
+    assert request[1].conversation_summary is not summary_message.conversation_summary
     assert [message.id for message in request if message.id is not None] == [21, 22, 23]
     assert request[-1].id == 23
     assert request[-1].content == "latest question"

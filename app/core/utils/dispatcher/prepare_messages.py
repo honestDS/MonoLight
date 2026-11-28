@@ -11,6 +11,7 @@ from app.core.context import (
     ContextManager,
 )
 from app.core.prompts import SUBAGENT_DELEGATION_SYSTEM_PROMPT
+from app.core.utils.context_messages import message_token_text
 from app.core.utils.context_summary.service import get_context_summary_state
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
 from app.core.utils.dispatcher.markdown_instruction import (
@@ -103,7 +104,7 @@ async def prepare_messages(
         summary_message = summary_state.as_message()
         reserved_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions)
         if summary_message is not None:
-            reserved_tokens += estimate_tokens(str(summary_message.content or ""))
+            reserved_tokens += estimate_tokens(message_token_text(summary_message))
 
         # 获取上下文
         # 第一轮必须锚定在当前消息，确保上下文一致性

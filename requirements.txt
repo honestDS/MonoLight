@@ -1,33 +1,49 @@
-fastapi
-uvicorn[standard]
-aiosqlite
-aiomysql
-pydantic
-pydantic-settings
-python-dotenv
-PyYAML
-passlib[bcrypt]
-python-jose[cryptography]
-aiohttp
-certifi
-python-multipart
-loguru
-greenlet
-sqlalchemy
-sqlmodel
-Pillow
+fastapi==0.136.3; sys_platform != "linux"
+fastapi==0.135.1; sys_platform == "linux"
+uvicorn[standard]==0.49.0; sys_platform != "linux"
+uvicorn[standard]==0.41.0; sys_platform == "linux"
+aiosqlite==0.22.1
+aiomysql==0.3.2
+pydantic==2.13.4; sys_platform != "linux"
+pydantic==2.14.1; sys_platform == "linux"
+pydantic-settings==2.14.1; sys_platform != "linux"
+pydantic-settings==2.13.1; sys_platform == "linux"
+python-dotenv==1.2.2
+PyYAML==6.0.3
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.5.0
+aiohttp==3.14.5
+certifi==2026.5.20; sys_platform != "linux"
+certifi==2026.10.23; sys_platform == "linux"
+python-multipart==0.0.31; sys_platform != "linux"
+python-multipart==0.0.22; sys_platform == "linux"
+loguru==0.7.3
+greenlet==3.5.1; sys_platform != "linux"
+greenlet==3.3.2; sys_platform == "linux"
+sqlalchemy==2.0.50; sys_platform != "linux"
+sqlalchemy==2.0.48; sys_platform == "linux"
+sqlmodel==0.0.38; sys_platform != "linux"
+sqlmodel==0.0.37; sys_platform == "linux"
+Pillow==12.2.0; sys_platform != "linux"
+Pillow==13.0.0; sys_platform == "linux"
 firecrawl-py==4.28.2 # 搜索引擎 网页解析引擎
-tiktoken
+tiktoken==0.13.0; sys_platform != "linux"
+tiktoken==0.14.0; sys_platform == "linux"
 
-markdown
+markdown==3.10.2; sys_platform != "linux"
+markdown==3.11.2; sys_platform == "linux"
 
-pytest
-pytest-asyncio
-httpx
-psutil
+pytest==9.1.1; sys_platform != "linux"
+pytest==9.0.2; sys_platform == "linux"
+pytest-asyncio==1.4.0; sys_platform != "linux"
+pytest-asyncio==1.3.0; sys_platform == "linux"
+httpx==0.27.2; sys_platform != "linux"
+httpx==0.28.1; sys_platform == "linux"
+psutil==7.2.2
 pywinpty==3.0.5; sys_platform == "win32" # Windows ConPTY 伪终端驱动
-chromadb
-rank-bm25
-jieba
-croniter>=6.2.4,<7
-tzdata
+chromadb==1.5.9
+rank-bm25==0.2.2
+jieba==0.42.1
+croniter==6.2.4
+tzdata==2026.5; sys_platform != "linux"
+tzdata==2026.6; sys_platform == "linux"

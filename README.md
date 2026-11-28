@@ -155,9 +155,11 @@ Only uncomment and configure these variables when the browser must access the ba
 
 ```bash
 cd dashboard
-npm install
+npm ci
 npm run build
 ```
+
+Frontend install and build commands run from the `dashboard` directory, and `npm ci` uses the repository's `package-lock.json` for locked dependency versions. When adding or upgrading dependencies, commit the corresponding `package.json` and `package-lock.json` changes together.
 
 Build output is always written to `app/static/dashboard/`. Copy or publish those assets to the independent static server afterward.
 
@@ -175,7 +177,7 @@ In a second terminal, enter `dashboard`. Install dependencies on the first run, 
 
 ```bash
 cd dashboard
-npm install
+npm ci
 npm run serve
 ```
 

@@ -48,7 +48,7 @@ from app.core.utils.dispatcher.terminal_watch_snapshot import append_terminal_wa
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.agent_work import AgentWorkSpec
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyMode, BackgroundTaskReplyStatus, BackgroundTaskStatus
-from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
+from app.models.message import InternalConversationSummary, InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile, ProfileConfig
 from app.models.session import ChatSession
 from app.models.session_event import SessionEvent
@@ -510,18 +510,30 @@ async def test_terminal_auto_watch_background_survives_snapshot_and_renewal(
         assert renewed_terminal["purpose"] == purpose
         assert later_request_content not in json.dumps(renewed_terminal, ensure_ascii=False)
 
-        summary_base = '<conversation_summary id="terminal-background-summary">compressed history</conversation_summary>'
-        summary_message = InternalMessage(role=MessageRole.ASSISTANT, content=summary_base)
+        summary_base = "compressed history"
+        summary_message = InternalMessage(
+            role=MessageRole.USER,
+            content="preserved original request",
+            conversation_summary=InternalConversationSummary(
+                through_message_id=10,
+                content=summary_base,
+            ),
+        )
         original_request_snapshot = request_message.model_dump(mode="json")
+        original_summary_snapshot = summary_message.model_dump(mode="json")
         compressed_messages = append_terminal_watch_snapshot([request_message, summary_message], renewed_snapshot)
         assert is_context_summary_message(summary_message)
         assert is_context_summary_message(compressed_messages[1])
         assert compressed_messages[0].content == request_content
+        assert compressed_messages[1].content == "preserved original request"
         assert request_message.model_dump(mode="json") == original_request_snapshot
-        assert summary_message.content == summary_base
-        assert compressed_messages[1].content == f"{summary_base}\n\n{renewed_snapshot}"
+        assert summary_message.model_dump(mode="json") == original_summary_snapshot
 
-        compressed_snapshot = compressed_messages[1].content[len(summary_base) + 2 :]
+        summary_meta = compressed_messages[1].conversation_summary
+        assert summary_meta is not None
+        assert summary_meta.content == f"{summary_base}\n\n{renewed_snapshot}"
+
+        compressed_snapshot = summary_meta.content[len(summary_base) + 2 :]
         compressed_payload = json.loads(compressed_snapshot[len(expected_snapshot_open) : -len(expected_snapshot_close)])
         compressed_terminal = next(item for item in compressed_payload["terminals"] if item["terminal_session_id"] == TERMINAL_SESSION_ID)
         assert compressed_terminal["request_context"] == expected_request_context

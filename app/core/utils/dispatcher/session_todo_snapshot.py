@@ -4,7 +4,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.todo import session_todo_crud
-from app.core.utils.context_messages import is_context_summary_message
 from app.core.utils.dispatcher import terminal_watch_snapshot
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole, MessageType
@@ -137,17 +136,27 @@ def append_session_todo_snapshot(
     if not snapshot:
         return updated
 
-    target = next(
-        (message for message in reversed(updated) if message.role == MessageRole.TOOL and isinstance(message.content, str)),
-        None,
-    )
-    if target is None:
-        target = next((message for message in updated if is_context_summary_message(message)), None)
-    if target is None or not isinstance(target.content, str):
-        return updated
+    target = None
+    for message in reversed(updated):
+        if message.role != MessageRole.TOOL:
+            continue
+        if not isinstance(message.content, str):
+            continue
+        target = message
+        break
+    if target is not None:
+        base_content = strip_session_todo_snapshot(target.content) or ""
+        target.content = f"{base_content}\n\n{snapshot}" if base_content else snapshot
+    else:
+        for message in updated:
+            if message.conversation_summary is not None:
+                target = message
+                break
+        if target is None:
+            return updated
 
-    base_content = strip_session_todo_snapshot(target.content) or ""
-    target.content = f"{base_content}\n\n{snapshot}" if base_content else snapshot
+        base_content = strip_session_todo_snapshot(target.conversation_summary.content) or ""
+        target.conversation_summary.content = f"{base_content}\n\n{snapshot}" if base_content else snapshot
     return updated
 
 
@@ -166,10 +175,18 @@ async def persist_session_todo_snapshot_on_tool_results(
     tool_results: list[InternalMessage],
     commit: bool = True,
 ) -> str | None:
-    target = next(
-        (message for message in reversed(tool_results) if message.role == MessageRole.TOOL and isinstance(message.id, int) and not isinstance(message.id, bool) and isinstance(message.content, str)),
-        None,
-    )
+    target = None
+    for message in reversed(tool_results):
+        if message.role != MessageRole.TOOL:
+            continue
+        if not isinstance(message.id, int):
+            continue
+        if isinstance(message.id, bool):
+            continue
+        if not isinstance(message.content, str):
+            continue
+        target = message
+        break
     if target is None:
         return None
 

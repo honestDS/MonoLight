@@ -61,11 +61,11 @@ from app.core.dispatchers.dispatcher import ChatDispatcher
 from app.core.exceptions import LLMContextLengthException, ServerException
 from app.core.i18n import t
 from app.core.profile.deletion import build_profile_deletion_impact, execute_profile_deletion
-from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT, AUDIT_TASK_AUTHORIZATION_PROMPT, CONTEXT_SUMMARY_WRAPPER, SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
+from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT, AUDIT_TASK_AUTHORIZATION_PROMPT, SCHEDULED_TASK_TRIGGER_EXECUTION_GUIDANCE_PROMPT
 from app.core.session_reply_queue.executor_resume import restore_interactive_tool_replies
 from app.core.tools.scheduled_tasks import ManageScheduledTasksExecutor
-from app.core.utils.context_summary import ContextSummaryTriggerMode
-from app.core.utils.context_summary.user_message_block import append_covered_user_message, split_covered_user_message
+from app.core.utils.context_summary import ContextSummaryState, ContextSummaryTriggerMode
+from app.core.utils.context_summary.user_message_block import append_covered_user_message
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.time import get_local_time
@@ -4684,10 +4684,10 @@ async def test_scheduled_agent_work_context_overflow_checkpoint_resume(
     worker_id = f"scheduled-context-overflow-worker-{checkpoint_kind}"
     work_id: int
     chat_calls = 0
-    chat_summaries: list[str] = []
+    chat_summaries: list[dict[str, Any]] = []
     summary_calls = 0
     summary_request_tokens: list[int] = []
-    persisted_summary: str | None = None
+    persisted_summary: dict[str, Any] | None = None
 
     def assert_main_context_isolated(messages: list[InternalMessage]) -> None:
         serialized = json.dumps([message.model_dump(mode="json") for message in messages], ensure_ascii=False)
@@ -4696,24 +4696,33 @@ async def test_scheduled_agent_work_context_overflow_checkpoint_resume(
     def request_tokens(messages: list[InternalMessage], model_id: str, kwargs: dict[str, Any]) -> int:
         return estimate_request_context_tokens(messages, kwargs.get("tools"), model_id=model_id, protocol=kwargs["protocol"])
 
-    def get_summary_content(messages: list[InternalMessage]) -> str:
+    def get_summary_content(messages: list[InternalMessage]) -> dict[str, Any]:
         for message in messages:
-            if message.role != MessageRole.USER or not isinstance(message.content, str):
+            if message.role != MessageRole.USER:
                 continue
-            content = message.content
-            if not content.startswith("<conversation_summary"):
-                try:
-                    content = json.loads(content).get("user_message")
-                except json.JSONDecodeError:
-                    continue
-            if isinstance(content, str) and content.startswith("<conversation_summary"):
-                return content
+            if message.conversation_summary is not None:
+                return {
+                    "conversation_summary": message.conversation_summary.content,
+                    "user_message": message.content,
+                }
+            if not isinstance(message.content, str):
+                continue
+            try:
+                payload = json.loads(message.content)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict) or "conversation_summary" not in payload or "user_message" not in payload:
+                continue
+            return {
+                "conversation_summary": payload["conversation_summary"],
+                "user_message": payload["user_message"],
+            }
         raise AssertionError("compressed summary is missing from the request")
 
-    def covered_user_content(summary: str) -> str:
-        _model_summary, covered = split_covered_user_message(summary.split(">\n", 1)[1].rsplit("\n</conversation_summary>", 1)[0])
-        assert covered is not None
-        return covered.content
+    def covered_user_content(summary: dict[str, Any]) -> str:
+        content = summary["user_message"]
+        assert isinstance(content, str)
+        return content
 
     async def mock_generate(**kwargs: Any) -> InternalResponse:
         nonlocal chat_calls, persisted_summary, summary_calls
@@ -4764,6 +4773,18 @@ async def test_scheduled_agent_work_context_overflow_checkpoint_resume(
             raise LLMContextLengthException(provider_message="scheduled task context length exceeded")
 
         summary = get_summary_content(messages)
+        assert summary == {
+            "conversation_summary": "库存核对摘要已生成",
+            "user_message": task_instruction,
+        }
+        assert first_user_payload["conversation_summary"] == summary["conversation_summary"]
+        assert first_user_payload["user_message"] == summary["user_message"]
+        assert "through_message_id" not in first_user_payload
+        assert "covered_user_message_id" not in first_user_payload
+        assert str(trigger_message.id) not in json.dumps(
+            {key: first_user_payload[key] for key in ("conversation_summary", "user_message")},
+            ensure_ascii=False,
+        )
         chat_summaries.append(summary)
         if chat_calls == 2:
             async with session_factory() as checkpoint_db:
@@ -4828,16 +4849,19 @@ async def test_scheduled_agent_work_context_overflow_checkpoint_resume(
                     content=task_instruction,
                 )
                 assert existing_summary is not None
-                checkpoint_messages = [
-                    system_message,
-                    InternalMessage(
+                summary_message = ContextSummaryState(
+                    content=existing_summary,
+                    message_id=trigger_message.id,
+                    covered_user_request=InternalMessage(
                         role=MessageRole.USER,
-                        content=CONTEXT_SUMMARY_WRAPPER.format(through_message_id=trigger_message.id, content=existing_summary),
+                        content=task_instruction,
                         environment_prompt=seed_environment_prompt,
                         guidance_prompt=expected_platform_guidance,
                         execution_guidance=expected_execution_guidance,
                     ),
-                ]
+                ).as_message()
+                assert summary_message is not None
+                checkpoint_messages = [system_message, summary_message]
 
             checkpoint = {
                 "messages": [message.model_dump(mode="json", exclude_none=True) for message in checkpoint_messages],
@@ -4874,6 +4898,10 @@ async def test_scheduled_agent_work_context_overflow_checkpoint_resume(
     assert len(summary_request_tokens) == summary_calls
     assert persisted_summary is not None
     assert chat_summaries == [persisted_summary, persisted_summary]
+    assert persisted_summary == {
+        "conversation_summary": "库存核对摘要已生成",
+        "user_message": task_instruction,
+    }
     assert covered_user_content(persisted_summary) == task_instruction
 
     async with session_factory() as verification_db:
@@ -4994,9 +5022,11 @@ async def test_scheduled_task_context_overflow_routes_fallback_and_persists_noti
         assert trigger_message is not None and trigger_message.id == trigger_id
         existing_summary = append_covered_user_message("已有简短摘要", message_id=trigger_message.id, content=trigger_message.content)
         assert existing_summary is not None
+        summary_message = ContextSummaryState(content=existing_summary, message_id=trigger_message.id).as_message()
+        assert summary_message is not None
         checkpoint_messages = [
             InternalMessage(role=MessageRole.SYSTEM, content="定时任务执行上下文。"),
-            InternalMessage(role=MessageRole.USER, content=CONTEXT_SUMMARY_WRAPPER.format(through_message_id=trigger_message.id, content=existing_summary)),
+            summary_message,
         ]
         checkpoint = {
             "messages": [message.model_dump(mode="json", exclude_none=True) for message in checkpoint_messages],

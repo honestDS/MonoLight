@@ -13,7 +13,7 @@ from app.core.utils.dispatcher.terminal_watch_snapshot import (
     strip_terminal_watch_snapshots,
 )
 from app.models.background_task import BackgroundTaskReplyStatus, BackgroundTaskStatus
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import InternalConversationSummary, InternalMessage, MessageRole
 
 _SNAPSHOT_OPEN = "<current_terminal_watch_snapshot>"
 _SNAPSHOT_CLOSE = "</current_terminal_watch_snapshot>"
@@ -200,14 +200,21 @@ def test_strip_removes_only_valid_snapshots_from_tools_and_summaries():
     valid = _old_snapshot()
     invalid = f"{_SNAPSHOT_OPEN}{json.dumps({'type': 'other', 'terminals': []})}{_SNAPSHOT_CLOSE}"
     tool_base = '{"event":"output"}'
-    summary_base = '<conversation_summary id="summary-1">previous summary</conversation_summary>'
     user_content = f"user text\n\n{valid}"
+    summary_message = InternalMessage(
+        role=MessageRole.USER,
+        content="preserved original request",
+        conversation_summary=InternalConversationSummary(
+            through_message_id=10,
+            content=f"previous summary\n\n{valid}",
+        ),
+    )
     messages = [
         InternalMessage(role=MessageRole.USER, content=user_content),
         InternalMessage(role=MessageRole.TOOL, content=f"{tool_base}\n\n{valid}"),
         InternalMessage(role=MessageRole.TOOL, content=f"{tool_base}\n\n{invalid}"),
         InternalMessage(role=MessageRole.ASSISTANT, content=f"assistant\n\n{valid}"),
-        InternalMessage(role=MessageRole.ASSISTANT, content=f"{summary_base}\n\n{valid}"),
+        summary_message,
     ]
     original = [message.model_dump(mode="json") for message in messages]
 
@@ -217,33 +224,56 @@ def test_strip_removes_only_valid_snapshots_from_tools_and_summaries():
     assert stripped[1].content == tool_base
     assert stripped[2].content == f"{tool_base}\n\n{invalid}"
     assert stripped[3].content == f"assistant\n\n{valid}"
-    assert stripped[4].content == summary_base
+    assert stripped[4].role == MessageRole.USER
+    assert stripped[4].content == "preserved original request"
+    assert stripped[4].conversation_summary is not None
+    assert stripped[4].conversation_summary.content == "previous summary"
     assert [message.model_dump(mode="json") for message in messages] == original
 
 
 def test_append_strips_old_targets_without_mutating_inputs_or_user_messages():
     old = _old_snapshot()
     new = _old_snapshot("new")
-    summary_base = '<conversation_summary id="summary-1">previous summary</conversation_summary>'
     tool_base = '{"event":"output"}'
     user_content = f"user request\n\n{old}"
+    summary_message = InternalMessage(
+        role=MessageRole.USER,
+        content="preserved original request",
+        conversation_summary=InternalConversationSummary(
+            through_message_id=10,
+            content=f"previous summary\n\n{old}",
+        ),
+    )
     messages = [
         InternalMessage(role=MessageRole.USER, content=user_content),
-        InternalMessage(role=MessageRole.ASSISTANT, content=f"{summary_base}\n\n{old}"),
+        summary_message,
         InternalMessage(role=MessageRole.TOOL, content=f"{tool_base}\n\n{old}"),
     ]
     original = [message.model_dump(mode="json") for message in messages]
-    summary_only = InternalMessage(role=MessageRole.ASSISTANT, content=f"{summary_base}\n\n{old}")
+    summary_only = InternalMessage(
+        role=MessageRole.USER,
+        content="preserved original request",
+        conversation_summary=InternalConversationSummary(
+            through_message_id=10,
+            content=f"previous summary\n\n{old}",
+        ),
+    )
     summary_only_original = summary_only.model_dump(mode="json")
 
     updated = append_terminal_watch_snapshot(messages, new)
     summary_updated = append_terminal_watch_snapshot([summary_only], new)
 
     assert updated[0].content == user_content
-    assert updated[1].content == summary_base
+    assert updated[1].role == MessageRole.USER
+    assert updated[1].content == "preserved original request"
+    assert updated[1].conversation_summary is not None
+    assert updated[1].conversation_summary.content == "previous summary"
     assert updated[2].content == f"{tool_base}\n\n{new}"
     assert [message.model_dump(mode="json") for message in messages] == original
-    assert summary_updated[0].content == f"{summary_base}\n\n{new}"
+    assert summary_updated[0].role == MessageRole.USER
+    assert summary_updated[0].content == "preserved original request"
+    assert summary_updated[0].conversation_summary is not None
+    assert summary_updated[0].conversation_summary.content == f"previous summary\n\n{new}"
     assert summary_only.model_dump(mode="json") == summary_only_original
 
 

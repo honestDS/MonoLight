@@ -319,10 +319,18 @@ async def _ensure_context_summary(
     state = await get_context_summary_state(db, session_id=session_id, uid=uid)
     summary_message = state.as_message()
     if summary_message is not None:
-        live_summary = next(
-            (message for message in reversed(summary_source_messages) if message.id is None and message.role == MessageRole.USER and message.content == summary_message.content),
-            None,
-        )
+        live_summary = None
+        for message in reversed(summary_source_messages):
+            if message.id is not None:
+                continue
+            if message.role != MessageRole.USER:
+                continue
+            if message.content != summary_message.content:
+                continue
+            if message.conversation_summary != summary_message.conversation_summary:
+                continue
+            live_summary = message
+            break
         if live_summary is not None:
             state = replace(state, covered_user_request=live_summary)
 

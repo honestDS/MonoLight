@@ -397,11 +397,31 @@ async def test_user_checkpoint_uses_completed_tool_batch_boundary_and_preserves_
         protected_tool_call_ids=test_case["protected_tool_call_ids"],
     )
 
-    summary_message = next(message for message in result if isinstance(message.content, str) and message.content.startswith("<conversation_summary "))
+    summary_message = next(message for message in result if message.conversation_summary is not None)
     retained_messages = [message for message in result if message.role != MessageRole.SYSTEM and message is not summary_message]
     assert [message.id for message in retained_messages] == test_case["expected_retained_ids"]
     assert [tool_call.id for message in retained_messages for tool_call in message.tool_calls or []] == test_case["expected_retained_call_ids"]
     assert [message.tool_call_id for message in retained_messages if message.role == MessageRole.TOOL] == test_case["expected_retained_result_ids"]
+
+    summary_index = result.index(summary_message)
+    materialized_result = materialize_user_environment_prompts([message.model_copy(deep=True) for message in result])
+    materialized_summary = materialized_result[summary_index]
+    assert isinstance(materialized_summary.content, str)
+    materialized_payload = json.loads(materialized_summary.content)
+    assert "short model summary" in materialized_payload["conversation_summary"]
+    assert '<current_session_todo_snapshot>{"revision":7,"todos":[{"content":"latest todo","status":"in_progress"}]}</current_session_todo_snapshot>' in materialized_payload["conversation_summary"]
+    assert "through_message_id" not in materialized_payload
+    assert "covered_user_message_id" not in materialized_payload
+    if test_case["expected_covered_user_message_id"] is None:
+        assert materialized_payload["user_message"] is None
+    else:
+        assert materialized_payload["user_message"] == test_case["expected_covered_user_message_content"]
+
+    original_messages_by_id = {message.id: message for message in parsed_messages if message.id is not None}
+    for message in result[summary_index + 1 :]:
+        if message.role != MessageRole.USER or message.id is None:
+            continue
+        assert message.content == original_messages_by_id[message.id].content
 
     session = await db_session.get(ChatSession, "session-1")
     assert session is not None
@@ -493,11 +513,16 @@ async def test_tool_batch_checkpoint_refines_with_covered_user_runtime_context(
         force=True,
     )
 
-    summary_message = next(message for message in result if message.role == MessageRole.USER)
-    assert "refined verified evidence" in summary_message.content
-    materialized_summary = materialize_user_environment_prompts([summary_message])[0]
+    summary_message = next(message for message in result if message.conversation_summary is not None)
+    summary_meta = summary_message.conversation_summary
+    assert summary_meta is not None
+    expected_summary = 'refined verified evidence\n\n<current_session_todo_snapshot>{"revision":7,"todos":[{"content":"latest todo","status":"in_progress"}]}</current_session_todo_snapshot>'
+    assert summary_meta.content == expected_summary
+    assert summary_message.content == "processed request"
+    materialized_summary = materialize_user_environment_prompts([summary_message.model_copy(deep=True)])[0]
     materialized_payload = json.loads(materialized_summary.content)
-    assert "refined verified evidence" in materialized_payload["user_message"]
+    assert materialized_payload["conversation_summary"] == expected_summary
+    assert materialized_payload["user_message"] == "processed request"
     assert materialized_payload["environment"]["runtime_context"] == fixed_environment
     assert materialized_payload["platform_constraints"] == "platform constraint"
     assert materialized_payload["platform_guidance"] == "guidance prompt"
@@ -875,7 +900,9 @@ async def test_checkpoint_uses_fixed_upper_and_preserves_messages_after_new_summ
         *([MessageRole.TOOL] if trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE else []),
         MessageRole.USER,
     ]
-    assert "新累计总结" in result[1].content
+    summary_meta = result[1].conversation_summary
+    assert summary_meta is not None
+    assert "新累计总结" in summary_meta.content
     assert result[-1].id == 4
 
 
@@ -915,8 +942,10 @@ async def test_checkpoint_reuses_persisted_snapshot_and_preserves_bounded_tool_b
         tools=None,
     )
 
-    summary_message = next(message for message in result if isinstance(message.content, str) and message.content.startswith("<conversation_summary "))
-    assert todo_snapshot in summary_message.content
+    summary_message = next(message for message in result if message.conversation_summary is not None)
+    summary_meta = summary_message.conversation_summary
+    assert summary_meta is not None
+    assert todo_snapshot in summary_meta.content
     retained_tool = next(message for message in result if message.role == MessageRole.TOOL)
     fixed_tool = next(message for message in captured["fixed_request_messages"] if message.role == MessageRole.TOOL)
     assert retained_tool.content == retained_tool_content
@@ -1024,7 +1053,9 @@ async def test_checkpoint_keeps_an_entire_merged_user_batch_after_its_earliest_p
     assert [message.content for message in captured["fixed_request_messages"]] == ["系统提示", merged_content]
     assert [message.id for message in captured["fixed_request_messages"]] == [None, 4]
     assert [message.id for message in result] == [None, None, 4]
-    assert "旧总结" in result[1].content
+    summary_meta = result[1].conversation_summary
+    assert summary_meta is not None
+    assert "旧总结" in summary_meta.content
     assert result[-1].content == merged_content
     assert all(message.content != "追加A" for message in result)
 

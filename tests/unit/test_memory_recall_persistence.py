@@ -9,6 +9,7 @@ from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.tools.longterm_memory import (
     MANAGE_MEMORY_AND_KNOWLEDGE_TOOL_NAME,
 )
+from app.core.utils.context_summary.common import ContextSummaryState
 from app.models.channel import ChannelConfig
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole, MessageType
 from tests.memory_recall_support import memory_recall_payload
@@ -304,7 +305,7 @@ async def test_generate_commits_before_network_and_discards_stream_content(monke
 
 @pytest.mark.asyncio
 async def test_prepare_request_messages_exposes_only_memory_tool_without_triggering_new_summary(monkeypatch):
-    summary_message = InternalMessage(role=MessageRole.USER, content='<conversation_summary through_message_id="5">summary result</conversation_summary>')
+    summary_message = ContextSummaryState(content="summary result", message_id=5).as_message()
     current_message = InternalMessage(id=10, role=MessageRole.USER, content="memory query secret")
     context = _context(messages=[summary_message, current_message])
     trim_calls = []
@@ -341,7 +342,10 @@ async def test_prepare_request_messages_exposes_only_memory_tool_without_trigger
     assert request_messages[0].content == request_module.LONGTERM_MEMORY_RECALL_PRECHECK_PROMPT
     assert len(request_messages) == 3
     assert request_messages[1].role == MessageRole.USER
-    assert request_messages[1].content == summary_message.content
+    assert json.loads(request_messages[1].content) == {
+        "user_message": None,
+        "conversation_summary": "summary result",
+    }
     assert request_messages[2].role == MessageRole.USER
     assert request_messages[2].content == "memory query secret"
     assert request_messages[2].environment_prompt is None

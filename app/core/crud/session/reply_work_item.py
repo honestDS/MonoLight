@@ -1322,7 +1322,12 @@ class CRUDSessionReplyWorkItem:
         if blocking_sequence is not None:
             conditions.append(SessionReplyWorkItem.sequence_no < blocking_sequence)
         result = await db.execute(select(SessionReplyWorkItem).where(and_(*conditions)).order_by(SessionReplyWorkItem.sequence_no))
-        return list(result.scalars().all())
+        contiguous: list[SessionReplyWorkItem] = []
+        for item in result.scalars().all():
+            if item.id != work.id and item.input_message_ids:
+                break
+            contiguous.append(item)
+        return contiguous
 
 
 session_reply_work_item_crud = CRUDSessionReplyWorkItem()

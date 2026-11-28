@@ -151,9 +151,11 @@ Dashboard、API 和 WebSocket 由同一 Web 服务提供，浏览器访问时保
 
 ```bash
 cd dashboard
-npm install
+npm ci
 npm run build
 ```
+
+前端安装和构建命令须在 `dashboard` 目录执行；`npm ci` 会按仓库中的 `package-lock.json` 安装锁定版本。新增或升级依赖时，应同步提交 `package.json` 和 `package-lock.json` 的相关变更。
 
 构建产物固定输出到 `app/static/dashboard/`，随后将其复制或发布到独立静态服务器。
 
@@ -171,7 +173,7 @@ python start.py
 
 ```bash
 cd dashboard
-npm install
+npm ci
 npm run serve
 ```
 
